@@ -1,0 +1,19 @@
+when:
+  branch:
+    - main
+  event:
+    - pull_request
+
+matrix:
+  GO_VERSION:
+    - 1.25
+    - 1.26
+
+steps:
+  - name: test
+    image: golang:${GO_VERSION}-alpine
+    pull: true
+    environment:
+      CGO_ENABLED: 0
+    commands:
+      - go test -v ./...

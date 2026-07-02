@@ -1,0 +1,8 @@
+{
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.patterns": {
+    "*.go": "${capture}_test.go,${capture}_windows.go,${capture}_other.go,${capture}_linux.go",
+    "go.mod": "go.sum"
+  },
+  "go.lintTool": "golangci-lint"
+}
