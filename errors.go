@@ -13,7 +13,6 @@ import (
 	"azugo.io/azugo"
 	"azugo.io/core/http"
 	"github.com/goccy/go-json"
-	"github.com/valyala/fasthttp"
 )
 
 var (
@@ -106,7 +105,7 @@ func NewOAuthAuthenticateError(code ErrorCode, description, realm, scope string,
 		Description: description,
 		realm:       realm,
 		scope:       scope,
-		status:      fasthttp.StatusUnauthorized,
+		status:      http.StatusUnauthorized,
 	}
 
 	for _, opt := range opts {
@@ -123,19 +122,19 @@ func NewOAuthErrorFrom(err error) error {
 		return nil
 	case errors.Is(err, contract.ErrInvalidCredentials):
 		// Invalid username and/or password.
-		return newOAuthErrorWrapped(fasthttp.StatusBadRequest, ErrCodeInvalidGrant, "invalid credentials", err)
+		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidGrant, "invalid credentials", err)
 	case errors.Is(err, contract.ErrUserNotFound), errors.Is(err, session.ErrNotFound),
 		errors.Is(err, token.ErrInvalidToken), errors.Is(err, token.ErrUnexpectedTokenType):
 		// Bad or expired token.
-		return newOAuthErrorWrapped(fasthttp.StatusUnauthorized, ErrCodeInvalidToken, "invalid token", err)
+		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeInvalidToken, "invalid token", err)
 	case errors.Is(err, client.ErrNotFound):
 		// Unknown/invalid client or it's parameters.
-		return newOAuthErrorWrapped(fasthttp.StatusUnauthorized, ErrCodeInvalidClient, "invalid client", err)
+		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client", err)
 	case errors.Is(err, contract.ErrUserAlreadyExists):
 		// Account registration conflict.
-		return newOAuthErrorWrapped(fasthttp.StatusConflict, ErrCodeInvalidRequest, "account already exists", err)
+		return newOAuthErrorWrapped(http.StatusConflict, ErrCodeInvalidRequest, "account already exists", err)
 	default:
-		return newOAuthErrorWrapped(fasthttp.StatusInternalServerError, ErrCodeServerError, "internal error", err)
+		return newOAuthErrorWrapped(http.StatusInternalServerError, ErrCodeServerError, "internal error", err)
 	}
 }
 
@@ -170,7 +169,7 @@ func (e *OAuthError) SafeError() string {
 // ErrorHeaders sets the WWW-Authenticate: Bearer header.
 func (e *OAuthError) ErrorHeaders() iter.Seq2[string, string] {
 	return func(yield func(string, string) bool) {
-		if e.status != fasthttp.StatusUnauthorized {
+		if e.status != http.StatusUnauthorized {
 			return
 		}
 
@@ -208,13 +207,13 @@ func (e *OAuthError) ErrorHeaders() iter.Seq2[string, string] {
 			b.WriteByte('"')
 		}
 
-		yield("WWW-Authenticate", b.String())
+		yield(http.HeaderWWWAuthenticate, b.String())
 	}
 }
 
 // MarshalError renders the RFC 6749 JSON response.
 func (e *OAuthError) MarshalError(contentType string) ([]byte, string, bool) {
-	if !strings.HasPrefix(contentType, azugo.ContentTypeJSON) {
+	if !strings.HasPrefix(contentType, http.ContentTypeJSON) {
 		return nil, "", false
 	}
 
@@ -233,5 +232,5 @@ func (e *OAuthError) MarshalError(contentType string) ([]byte, string, bool) {
 		return nil, "", false
 	}
 
-	return data, azugo.ContentTypeJSON, true
+	return data, http.ContentTypeJSON, true
 }

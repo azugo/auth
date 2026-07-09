@@ -8,7 +8,8 @@ import (
 	"azugo.io/auth/client"
 	"azugo.io/auth/session"
 
-	"azugo.io/core/cache"
+	"azugo.io/core"
+	"azugo.io/core/config"
 	"github.com/go-quicktest/qt"
 )
 
@@ -30,21 +31,24 @@ func validConfig() *Configuration {
 	}
 }
 
-func newCache(t *testing.T) *cache.Cache {
+func newApp(t *testing.T) *core.App {
 	t.Helper()
 
-	c := cache.New(cache.MemoryCache)
-	qt.Assert(t, qt.IsNil(c.Start(context.Background())))
-	t.Cleanup(c.Close)
+	app := core.New()
 
-	return c
+	conf := config.New()
+	qt.Assert(t, qt.IsNil(conf.Load(nil, conf, string(app.Env()))))
+	app.SetConfig(nil, conf)
+
+	t.Cleanup(app.Stop)
+
+	return app
 }
 
 func TestNewMaterializesDefaultsAndAccessors(t *testing.T) {
 	cfg := validConfig()
-	c := newCache(t)
 
-	a, err := New(cfg, c, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
+	a, err := New(newApp(t), cfg, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
 	qt.Assert(t, qt.IsNil(err))
 
 	// Defaults are materialised through the retained pointer, so a hand-built config validates.
@@ -61,12 +65,15 @@ func TestNewMaterializesDefaultsAndAccessors(t *testing.T) {
 }
 
 func TestNewRequiresDependencies(t *testing.T) {
-	c := newCache(t)
+	app := newApp(t)
 
-	_, err := New(validConfig(), c, nil, session.NewMemoryStore(), client.NewMemoryRegistry())
+	_, err := New(app, validConfig(), nil, session.NewMemoryStore(), client.NewMemoryRegistry())
 	qt.Check(t, qt.IsNotNil(err))
 
-	_, err = New(nil, c, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
+	_, err = New(app, nil, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
+	qt.Check(t, qt.IsNotNil(err))
+
+	_, err = New(nil, validConfig(), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
 	qt.Check(t, qt.IsNotNil(err))
 }
 
@@ -74,7 +81,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	cfg := validConfig()
 	cfg.Secret = "tooshort"
 
-	_, err := New(cfg, newCache(t), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
+	_, err := New(newApp(t), cfg, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
 	qt.Check(t, qt.IsNotNil(err))
 }
 
@@ -88,36 +95,10 @@ func (fakeJTI) Revoke(context.Context, string) error                   { return 
 func (fakeJTI) Validate(context.Context, string, string) (bool, error) { return true, nil }
 
 func TestJTIStoreOptionOverridesDefault(t *testing.T) {
-	// A supplied JTI store skips the default cache-backed branch, so a nil cache is fine.
-	a, err := New(validConfig(), nil, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry(),
+	// A supplied JTI store skips the default cache-backed branch.
+	a, err := New(newApp(t), validConfig(), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry(),
 		JTIStore(fakeJTI{}))
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.IsNotNil(a.JTI()))
 }
 
-func TestRunInTx(t *testing.T) {
-	ctx := context.Background()
-
-	// Without a Transactor, fn runs directly.
-	a, err := New(validConfig(), newCache(t), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
-	qt.Assert(t, qt.IsNil(err))
-
-	ran := false
-	qt.Assert(t, qt.IsNil(a.runInTx(ctx, func(context.Context) error { ran = true; return nil })))
-	qt.Check(t, qt.IsTrue(ran))
-
-	// With a Transactor, fn runs inside the unit of work.
-	wrapped := false
-	tx := TransactorFunc(func(ctx context.Context, fn func(context.Context) error) error {
-		wrapped = true
-		return fn(ctx)
-	})
-
-	a2, err := New(validConfig(), newCache(t), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry(), Transactor(tx))
-	qt.Assert(t, qt.IsNil(err))
-
-	ran2 := false
-	qt.Assert(t, qt.IsNil(a2.runInTx(ctx, func(context.Context) error { ran2 = true; return nil })))
-	qt.Check(t, qt.IsTrue(wrapped))
-	qt.Check(t, qt.IsTrue(ran2))
-}

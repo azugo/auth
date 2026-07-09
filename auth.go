@@ -13,7 +13,7 @@ import (
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
-	"azugo.io/core/cache"
+	"azugo.io/core"
 	"azugo.io/core/validation"
 )
 
@@ -56,14 +56,20 @@ func (f TransactorFunc) RunInTx(ctx context.Context, fn func(ctx context.Context
 
 // Auth is the transport-free authentication service.
 type Auth struct {
-	cfg      *Configuration
-	cache    *cache.Cache
+	app      *core.App
+	config   *Configuration
 	users    UserProvider
 	sessions session.Store
 	clients  client.Registry
 	jti      jti.Store
-	tx       TxRunner
 	codec    *token.Codec // seals/opens PASETO tokens; per-instance key cache
+
+	// Cookie provides session cookie attribute helpers.
+	Cookie CookieCtx
+	// Issuer provides OIDC issuer resolution helpers.
+	Issuer IssuerCtx
+	// Transaction provides multi-write transaction helpers.
+	Transaction TransactionCtx
 }
 
 // Option configures an Auth instance at construction.
@@ -76,12 +82,16 @@ func JTIStore(store jti.Store) Option {
 
 // Transactor to allow to run multi-write handler sequences so they can be made atomic.
 func Transactor(t TxRunner) Option {
-	return func(a *Auth) { a.tx = t }
+	return func(a *Auth) { a.Transaction.tx = t }
 }
 
 // New creates an Auth instance.
-func New(cfg *Configuration, c *cache.Cache, users UserProvider, sessions session.Store, clients client.Registry, opts ...Option) (*Auth, error) {
-	if cfg == nil {
+func New(app *core.App, config *Configuration, users UserProvider, sessions session.Store, clients client.Registry, opts ...Option) (*Auth, error) {
+	if app == nil {
+		return nil, errors.New("app is required")
+	}
+
+	if config == nil {
 		return nil, errors.New("configuration is required")
 	}
 
@@ -98,31 +108,31 @@ func New(cfg *Configuration, c *cache.Cache, users UserProvider, sessions sessio
 	}
 
 	// Set defaults if not set
-	setDefaults(cfg)
+	setDefaults(config)
 
-	if err := cfg.Validate(validation.New()); err != nil {
+	if err := config.Validate(validation.New()); err != nil {
 		return nil, fmt.Errorf(" invalid configuration: %w", err)
 	}
 
 	a := &Auth{
-		cfg:      cfg,
-		cache:    c,
+		app:      app,
+		config:   config,
 		users:    users,
 		sessions: sessions,
 		clients:  clients,
-		codec:    token.NewCodec(cfg),
+		codec:    token.NewCodec(config),
 	}
+
+	a.Cookie.config = config
+	a.Cookie.app = app
+	a.Issuer.config = config
 
 	for _, opt := range opts {
 		opt(a)
 	}
 
 	if a.jti == nil {
-		if c == nil {
-			return nil, errors.New("cache is required for the default JTI store")
-		}
-
-		store, err := jti.NewCacheStore(c)
+		store, err := jti.NewCacheStore(app.Cache())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create JTI store: %w", err)
 		}
@@ -155,15 +165,7 @@ func (a *Auth) JTI() jti.Store {
 
 // Config returns the auth Configuration.
 func (a *Auth) Config() *Configuration {
-	return a.cfg
-}
-
-func (a *Auth) runInTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	if a.tx == nil {
-		return fn(ctx)
-	}
-
-	return a.tx.RunInTx(ctx, fn)
+	return a.config
 }
 
 func setDefaults(cfg *Configuration) {

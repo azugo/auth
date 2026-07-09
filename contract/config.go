@@ -1,7 +1,6 @@
 package contract
 
 import (
-	"strings"
 	"time"
 
 	"azugo.io/core/config"
@@ -16,16 +15,21 @@ type Configuration struct {
 	// enabling zero-downtime rotation of Secret. New tokens are always sealed with Secret;
 	// decryption falls back to this.
 	FallbackSecrets []string `mapstructure:"fallback_secrets"`
-	Secure          bool     `mapstructure:"secure"`
-	SameSite        string   `mapstructure:"same_site" validate:"required,oneof=strict lax none"`
-	CookieName      string   `mapstructure:"cookie_name"` // default: "__session"
-	CookiePath      string   `mapstructure:"cookie_path"` // default: the auth mount prefix
+	// Secure pins the cookie Secure flag, defaults to secure.
+	Secure *bool `mapstructure:"secure"`
+	// SameSite pins the cookie SameSite mode, defaults to strict.
+	SameSite   string `mapstructure:"same_site" validate:"omitempty,oneof=strict lax none"`
+	CookieName string `mapstructure:"cookie_name"` // default: "__session"
+	CookiePath string `mapstructure:"cookie_path"` // default: base path + auth mount prefix (see CookieCtx.PathFor)
 	// LogoutInvalidatesCookie makes logout authoritative server-side (session + JTI revoked).
 	// Default true; only disable if a shared cookie must survive a single app's logout.
 	LogoutInvalidatesCookie bool          `mapstructure:"logout_invalidates_cookie"`
 	AccessTokenTTL          time.Duration `mapstructure:"access_token_ttl" validate:"required"` // default: 20m
 	SessionTTL              time.Duration `mapstructure:"session_ttl"      validate:"required"` // default: 8h
 	CodeTTL                 time.Duration `mapstructure:"code_ttl"`                             // authorization-code lifetime; default: 60s
+	// BaseURL pins the public base URL used to resolve the issuer and the default cookie
+	// path instead of deriving them from the incoming request (proxies, split origin).
+	BaseURL string `mapstructure:"base_url" validate:"omitempty,url"`
 	// Issuer is the OIDC issuer identifier (iss claim, discovery document base).
 	Issuer string `mapstructure:"issuer" validate:"omitempty,url"`
 	// Keys is the JWT/JWKS signing key set. Nil = introspect-only mode (no JWKS endpoint,
@@ -112,8 +116,6 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	secret, _ := config.LoadRemoteSecret("AUTH_SECRET")
 
 	v.SetDefault(prefix+".secret", secret)
-	v.SetDefault(prefix+".secure", true)
-	v.SetDefault(prefix+".same_site", "strict")
 	v.SetDefault(prefix+".cookie_name", "__session")
 	v.SetDefault(prefix+".logout_invalidates_cookie", true)
 	v.SetDefault(prefix+".access_token_ttl", 20*time.Minute)
@@ -135,6 +137,7 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".access_token_ttl", "AUTH_ACCESS_TOKEN_TTL")
 	_ = v.BindEnv(prefix+".session_ttl", "AUTH_SESSION_TTL")
 	_ = v.BindEnv(prefix+".code_ttl", "AUTH_CODE_TTL")
+	_ = v.BindEnv(prefix+".base_url", "AUTH_BASE_URL")
 	_ = v.BindEnv(prefix+".issuer", "AUTH_ISSUER")
 	_ = v.BindEnv(prefix+".throttle.enabled", "AUTH_THROTTLE_ENABLED")
 	_ = v.BindEnv(prefix+".throttle.max_attempts", "AUTH_THROTTLE_MAX_ATTEMPTS")
@@ -142,21 +145,6 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".throttle.lockout_ttl", "AUTH_THROTTLE_LOCKOUT_TTL")
 	_ = v.BindEnv(prefix+".throttle.mfa_resend_cooldown", "AUTH_THROTTLE_MFA_RESEND_COOLDOWN")
 	_ = v.BindEnv(prefix+".throttle.mfa_max_resends", "AUTH_THROTTLE_MFA_MAX_RESENDS")
-}
-
-// IssuerFor returns the effective OIDC issuer.
-func (c *Configuration) IssuerFor(baseURL, mountPath string) string {
-	if c.Issuer != "" {
-		return c.Issuer
-	}
-
-	base := strings.TrimRight(baseURL, "/")
-
-	if mount := strings.Trim(mountPath, "/"); mount != "" {
-		return base + "/" + mount
-	}
-
-	return base
 }
 
 // Validate validates the authentication configuration section.

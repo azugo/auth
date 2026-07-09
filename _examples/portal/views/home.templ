@@ -1,0 +1,12 @@
+package views
+
+templ Home(name string) {
+	@layout("Auth Portal Example") {
+		if name != "" {
+			<p>Signed in as <strong>{ name }</strong>.</p>
+		} else {
+			<p>You are not signed in.</p>
+			<p><a href="login">Sign in</a></p>
+		}
+	}
+}
