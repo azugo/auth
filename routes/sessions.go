@@ -9,7 +9,7 @@ import (
 	"azugo.io/core/http"
 )
 
-ype sessionResponse struct {
+type sessionResponse struct {
 	ID        string    `json:"id"`
 	ClientID  string    `json:"client_id"`
 	CreatedAt time.Time `json:"created_at"`
