@@ -37,14 +37,15 @@ func New(cmd *cobra.Command, version string) (*App, error) {
 		Name:                    "Example Portal",
 		Public:                  true,
 		AllowNoPrompt:           true,
-		GrantTypes:              []string{"password"},
+		GrantTypes:              []string{client.GrantTypePassword},
 		Scopes:                  []string{"openid", "profile"},
 		AllowedAuthMethods:      []string{client.AuthMethodPassword},
-		ResponseMode:            client.ResponseModeCookie,
+		ResponseMode:            client.ResponseModeRedirect,
 		TokenEndpointAuthMethod: client.TokenEndpointAuthNone,
 	})
 
-	au, err := auth.New(a.App, config.Auth, NewDemoUsers(), session.NewMemoryStore(), clients)
+	au, err := auth.New(a.App, config.Auth, NewDemoUsers(), session.NewMemoryStore(), clients,
+		auth.CookieScopeToBasePath())
 	if err != nil {
 		return nil, err
 	}

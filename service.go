@@ -1,0 +1,357 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"time"
+
+	"azugo.io/auth/client"
+	"azugo.io/auth/session"
+	"azugo.io/auth/token"
+
+	"azugo.io/core/http"
+	"azugo.io/core/paginator"
+)
+
+// CookieDirective describes how to set or clear the session cookie.
+//
+// A negative MaxAge deletes the cookie.
+type CookieDirective struct {
+	Name, Value, Path, Domain string
+	MaxAge                    int
+	Secure, HTTPOnly          bool
+	SameSite                  string
+}
+
+// LoginResult is returned by Login and Refresh based on client mode and configuration.
+type LoginResult struct {
+	Status      session.Status
+	Cookie      *CookieDirective
+	AccessToken string
+	ExpiresIn   int
+	Redirect    string
+}
+
+// LoginRequest carries the password-grant credentials and the request-derived values.
+type LoginRequest struct {
+	ClientID   string
+	Username   string
+	Password   string
+	ReturnTo   string
+	RequestTLS bool
+	BasePath   string
+	MountPath  string
+}
+
+// RefreshRequest carries the presented refresh token and the request-derived values.
+type RefreshRequest struct {
+	Token      string
+	ReturnTo   string
+	RequestTLS bool
+	BasePath   string
+	MountPath  string
+}
+
+// LogoutRequest carries the presented token and the request-derived values.
+type LogoutRequest struct {
+	Token      string
+	RequestTLS bool
+	BasePath   string
+	MountPath  string
+}
+
+// LogoutResult is returned by Logout.
+type LogoutResult struct {
+	ClearCookie *CookieDirective
+}
+
+// Login authenticates a password-grant request, creates an active session and returns the
+// directives the caller should apply.
+func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) {
+	cl, err := a.clients.GetClient(ctx, in.ClientID)
+	if err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	if !cl.GrantTypeAllowed(client.GrantTypePassword) || !cl.AuthMethodAllowed(client.AuthMethodPassword) {
+		return LoginResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeUnauthorizedClient, "client is not allowed to use the password grant")
+	}
+
+	info, err := a.users.Authenticate(ctx, in.Username, in.Password)
+	if err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	now := time.Now()
+	sess := &session.Session{
+		UserID:    info.ID,
+		ClientID:  cl.ID,
+		Scope:     info.Scope,
+		Status:    session.StatusActive,
+		CreatedAt: now,
+		LastSeen:  now,
+		ExpiresAt: now.Add(a.config.SessionTTL),
+	}
+
+	if err := a.sessions.Create(ctx, sess); err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	cookie, err := a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BasePath, in.MountPath)
+}
+
+// Refresh performs the portal's silent re-authentication.
+func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, error) {
+	if in.Token == "" {
+		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
+	}
+
+	claims, err := a.codec.DecodeAccess(in.Token)
+	if err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
+	}
+
+	if time.Now().Unix() >= claims.ExpiresAt {
+		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
+	}
+
+	sess, err := a.sessions.Get(ctx, claims.SessionID)
+	if err != nil || !sess.Active() {
+		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
+	}
+
+	cl, err := a.clients.GetClient(ctx, sess.ClientID)
+	if err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	jti, err := newJTI()
+	if err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	expiresAt := time.Now().Add(a.config.SessionTTL)
+	if expiresAt.After(sess.ExpiresAt) {
+		expiresAt = sess.ExpiresAt
+	}
+
+	rotated, err := a.jti.Rotate(ctx, claims.TokenID, jti, sess.ID, time.Until(expiresAt))
+	if err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	if !rotated {
+		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
+	}
+
+	_ = a.sessions.Touch(ctx, sess.ID)
+
+	cookie, err := a.codec.Encrypt(token.AccessClaims{
+		Type:      token.TypeSessionCookie,
+		SessionID: sess.ID,
+		TokenID:   jti,
+		IssuedAt:  time.Now().Unix(),
+		ExpiresAt: expiresAt.Unix(),
+	})
+	if err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BasePath, in.MountPath)
+}
+
+// Logout is the authoritative server-side logout.
+func (a *Auth) Logout(ctx context.Context, in LogoutRequest) (LogoutResult, error) {
+	clearCookie := &CookieDirective{
+		Name:     a.config.CookieName,
+		Path:     a.Cookie.Path(in.BasePath, in.MountPath),
+		MaxAge:   -1,
+		Secure:   a.Cookie.Secure(in.RequestTLS),
+		HTTPOnly: true,
+		SameSite: a.Cookie.SameSite(),
+	}
+
+	if !a.config.LogoutInvalidatesCookie || in.Token == "" {
+		return LogoutResult{ClearCookie: clearCookie}, nil
+	}
+
+	if claims, err := a.codec.DecodeAccess(in.Token); err == nil {
+		if err := a.sessions.Revoke(ctx, claims.SessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
+			return LogoutResult{}, NewOAuthErrorFrom(err)
+		}
+
+		if err := a.jti.Revoke(ctx, claims.TokenID); err != nil {
+			return LogoutResult{}, NewOAuthErrorFrom(err)
+		}
+	}
+
+	return LogoutResult{ClearCookie: clearCookie}, nil
+}
+
+// IntrospectToken validates a Bearer access token or session-cookie token
+// and returns the resolved user and session.
+func (a *Auth) IntrospectToken(ctx context.Context, tok string) (UserInfo, *session.Session, error) {
+	if tok == "" {
+		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	claims, err := a.codec.DecodeAccess(tok)
+	if err != nil {
+		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+	}
+
+	if time.Now().Unix() >= claims.ExpiresAt {
+		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	valid, err := a.jti.Validate(ctx, claims.TokenID, claims.SessionID)
+	if err != nil {
+		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+	}
+
+	if !valid {
+		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	sess, err := a.sessions.Get(ctx, claims.SessionID)
+	if err != nil {
+		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+	}
+
+	if !sess.Active() {
+		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	info, err := a.users.GetUser(ctx, sess.UserID)
+	if err != nil {
+		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+	}
+
+	return info, sess, nil
+}
+
+// ListSessions returns userID's sessions, ordered by LastSeen descending.
+func (a *Auth) ListSessions(ctx context.Context, userID string, filter *session.Filter, page *paginator.Paginator) ([]*session.Session, *paginator.Paginator, error) {
+	lister, ok := a.sessions.(session.Lister)
+	if !ok {
+		return nil, nil, errors.New("session store does not support listing")
+	}
+
+	return lister.List(ctx, userID, filter, page)
+}
+
+// RevokeSession revokes sessionID after verifying it belongs to userID.
+func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) error {
+	sess, err := a.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return NewOAuthErrorFrom(err)
+	}
+
+	if sess.UserID != userID {
+		return NewOAuthErrorFrom(session.ErrNotFound)
+	}
+
+	if err := a.sessions.Revoke(ctx, sessionID); err != nil {
+		return NewOAuthErrorFrom(err)
+	}
+
+	return nil
+}
+
+// issueSessionCookie mints and registers a fresh session-cookie JTI for sess and returns the
+// encrypted PASETO cookie value.
+func (a *Auth) issueSessionCookie(ctx context.Context, sess *session.Session, issuedAt, expiresAt time.Time) (string, error) {
+	jti, err := newJTI()
+	if err != nil {
+		return "", NewOAuthErrorFrom(err)
+	}
+
+	if err := a.jti.Issue(ctx, jti, sess.ID, time.Until(expiresAt)); err != nil {
+		return "", NewOAuthErrorFrom(err)
+	}
+
+	cookie, err := a.codec.Encrypt(token.AccessClaims{
+		Type:      token.TypeSessionCookie,
+		SessionID: sess.ID,
+		TokenID:   jti,
+		IssuedAt:  issuedAt.Unix(),
+		ExpiresAt: expiresAt.Unix(),
+	})
+	if err != nil {
+		return "", NewOAuthErrorFrom(err)
+	}
+
+	return cookie, nil
+}
+
+// buildLoginResult assembles the session-cookie directive based on client mode and configuration.
+func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, returnTo, cookie string, requestTLS bool, basePath, mountPath string) (LoginResult, error) {
+	result := LoginResult{
+		Status: sess.Status,
+		Cookie: &CookieDirective{
+			Name:     a.config.CookieName,
+			Value:    cookie,
+			Path:     a.Cookie.Path(basePath, mountPath),
+			MaxAge:   int(a.config.SessionTTL.Seconds()),
+			Secure:   a.Cookie.Secure(requestTLS),
+			HTTPOnly: true,
+			SameSite: a.Cookie.SameSite(),
+		},
+	}
+
+	switch cl.ResponseMode {
+	case client.ResponseModeJSON:
+		now := time.Now()
+		expiresAt := now.Add(a.config.AccessTokenTTL)
+
+		atJTI, err := newJTI()
+		if err != nil {
+			return LoginResult{}, NewOAuthErrorFrom(err)
+		}
+
+		if err := a.jti.Issue(ctx, atJTI, sess.ID, a.config.AccessTokenTTL); err != nil {
+			return LoginResult{}, NewOAuthErrorFrom(err)
+		}
+
+		at, err := a.codec.Encrypt(token.AccessClaims{
+			Type:      token.TypeAccessToken,
+			SessionID: sess.ID,
+			TokenID:   atJTI,
+			IssuedAt:  now.Unix(),
+			ExpiresAt: expiresAt.Unix(),
+		})
+		if err != nil {
+			return LoginResult{}, NewOAuthErrorFrom(err)
+		}
+
+		result.AccessToken = at
+		result.ExpiresIn = int(a.config.AccessTokenTTL.Seconds())
+	case client.ResponseModeRedirect:
+		if returnTo != "" {
+			result.Redirect = returnTo
+		} else {
+			result.Redirect = "/"
+		}
+	case client.ResponseModeCookie:
+		// nothing else to do
+	}
+
+	return result, nil
+}
+
+// newJTI generates a fresh random JTI value for a session cookie or access token.
+func newJTI() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}

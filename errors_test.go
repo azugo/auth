@@ -48,6 +48,8 @@ func TestNewOAuthErrorFrom(t *testing.T) {
 		{"unexpected token type", token.ErrUnexpectedTokenType, http.StatusUnauthorized, ErrCodeInvalidToken},
 		{"client not found", client.ErrNotFound, http.StatusUnauthorized, ErrCodeInvalidClient},
 		{"user exists", contract.ErrUserAlreadyExists, http.StatusConflict, ErrCodeInvalidRequest},
+		{"unsupported grant type", ErrUnsupportedGrantType, http.StatusBadRequest, ErrCodeUnsupportedGrantType},
+		{"login required", ErrLoginRequired, http.StatusUnauthorized, ErrCodeLoginRequired},
 		{"unknown", errors.New("boom"), http.StatusInternalServerError, ErrCodeServerError},
 	}
 

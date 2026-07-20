@@ -85,6 +85,13 @@ func Transactor(t TxRunner) Option {
 	return func(a *Auth) { a.Transaction.tx = t }
 }
 
+// CookieScopeToBasePath makes the default session cookie Path resolve to the app's base path.
+func CookieScopeToBasePath() Option {
+	return func(a *Auth) {
+		a.Cookie.scopeToBasePath = true
+	}
+}
+
 // New creates an Auth instance.
 func New(app *core.App, config *Configuration, users UserProvider, sessions session.Store, clients client.Registry, opts ...Option) (*Auth, error) {
 	if app == nil {

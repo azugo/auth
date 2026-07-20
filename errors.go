@@ -22,6 +22,12 @@ var (
 	ErrUserAlreadyExists = contract.ErrUserAlreadyExists
 	// ErrUserNotFound is returned when the user is unknown.
 	ErrUserNotFound = contract.ErrUserNotFound
+	// ErrUnsupportedGrantType is returned for grant_type this library does not
+	// support.
+	ErrUnsupportedGrantType = errors.New("unsupported grant type")
+	// ErrLoginRequired is returned by Refresh when the presented session cookie is missing,
+	// expired, or otherwise cannot be silently re-authenticated.
+	ErrLoginRequired = errors.New("login required")
 )
 
 // ErrorCode is an RFC 6749 / RFC 6750 / RFC 9470 OAuth 2.0 error code.
@@ -35,6 +41,7 @@ const (
 	ErrCodeInvalidClient                   ErrorCode = "invalid_client"
 	ErrCodeInvalidGrant                    ErrorCode = "invalid_grant"
 	ErrCodeUnauthorizedClient              ErrorCode = "unauthorized_client"
+	ErrCodeUnsupportedGrantType            ErrorCode = "unsupported_grant_type"
 	ErrCodeAccessDenied                    ErrorCode = "access_denied"
 	ErrCodeUnmetAuthenticationRequirements ErrorCode = "unmet_authentication_requirements"
 	ErrCodeInvalidDPoPProof                ErrorCode = "invalid_dpop_proof"
@@ -133,6 +140,10 @@ func NewOAuthErrorFrom(err error) error {
 	case errors.Is(err, contract.ErrUserAlreadyExists):
 		// Account registration conflict.
 		return newOAuthErrorWrapped(http.StatusConflict, ErrCodeInvalidRequest, "account already exists", err)
+	case errors.Is(err, ErrUnsupportedGrantType):
+		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeUnsupportedGrantType, "unsupported grant type", err)
+	case errors.Is(err, ErrLoginRequired):
+		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeLoginRequired, "login required", err)
 	default:
 		return newOAuthErrorWrapped(http.StatusInternalServerError, ErrCodeServerError, "internal error", err)
 	}

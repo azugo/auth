@@ -8,5 +8,10 @@ import (
 )
 
 func (r *router) home(ctx *azugo.Context) {
-	templ.Render(ctx, views.Home(""))
+	name := ""
+	if ctx.User().Authorized() {
+		name = ctx.User().DisplayName()
+	}
+
+	templ.Render(ctx, views.Home(name))
 }

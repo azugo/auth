@@ -2,10 +2,16 @@
 // metadata.
 package client
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 // AuthMethodPassword is the method name for internal username/password login.
 const AuthMethodPassword = "password"
+
+// GrantTypePassword is the RFC 6749 grant_type value for the password grant.
+const GrantTypePassword = "password"
 
 // AccessTokenType controls which kind of access token is issued to a client.
 type AccessTokenType string
@@ -86,6 +92,17 @@ type Client struct {
 	FederatedLogout bool
 	// PostLogoutRedirectURIs is the exact-match allowlist for post_logout_redirect_uri.
 	PostLogoutRedirectURIs []string
+}
+
+// AuthMethodAllowed returns true when method is a permitted primary auth method for this
+// client.
+func (c *Client) AuthMethodAllowed(method string) bool {
+	return len(c.AllowedAuthMethods) == 0 || slices.Contains(c.AllowedAuthMethods, method)
+}
+
+// GrantTypeAllowed returns true when grantType is one of this client's registered GrantTypes.
+func (c *Client) GrantTypeAllowed(grantType string) bool {
+	return slices.Contains(c.GrantTypes, grantType)
 }
 
 // Registry provides OAuth client metadata.

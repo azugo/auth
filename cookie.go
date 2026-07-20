@@ -12,8 +12,9 @@ import (
 type CookieCtx struct {
 	noCopy noCopy
 
-	config *Configuration
-	app    *core.App
+	config          *Configuration
+	app             *core.App
+	scopeToBasePath bool
 }
 
 // Secure returns the effective cookie Secure flag for a request based on configuration.
@@ -42,6 +43,10 @@ func (c *CookieCtx) SameSite() string {
 func (c *CookieCtx) Path(basePath, mountPath string) string {
 	if c.config.CookiePath != "" {
 		return c.config.CookiePath
+	}
+
+	if c.scopeToBasePath {
+		mountPath = ""
 	}
 
 	if c.config.BaseURL != "" {

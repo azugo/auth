@@ -4,8 +4,8 @@ go 1.25.0
 
 require (
 	azugo.io/auth v0.0.0
-	azugo.io/azugo v0.35.1
-	azugo.io/core v0.35.1
+	azugo.io/azugo v0.36.1
+	azugo.io/core v0.36.0
 	azugo.io/templ v0.35.1
 	github.com/a-h/templ v0.3.1020
 	github.com/joho/godotenv v1.5.1

@@ -80,3 +80,22 @@ func TestCookiePathFor(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(a2.Cookie.Path("/app", "/auth"), "/custom"))
 }
+
+func TestCookieScopeToBasePath(t *testing.T) {
+	a, err := New(newApp(t), validConfig(), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry(),
+		CookieScopeToBasePath())
+	qt.Assert(t, qt.IsNil(err))
+
+	// mountPath is ignored - the cookie is scoped to the app's base path, not the auth mount.
+	qt.Check(t, qt.Equals(a.Cookie.Path("", "/auth"), "/"))
+	qt.Check(t, qt.Equals(a.Cookie.Path("/app", "/auth"), "/app"))
+
+	// An explicit CookiePath still takes precedence.
+	cfg := validConfig()
+	cfg.CookiePath = "/custom"
+
+	a2, err := New(newApp(t), cfg, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry(),
+		CookieScopeToBasePath())
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(a2.Cookie.Path("/app", "/auth"), "/custom"))
+}

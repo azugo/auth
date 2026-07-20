@@ -4,6 +4,9 @@ package contract
 
 import (
 	"context"
+
+	"azugo.io/azugo/token"
+	"azugo.io/azugo/user"
 )
 
 // UserProvider validates credentials and loads user data.
@@ -16,15 +19,33 @@ type UserProvider interface {
 
 // UserInfo is returned by UserProvider. All fields are optional except ID.
 type UserInfo struct {
-	ID                     string
-	Name                   string
-	Email                  string
+	ID    string
+	Name  string
+	Email string
+	// Scope is the user's maximal, space-separated scope: both the OIDC scope values
+	// (openid, profile, email, ...) and any application-defined authorization scopes
+	// (admin, items:write, ...).
 	Scope                  string
 	Claims                 map[string]any
 	RequiresPasswordChange bool
 	// AMR lets a claim mapper / external login / authenticator ASSERT the authentication
 	// methods of this login - RFC 8176 values, e.g. ["mfa","hwk"].
 	AMR []string
+}
+
+// ToUser returns user identity.
+func (info UserInfo) ToUser() *user.Basic {
+	claims := make(map[string]token.ClaimStrings, 2)
+
+	if info.Name != "" {
+		claims["name"] = token.ClaimStrings{info.Name}
+	}
+
+	if info.Email != "" {
+		claims["email"] = token.ClaimStrings{info.Email}
+	}
+
+	return user.NewIdentity(info.ID, info.Scope, claims)
 }
 
 // ExternalUserProvider is an optional extension of UserProvider, the shared

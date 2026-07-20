@@ -1,0 +1,49 @@
+package views
+
+import "time"
+
+// SessionItem is one row on the sessions page.
+type SessionItem struct {
+	ID        string
+	CreatedAt time.Time
+	LastSeen  time.Time
+	ExpiresAt time.Time
+	Current   bool
+}
+
+templ Sessions(items []SessionItem) {
+	@layout("Your sessions") {
+		<p><a href="/">Back to home</a></p>
+		if len(items) == 0 {
+			<p>No active sessions.</p>
+		} else {
+			<table>
+				<tr>
+					<th>Session</th>
+					<th>Signed in</th>
+					<th>Last seen</th>
+					<th>Expires</th>
+					<th></th>
+				</tr>
+				for _, item := range items {
+					<tr>
+						<td>
+							{ item.ID }
+							if item.Current {
+								<strong>(current)</strong>
+							}
+						</td>
+						<td>{ item.CreatedAt.Format(time.RFC3339) }</td>
+						<td>{ item.LastSeen.Format(time.RFC3339) }</td>
+						<td>{ item.ExpiresAt.Format(time.RFC3339) }</td>
+						<td>
+							<form method="post" action={ templ.SafeURL("/sessions/" + item.ID + "/revoke") }>
+								<button type="submit">Revoke</button>
+							</form>
+						</td>
+					</tr>
+				}
+			</table>
+		}
+	}
+}

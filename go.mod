@@ -4,12 +4,13 @@ go 1.25.0
 
 require (
 	aidanwoods.dev/go-paseto v1.6.0
-	azugo.io/azugo v0.35.1
-	azugo.io/core v0.35.1
+	azugo.io/azugo v0.36.1
+	azugo.io/core v0.36.0
 	github.com/go-quicktest/qt v1.102.0
 	github.com/goccy/go-json v0.10.6
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/spf13/viper v1.21.0
+	github.com/valyala/fasthttp v1.72.0
 	golang.org/x/crypto v0.54.0
 )
 
@@ -47,7 +48,6 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.72.0 // indirect
 	github.com/valyala/fastrand v1.1.0 // indirect
 	go.elastic.co/ecszap v1.0.3 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
