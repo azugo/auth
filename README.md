@@ -14,14 +14,26 @@ v4.local tokens.
 ## Usage
 
 ```go
-	a, err := auth.New(cfg, app.Cache(), users, sessions, clients)
+	a, err := auth.New(app, cfg, users, sessions, clients)
 	if err != nil {
 		panic(err)
 	}
 ```
 
-Where `cfg` is an `*auth.Configuration` (bound from the `auth` configuration section), `users`
-implements `auth.UserProvider`, `sessions` a `session.Store` and `clients` a `client.Registry`.
+Where `app` is a `*core.App`, `cfg` is an `*auth.Configuration`, `users` implements `auth.UserProvider`, `sessions` a `session.Store` and
+`clients` a `client.Registry`.
+
+`auth.Auth` is a transport-free service that takes a request struct and return a result
++ directive struct, with no HTTP dependency. Two optional layers sit on top:
+
+* `azugo.io/auth/routes` - azugo HTTP adapters. `routes.Bind(router, prefix, a)` mounts every group `a`'s
+  configuration supports; pass one or more `routes.Group` values (or `routes.OIDC()`) to restrict it.
+* `azugo.io/auth/middleware` - `middleware.Auth(a, ...)` resolves `ctx.User()` from the
+  `Authorization` header (and, with `middleware.Cookie()`, the session cookie);
+  `middleware.RequireAuth(...)` halts the chain for an anonymous request, optionally redirecting
+  (`middleware.RedirectTo`, `middleware.ReturnTo`) instead of returning a JSON 401.
+
+See `_examples/portal` for a complete server-side-rendered app wiring all of the above together.
 
 ## Environment variables
 
@@ -34,6 +46,8 @@ implements `auth.UserProvider`, `sessions` a `session.Store` and `clients` a `cl
 * `AUTH_ACCESS_TOKEN_TTL` - Access token lifetime. Default `20m`.
 * `AUTH_SESSION_TTL` - Session lifetime. Default `8h`.
 * `AUTH_CODE_TTL` - Authorization-code lifetime. Default `60s`.
+* `AUTH_BASE_URL` - Public base URL used to resolve the issuer and default cookie path. Optional;
+  derived from the request otherwise (needed behind a proxy or on a split origin).
 * `AUTH_ISSUER` - OIDC issuer identifier. Optional; derived from the request base URL when unset.
 * `AUTH_THROTTLE_ENABLED` - Enable the brute-force lockout guard. Default `true`.
 * `AUTH_THROTTLE_MAX_ATTEMPTS` - Attempts before lockout. Default `5`.
