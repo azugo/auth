@@ -2,6 +2,9 @@
 
 [![status-badge](https://ci.azugo.io/api/badges/azugo/auth/status.svg)](https://ci.azugo.io/azugo/auth)
 
+> [!WARNING]
+> This library is currently **EXPERIMENTAL** and breaking changes are expected!
+
 Azugo framework authentication toolkit — OAuth 2.0 / OpenID Connect building blocks with PASETO
 v4.local tokens.
 
@@ -28,6 +31,9 @@ Where `app` is a `*core.App`, `cfg` is an `*auth.Configuration`, `users` impleme
 
 * `azugo.io/auth/routes` - azugo HTTP adapters. `routes.Bind(router, prefix, a)` mounts every group `a`'s
   configuration supports; pass one or more `routes.Group` values (or `routes.OIDC()`) to restrict it.
+  For a `Handler` built with `routes.New(a, ...)` and mounted manually at custom paths, pass
+  `routes.MountPrefix` and/or `routes.TokenEndpoint`/`UserinfoEndpoint`/`JWKSEndpoint` so the
+  discovery document still reports correct URLs.
 * `azugo.io/auth/middleware` - `middleware.Auth(a, ...)` resolves `ctx.User()` from the
   `Authorization` header (and, with `middleware.Cookie()`, the session cookie);
   `middleware.RequireAuth(...)` halts the chain for an anonymous request, optionally redirecting
@@ -55,3 +61,10 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 * `AUTH_THROTTLE_LOCKOUT_TTL` - Lockout duration. Default `15m`.
 * `AUTH_THROTTLE_MFA_RESEND_COOLDOWN` - MFA code resend cooldown. Default `60s`.
 * `AUTH_THROTTLE_MFA_MAX_RESENDS` - Maximum MFA code resends. Default `3`.
+* `AUTH_KEYS_PRIMARY` (or `AUTH_KEYS_PRIMARY_FILE`) - PEM-encoded primary signing key (RSA or
+  ECDSA private key). Enables JWT/JWKS signing; unset means introspect-only mode.
+* `AUTH_KEYS_PRIMARY_ALGORITHM` - Primary key algorithm: `RS256`, `RS384`, `RS512`, `ES256`,
+  `ES384` or `ES512`. Optional; defaults to the curve-mandated algorithm for an EC key, or
+  `RS256` for RSA.
+* `AUTH_KEYS_SECONDARY` (or `AUTH_KEYS_SECONDARY_FILE`) - One or more concatenated PEM-encoded
+  public keys accepted for verification alongside the primary key (e.g. during key rotation).

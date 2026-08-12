@@ -1,6 +1,8 @@
 package contract
 
 import (
+	"encoding/pem"
+	"os"
 	"time"
 
 	"azugo.io/core/config"
@@ -77,23 +79,27 @@ type ACRLevelConfig struct {
 	AMR               []string `mapstructure:"amr"` // amr values recorded when satisfied (optional)
 }
 
-// KeySetConfig holds the signing key set for JWT/JWKS operations. Primary signs; Secondary
-// keys verify only (in order).
+// KeySetConfig holds the signing key set for JWT/JWKS operations. Primary is the default
+// signing key; Signing keys offer alternative algorithms (one key per algorithm) for clients
+// that register a different id_token_signed_response_alg; Secondary keys verify only (in
+// order).
 type KeySetConfig struct {
 	Primary   KeyConfig   `mapstructure:"primary"   validate:"required"`
+	Signing   []KeyConfig `mapstructure:"signing"   validate:"omitempty,dive"`
 	Secondary []KeyConfig `mapstructure:"secondary" validate:"omitempty,dive"`
 }
 
 // KeyConfig describes one asymmetric key pair or certificate.
 type KeyConfig struct {
 	// ID is the key ID (kid) included in issued JWTs and the JWKS document; unique per set.
-	ID string `mapstructure:"id" validate:"required"`
+	// Defaults to the RFC 7638 JWK Thumbprint of the public key when unset.
+	ID string `mapstructure:"id"`
 	// Algorithm is RS256, RS384, RS512, ES256, ES384 or ES512.
-	Algorithm string `mapstructure:"algorithm" validate:"required,oneof=RS256 RS384 RS512 ES256 ES384 ES512"`
-	// PrivateKey is a PEM-encoded private key (used for signing; required for Primary only).
+	Algorithm string `mapstructure:"algorithm" validate:"omitempty,oneof=RS256 RS384 RS512 ES256 ES384 ES512"`
+	// PrivateKey is a PEM-encoded private key.
 	PrivateKey string `mapstructure:"private_key"`
 	// PublicKey is a PEM-encoded public key or certificate.
-	PublicKey string `mapstructure:"public_key" validate:"required"`
+	PublicKey string `mapstructure:"public_key"`
 }
 
 // ExternalProviderConfig configures one external IdP driver instance.
@@ -145,6 +151,59 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".throttle.lockout_ttl", "AUTH_THROTTLE_LOCKOUT_TTL")
 	_ = v.BindEnv(prefix+".throttle.mfa_resend_cooldown", "AUTH_THROTTLE_MFA_RESEND_COOLDOWN")
 	_ = v.BindEnv(prefix+".throttle.mfa_max_resends", "AUTH_THROTTLE_MFA_MAX_RESENDS")
+
+	// Load primary key from remote secret
+	if primaryKey, _ := config.LoadRemoteSecret("AUTH_KEYS_PRIMARY"); primaryKey != "" {
+		v.SetDefault(prefix+".keys.primary.private_key", primaryKey)
+	}
+
+	// Load additional signing key(s) from remote secret.
+	signingKeys := os.Getenv("AUTH_KEYS_SIGNING")
+	if signingKeys == "" {
+		signingKeys, _ = config.LoadRemoteSecret("AUTH_KEYS_SIGNING")
+	}
+
+	if signingKeys != "" {
+		if entries := parsePEMKeys(signingKeys, "private_key"); len(entries) > 0 {
+			v.SetDefault(prefix+".keys.signing", entries)
+		}
+	}
+
+	// Load secondary key(s) from remote secret.
+	secondaryKeys := os.Getenv("AUTH_KEYS_SECONDARY")
+	if secondaryKeys == "" {
+		secondaryKeys, _ = config.LoadRemoteSecret("AUTH_KEYS_SECONDARY")
+	}
+
+	if secondaryKeys != "" {
+		if entries := parsePEMKeys(secondaryKeys, "public_key"); len(entries) > 0 {
+			v.SetDefault(prefix+".keys.secondary", entries)
+		}
+	}
+
+	_ = v.BindEnv(prefix+".keys.primary.private_key", "AUTH_KEYS_PRIMARY")
+	_ = v.BindEnv(prefix+".keys.primary.algorithm", "AUTH_KEYS_PRIMARY_ALGORITHM")
+}
+
+// parsePEMKeys splits a blob of concatenated PEM blocks into one KeyConfig entry per block,
+// assigning each block to the given field.
+func parsePEMKeys(blob, field string) []map[string]string {
+	var entries []map[string]string
+
+	rest := []byte(blob)
+
+	for {
+		var block *pem.Block
+
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+
+		entries = append(entries, map[string]string{field: string(pem.EncodeToMemory(block))})
+	}
+
+	return entries
 }
 
 // Validate validates the authentication configuration section.

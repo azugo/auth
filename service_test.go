@@ -2,15 +2,43 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"azugo.io/auth/client"
+	"azugo.io/auth/contract"
 	"azugo.io/auth/session"
+	"azugo.io/auth/token"
 
 	"github.com/go-quicktest/qt"
+	"github.com/golang-jwt/jwt/v5"
 )
+
+// genTestRSAKeyPair generates a fresh RSA key pair PEM-encoded as PKCS#8 (private) / PKIX
+// (public), for KeyProvider-related tests.
+func genTestRSAKeyPair(t *testing.T) (priv, pub string) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	qt.Assert(t, qt.IsNil(err))
+
+	privDER, err := x509.MarshalPKCS8PrivateKey(key)
+	qt.Assert(t, qt.IsNil(err))
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	qt.Assert(t, qt.IsNil(err))
+
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
+}
 
 // settle waits for the eventually-consistent memory cache backing the default JTI store to
 // apply a write (see jti/allowlist_test.go's identical helper).
@@ -40,12 +68,15 @@ func (f fakeUsers) GetUser(_ context.Context, id string) (UserInfo, error) {
 	return UserInfo{}, ErrUserNotFound
 }
 
-func newServiceTestAuth(t *testing.T, cl *client.Client) *Auth {
+func newServiceTestAuth(t *testing.T, cl *client.Client, opts ...Option) *Auth {
 	t.Helper()
 
 	users := fakeUsers{
-		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile"}},
-		passwords: map[string]string{"alice": "secret123"},
+		users: map[string]UserInfo{
+			"alice": {ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile"},
+			"carol": {ID: "u2", Name: "Carol", Email: "carol@example.com", Scope: "profile"},
+		},
+		passwords: map[string]string{"alice": "secret123", "carol": "secret123"},
 	}
 
 	// validConfig() is a bare struct literal (bypassing viper's Bind defaults), so
@@ -53,7 +84,7 @@ func newServiceTestAuth(t *testing.T, cl *client.Client) *Auth {
 	cfg := validConfig()
 	cfg.LogoutInvalidatesCookie = true
 
-	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl), opts...)
 	qt.Assert(t, qt.IsNil(err))
 
 	return a
@@ -75,7 +106,7 @@ func TestLoginJSONResponseMode(t *testing.T) {
 	})
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", RequestTLS: true, BasePath: "/",
+		ClientID: "spa", Username: "alice", Password: "secret123", RequestTLS: true, BaseURL: "/",
 	})
 	qt.Assert(t, qt.IsNil(err))
 
@@ -297,4 +328,165 @@ func TestListAndRevokeSession(t *testing.T) {
 
 	_, _, err = a.IntrospectToken(context.Background(), login.AccessToken)
 	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestLoginIssuesIDTokenForOpenIDScopeWithKeyProvider(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+	keys := &contract.KeySetConfig{Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: priv, PublicKey: pub}}
+
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	}, func(a *Auth) {
+		kp, err := token.NewConfigKeyProvider(keys)
+		qt.Assert(t, qt.IsNil(err))
+
+		a.keys = kp
+	})
+
+	res, err := a.Login(context.Background(), LoginRequest{
+		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(res.IDToken != ""))
+	qt.Check(t, qt.Equals(len(strings.Split(res.IDToken, ".")), 3))
+
+	claims := jwt.MapClaims{}
+	block, _ := pem.Decode([]byte(pub))
+	pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = jwt.ParseWithClaims(res.IDToken, claims, func(_ *jwt.Token) (any, error) {
+		return pubKey, nil
+	}, jwt.WithValidMethods([]string{"RS256"}))
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(claims["sub"], "u1"))
+	qt.Check(t, qt.Equals(claims["aud"], "spa"))
+	qt.Check(t, qt.Equals(claims["iss"], "https://issuer.example"))
+}
+
+// genTestECDSAKeyPair generates a fresh ECDSA P-256 key pair PEM-encoded as PKCS#8 (private) /
+// PKIX (public), for KeyProvider-related tests.
+func genTestECDSAKeyPair(t *testing.T) (priv, pub string) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	qt.Assert(t, qt.IsNil(err))
+
+	privDER, err := x509.MarshalPKCS8PrivateKey(key)
+	qt.Assert(t, qt.IsNil(err))
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	qt.Assert(t, qt.IsNil(err))
+
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
+}
+
+func TestLoginSignsIDTokenWithClientRegisteredAlgorithm(t *testing.T) {
+	rsaPriv, rsaPub := genTestRSAKeyPair(t)
+	ecPriv, ecPub := genTestECDSAKeyPair(t)
+	keys := &contract.KeySetConfig{
+		Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: rsaPriv, PublicKey: rsaPub},
+		Signing: []contract.KeyConfig{{ID: "k2", Algorithm: "ES256", PrivateKey: ecPriv, PublicKey: ecPub}},
+	}
+
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+		IDTokenSignedResponseAlg: "ES256",
+	}, func(a *Auth) {
+		kp, err := token.NewConfigKeyProvider(keys)
+		qt.Assert(t, qt.IsNil(err))
+
+		a.keys = kp
+	})
+
+	res, err := a.Login(context.Background(), LoginRequest{
+		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.IsTrue(res.IDToken != ""))
+
+	block, _ := pem.Decode([]byte(ecPub))
+	pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	qt.Assert(t, qt.IsNil(err))
+
+	tok, err := jwt.Parse(res.IDToken, func(_ *jwt.Token) (any, error) {
+		return pubKey, nil
+	}, jwt.WithValidMethods([]string{"ES256"}))
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(tok.Header["kid"], "k2"))
+}
+
+func TestLoginFailsWhenClientAlgorithmHasNoSigningKey(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+	keys := &contract.KeySetConfig{Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: priv, PublicKey: pub}}
+
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+		IDTokenSignedResponseAlg: "ES256",
+	}, func(a *Auth) {
+		kp, err := token.NewConfigKeyProvider(keys)
+		qt.Assert(t, qt.IsNil(err))
+
+		a.keys = kp
+	})
+
+	_, err := a.Login(context.Background(), LoginRequest{
+		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.ErrorMatches(err, "server_error: internal error"))
+	qt.Check(t, qt.ErrorMatches(errors.Unwrap(err), `.*no signing key for id_token algorithm "ES256".*`))
+}
+
+func TestLoginOmitsIDTokenWithoutKeyProvider(t *testing.T) {
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	})
+
+	res, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(res.IDToken, ""))
+}
+
+func TestLoginOmitsIDTokenWithoutOpenIDScope(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+	keys := &contract.KeySetConfig{Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: priv, PublicKey: pub}}
+
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	}, func(a *Auth) {
+		kp, err := token.NewConfigKeyProvider(keys)
+		qt.Assert(t, qt.IsNil(err))
+
+		a.keys = kp
+	})
+
+	// carol's granted scope is "profile" only - no openid.
+	res, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "carol", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(res.IDToken, ""))
+}
+
+func TestLoginOmitsIDTokenForNonJSONResponseMode(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+	keys := &contract.KeySetConfig{Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: priv, PublicKey: pub}}
+
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "ssr", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeRedirect,
+	}, func(a *Auth) {
+		kp, err := token.NewConfigKeyProvider(keys)
+		qt.Assert(t, qt.IsNil(err))
+
+		a.keys = kp
+	})
+
+	res, err := a.Login(context.Background(), LoginRequest{ClientID: "ssr", Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(res.IDToken, ""))
 }

@@ -18,7 +18,7 @@ func (h *Handler) authorize(ctx *azugo.Context) {
 		Token:      ctx.Cookie.Get(h.auth.Config().CookieName),
 		ReturnTo:   returnTo,
 		RequestTLS: ctx.IsTLS(),
-		BasePath:   ctx.BasePath(),
+		BaseURL:    ctx.BaseURL(),
 	})
 	if err != nil {
 		ctx.Error(err)

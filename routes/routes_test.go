@@ -41,6 +41,10 @@ func (s stubUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) 
 }
 
 func newTestAuth(t *testing.T, sessions session.Store, cls ...*client.Client) *auth.Auth {
+	return newTestAuthWithOpts(t, sessions, nil, cls...)
+}
+
+func newTestAuthWithOpts(t *testing.T, sessions session.Store, opts []auth.Option, cls ...*client.Client) *auth.Auth {
 	t.Helper()
 
 	app := core.New()
@@ -59,9 +63,9 @@ func newTestAuth(t *testing.T, sessions session.Store, cls ...*client.Client) *a
 		LogoutInvalidatesCookie: true,
 	}
 
-	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Scope: "openid"}}
+	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid"}}
 
-	a, err := auth.New(app, cfg, users, sessions, client.NewMemoryRegistry(cls...))
+	a, err := auth.New(app, cfg, users, sessions, client.NewMemoryRegistry(cls...), opts...)
 	qt.Assert(t, qt.IsNil(err))
 
 	return a

@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"azugo.io/auth/client"
@@ -30,8 +32,11 @@ type LoginResult struct {
 	Status      session.Status
 	Cookie      *CookieDirective
 	AccessToken string
-	ExpiresIn   int
-	Redirect    string
+	// IDToken is set only for a client.ResponseModeJSON client whose granted scope contains
+	// "openid".
+	IDToken   string
+	ExpiresIn int
+	Redirect  string
 }
 
 // LoginRequest carries the password-grant credentials and the request-derived values.
@@ -41,7 +46,7 @@ type LoginRequest struct {
 	Password   string
 	ReturnTo   string
 	RequestTLS bool
-	BasePath   string
+	BaseURL    string
 	MountPath  string
 }
 
@@ -50,7 +55,7 @@ type RefreshRequest struct {
 	Token      string
 	ReturnTo   string
 	RequestTLS bool
-	BasePath   string
+	BaseURL    string
 	MountPath  string
 }
 
@@ -104,7 +109,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		return LoginResult{}, err
 	}
 
-	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BasePath, in.MountPath)
+	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BaseURL, in.MountPath)
 }
 
 // Refresh performs the portal's silent re-authentication.
@@ -164,7 +169,7 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
-	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BasePath, in.MountPath)
+	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BaseURL, in.MountPath)
 }
 
 // Logout is the authoritative server-side logout.
@@ -292,13 +297,13 @@ func (a *Auth) issueSessionCookie(ctx context.Context, sess *session.Session, is
 }
 
 // buildLoginResult assembles the session-cookie directive based on client mode and configuration.
-func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, returnTo, cookie string, requestTLS bool, basePath, mountPath string) (LoginResult, error) {
+func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, returnTo, cookie string, requestTLS bool, baseURL, mountPath string) (LoginResult, error) {
 	result := LoginResult{
 		Status: sess.Status,
 		Cookie: &CookieDirective{
 			Name:     a.config.CookieName,
 			Value:    cookie,
-			Path:     a.Cookie.Path(basePath, mountPath),
+			Path:     a.Cookie.Path(baseURL, mountPath),
 			MaxAge:   int(a.config.SessionTTL.Seconds()),
 			Secure:   a.Cookie.Secure(requestTLS),
 			HTTPOnly: true,
@@ -333,6 +338,15 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 
 		result.AccessToken = at
 		result.ExpiresIn = int(a.config.AccessTokenTTL.Seconds())
+
+		if a.keys != nil && scopeContains(sess.Scope, "openid") {
+			idToken, err := a.issueIDToken(ctx, sess, cl, baseURL, mountPath)
+			if err != nil {
+				return LoginResult{}, NewOAuthErrorFrom(err)
+			}
+
+			result.IDToken = idToken
+		}
 	case client.ResponseModeRedirect:
 		if returnTo != "" {
 			result.Redirect = returnTo
@@ -344,6 +358,47 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 	}
 
 	return result, nil
+}
+
+// issueIDToken issues a signed ID Token for session using client configuration.
+func (a *Auth) issueIDToken(ctx context.Context, sess *session.Session, cl *client.Client, baseURL, mountPath string) (string, error) {
+	keys, err := a.keys.KeySet(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	signer, ok := keys.SignerFor(cl.IDTokenSignedResponseAlg)
+	if !ok {
+		return "", fmt.Errorf("client %q: no signing key for id_token algorithm %q", cl.ID, cl.IDTokenSignedResponseAlg)
+	}
+
+	now := time.Now()
+
+	return token.SignIDToken(signer, token.IDTokenClaims{
+		Issuer:    a.Issuer.URL(baseURL, mountPath),
+		Subject:   sess.UserID,
+		Audience:  cl.ID,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(a.config.AccessTokenTTL).Unix(),
+	})
+}
+
+// scopeContains reports whether value is one of scope's space-separated fields.
+func scopeContains(scope, value string) bool {
+	for scope != "" {
+		tok, rest, found := strings.Cut(scope, " ")
+		if tok == value {
+			return true
+		}
+
+		if !found {
+			return false
+		}
+
+		scope = rest
+	}
+
+	return false
 }
 
 // newJTI generates a fresh random JTI value for a session cookie or access token.

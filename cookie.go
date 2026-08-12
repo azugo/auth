@@ -40,7 +40,7 @@ func (c *CookieCtx) SameSite() string {
 }
 
 // Path returns the effective session cookie path based on configuration.
-func (c *CookieCtx) Path(basePath, mountPath string) string {
+func (c *CookieCtx) Path(baseURL, mountPath string) string {
 	if c.config.CookiePath != "" {
 		return c.config.CookiePath
 	}
@@ -50,9 +50,12 @@ func (c *CookieCtx) Path(basePath, mountPath string) string {
 	}
 
 	if c.config.BaseURL != "" {
-		if u, err := url.Parse(c.config.BaseURL); err == nil {
-			basePath = u.Path
-		}
+		baseURL = c.config.BaseURL
+	}
+
+	basePath := ""
+	if u, err := url.Parse(baseURL); err == nil {
+		basePath = u.Path
 	}
 
 	base := "/" + strings.Trim(basePath, "/")

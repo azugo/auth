@@ -58,7 +58,7 @@ func (h *Handler) passwordGrant(ctx *azugo.Context) {
 		Password:   password,
 		ReturnTo:   returnTo,
 		RequestTLS: ctx.IsTLS(),
-		BasePath:   ctx.BasePath(),
+		BaseURL:    ctx.BaseURL(),
 	})
 	if err != nil {
 		ctx.Error(err)

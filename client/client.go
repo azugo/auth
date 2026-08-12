@@ -76,7 +76,10 @@ type Client struct {
 	ResponseMode            ResponseMode
 	AccessTokenType         AccessTokenType
 	TokenEndpointAuthMethod TokenEndpointAuthMethod // how this client authenticates at /token
-	MFAPolicy               MFAPolicy
+	// IDTokenSignedResponseAlg is the OIDC id_token_signed_response_alg registration
+	// parameter.
+	IDTokenSignedResponseAlg string
+	MFAPolicy                MFAPolicy
 	// AllowedMFAMethods restricts which registered MFA drivers are offered. Empty = all.
 	AllowedMFAMethods []string
 	// AllowedAuthMethods restricts which auth methods are permitted. Empty = all.

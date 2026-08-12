@@ -62,7 +62,8 @@ type Auth struct {
 	sessions session.Store
 	clients  client.Registry
 	jti      jti.Store
-	codec    *token.Codec // seals/opens PASETO tokens; per-instance key cache
+	keys     token.KeyProvider // nil = introspect-only mode, no JWKS/id_token
+	codec    *token.Codec      // seals/opens PASETO tokens; per-instance key cache
 
 	// Cookie provides session cookie attribute helpers.
 	Cookie CookieCtx
@@ -78,6 +79,11 @@ type Option func(*Auth)
 // JTIStore replaces the default cache-backed CacheStore with a custom jti.Store.
 func JTIStore(store jti.Store) Option {
 	return func(a *Auth) { a.jti = store }
+}
+
+// KeyProvider replaces the default ConfigKeyProvider with a custom.
+func KeyProvider(p token.KeyProvider) Option {
+	return func(a *Auth) { a.keys = p }
 }
 
 // Transactor to allow to run multi-write handler sequences so they can be made atomic.
@@ -147,6 +153,15 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 		a.jti = store
 	}
 
+	if a.keys == nil && config.Keys != nil {
+		keys, err := token.NewConfigKeyProvider(config.Keys)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create key provider: %w", err)
+		}
+
+		a.keys = keys
+	}
+
 	return a, nil
 }
 
@@ -168,6 +183,11 @@ func (a *Auth) Clients() client.Registry {
 // JTI returns the configured JTI allowlist store.
 func (a *Auth) JTI() jti.Store {
 	return a.jti
+}
+
+// Keys returns the configured key provider, or nil in introspect-only mode.
+func (a *Auth) Keys() token.KeyProvider {
+	return a.keys
 }
 
 // Config returns the auth Configuration.
