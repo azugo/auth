@@ -22,12 +22,10 @@ func settle() { time.Sleep(10 * time.Millisecond) }
 
 type stubUsers struct{ info auth.UserInfo }
 
-func (s stubUsers) Authenticate(_ context.Context, username, password string) (auth.UserInfo, error) {
+func (s stubUsers) Authenticate(_ context.Context, _, password string) (auth.UserInfo, error) {
 	if password == "wrong" {
 		return auth.UserInfo{}, auth.ErrInvalidCredentials
 	}
-
-	_ = username
 
 	return s.info, nil
 }

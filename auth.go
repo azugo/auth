@@ -8,9 +8,12 @@ import (
 	"time"
 
 	"azugo.io/auth/client"
+	"azugo.io/auth/code"
 	"azugo.io/auth/contract"
+	"azugo.io/auth/event"
 	"azugo.io/auth/jti"
 	"azugo.io/auth/session"
+	"azugo.io/auth/throttle"
 	"azugo.io/auth/token"
 
 	"azugo.io/core"
@@ -64,6 +67,13 @@ type Auth struct {
 	jti      jti.Store
 	keys     token.KeyProvider // nil = introspect-only mode, no JWKS/id_token
 	codec    *token.Codec      // seals/opens PASETO tokens; per-instance key cache
+	codes    code.Store
+	// denied deny-lists revoked JWT access-token JTIs (RFC 7009).
+	denied jti.DenyList
+	// assertions deny-lists already-seen client_assertion JTIs (replay defence).
+	assertions jti.DenyList
+	throttle   throttle.Throttle
+	events     event.Sink // nil = no audit events
 
 	// Cookie provides session cookie attribute helpers.
 	Cookie CookieCtx
@@ -84,6 +94,22 @@ func JTIStore(store jti.Store) Option {
 // KeyProvider replaces the default ConfigKeyProvider with a custom.
 func KeyProvider(p token.KeyProvider) Option {
 	return func(a *Auth) { a.keys = p }
+}
+
+// CodeStore replaces the default cache-backed authorization-code store with a custom.
+func CodeStore(store code.Store) Option {
+	return func(a *Auth) { a.codes = store }
+}
+
+// Throttle replaces the default ThrottleConfig-driven brute-force guard with a custom.
+func Throttle(t throttle.Throttle) Option {
+	return func(a *Auth) { a.throttle = t }
+}
+
+// Events replaces the default audit event sink. The default writes each event as a
+// structured log record via the request logger.
+func Events(sink event.Sink) Option {
+	return func(a *Auth) { a.events = sink }
 }
 
 // Transactor to allow to run multi-write handler sequences so they can be made atomic.
@@ -162,6 +188,42 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 		a.keys = keys
 	}
 
+	if a.codes == nil {
+		store, err := code.NewCacheStore(app.Cache(), config.CodeTTL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create authorization code store: %w", err)
+		}
+
+		a.codes = store
+	}
+
+	denied, err := jti.NewCacheDenyList(app.Cache(), "auth:jwt:denied")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create JWT deny-list: %w", err)
+	}
+
+	a.denied = denied
+
+	assertions, err := jti.NewCacheDenyList(app.Cache(), "auth:assertion:seen")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create assertion replay list: %w", err)
+	}
+
+	a.assertions = assertions
+
+	if a.throttle == nil {
+		t, err := throttle.New(app.Cache(), config.Throttle)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create throttle: %w", err)
+		}
+
+		a.throttle = t
+	}
+
+	if a.events == nil {
+		a.events = &logEventSink{app: app}
+	}
+
 	return a, nil
 }
 
@@ -188,6 +250,21 @@ func (a *Auth) JTI() jti.Store {
 // Keys returns the configured key provider, or nil in introspect-only mode.
 func (a *Auth) Keys() token.KeyProvider {
 	return a.keys
+}
+
+// Codes returns the configured authorization-code store.
+func (a *Auth) Codes() code.Store {
+	return a.codes
+}
+
+// emit sends e to the configured event sink, stamping At.
+func (a *Auth) emit(ctx context.Context, e event.Event) {
+	if a.events == nil {
+		return
+	}
+
+	e.At = time.Now()
+	a.events.Emit(ctx, e)
 }
 
 // Config returns the auth Configuration.

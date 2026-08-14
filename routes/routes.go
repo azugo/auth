@@ -13,11 +13,14 @@ import (
 
 // OIDCRoutes holds the always-mounted protocol adapters.
 type OIDCRoutes struct {
-	Authorize azugo.RequestHandler // POST /authorize (portal silent re-auth)
-	Token     azugo.RequestHandler // POST /token (password grant)
-	Discovery azugo.RequestHandler // GET /.well-known/openid-configuration
-	UserInfo  azugo.RequestHandler // GET /userinfo
-	JWKS      azugo.RequestHandler // GET /.well-known/jwks.json
+	Authorize     azugo.RequestHandler // POST /authorize (portal silent re-auth)
+	AuthorizeCode azugo.RequestHandler // GET /authorize (authorization-code flow)
+	Token         azugo.RequestHandler // POST /token (password, authorization_code, client_credentials)
+	Revoke        azugo.RequestHandler // POST /revoke (RFC 7009)
+	Introspect    azugo.RequestHandler // POST /introspect (RFC 7662)
+	Discovery     azugo.RequestHandler // GET /.well-known/openid-configuration
+	UserInfo      azugo.RequestHandler // GET /userinfo
+	JWKS          azugo.RequestHandler // GET /.well-known/jwks.json
 }
 
 // SessionRoutes holds the suppressible self-service session adapters.
@@ -43,9 +46,12 @@ type Handler struct {
 
 // discoveryEndpoints holds the path (or absolute URL) reported for each discovery endpoint.
 type discoveryEndpoints struct {
-	Token    string
-	Userinfo string
-	JWKS     string
+	Authorize  string
+	Token      string
+	Userinfo   string
+	JWKS       string
+	Revoke     string
+	Introspect string
 }
 
 // Group identifies a suppressible endpoint group for Bind.
@@ -70,10 +76,13 @@ type bindOptions struct {
 	groups    []Group
 	groupsSet bool
 
-	mountPrefix      *string
-	tokenEndpoint    string
-	userinfoEndpoint string
-	jwksEndpoint     string
+	mountPrefix        *string
+	authorizeEndpoint  string
+	tokenEndpoint      string
+	userinfoEndpoint   string
+	jwksEndpoint       string
+	revokeEndpoint     string
+	introspectEndpoint string
 }
 
 // OIDC explicitly forces Bind to mount only OIDC routes.
@@ -116,6 +125,29 @@ func (o JWKSEndpoint) apply(b *bindOptions) {
 	b.jwksEndpoint = string(o)
 }
 
+// AuthorizeEndpoint overrides the authorization_endpoint URL reported by the discovery
+// document.
+type AuthorizeEndpoint string
+
+func (o AuthorizeEndpoint) apply(b *bindOptions) {
+	b.authorizeEndpoint = string(o)
+}
+
+// RevokeEndpoint overrides the revocation_endpoint URL reported by the discovery document.
+type RevokeEndpoint string
+
+func (o RevokeEndpoint) apply(b *bindOptions) {
+	b.revokeEndpoint = string(o)
+}
+
+// IntrospectEndpoint overrides the introspection_endpoint URL reported by the discovery
+// document.
+type IntrospectEndpoint string
+
+func (o IntrospectEndpoint) apply(b *bindOptions) {
+	b.introspectEndpoint = string(o)
+}
+
 // supportedGroups calculates supported groups to mount based on implemented stores.
 func supportedGroups(_ *auth.Auth) []Group {
 	return []Group{SessionGroup}
@@ -131,9 +163,12 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	h := &Handler{
 		auth: a,
 		endpoints: discoveryEndpoints{
-			Token:    cmp.Or(o.tokenEndpoint, "/token"),
-			Userinfo: cmp.Or(o.userinfoEndpoint, "/userinfo"),
-			JWKS:     cmp.Or(o.jwksEndpoint, "/.well-known/jwks.json"),
+			Authorize:  cmp.Or(o.authorizeEndpoint, "/authorize"),
+			Token:      cmp.Or(o.tokenEndpoint, "/token"),
+			Userinfo:   cmp.Or(o.userinfoEndpoint, "/userinfo"),
+			JWKS:       cmp.Or(o.jwksEndpoint, "/.well-known/jwks.json"),
+			Revoke:     cmp.Or(o.revokeEndpoint, "/revoke"),
+			Introspect: cmp.Or(o.introspectEndpoint, "/introspect"),
 		},
 	}
 
@@ -142,12 +177,19 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	}
 
 	h.OIDC.Authorize = h.authorize
+	h.OIDC.AuthorizeCode = h.authorizeCode
 	h.OIDC.Token = h.token
+	h.OIDC.Revoke = h.revoke
+	h.OIDC.Introspect = h.introspect
 	h.OIDC.Discovery = h.discovery
 	h.OIDC.UserInfo = h.userInfo
 
+	// Bind mounts the route and discovery advertises
+	// the endpoint based on what is set here.
 	if a.Keys() != nil {
 		h.OIDC.JWKS = h.jwks
+	} else {
+		h.endpoints.JWKS = ""
 	}
 
 	h.Session.Get = h.getSession
@@ -159,6 +201,18 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	}
 
 	return h
+}
+
+// SecurityHeaders is a middleware that marks responses as non-cacheable (RFC 6749 §5.1) and
+// disables content-type sniffing.
+func SecurityHeaders(next azugo.RequestHandler) azugo.RequestHandler {
+	return func(ctx *azugo.Context) {
+		ctx.Header.Set(http.HeaderCacheControl, "no-store")
+		ctx.Header.Set(http.HeaderPragma, "no-cache")
+		ctx.Header.Set(http.HeaderXContentTypeOptions, "nosniff")
+
+		next(ctx)
+	}
 }
 
 // Bind mounts routes under prefix on router.
@@ -177,14 +231,20 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 	h.mountPrefix = prefix
 	g := r.Group(prefix)
 
-	g.Post("/authorize", h.OIDC.Authorize)
-	g.Post("/token", h.OIDC.Token)
 	g.Get("/.well-known/openid-configuration", h.OIDC.Discovery)
-	g.Get("/userinfo", h.OIDC.UserInfo)
 
 	if h.OIDC.JWKS != nil {
 		g.Get("/.well-known/jwks.json", h.OIDC.JWKS)
 	}
+
+	g.Use(SecurityHeaders)
+
+	g.Get("/authorize", h.OIDC.AuthorizeCode)
+	g.Post("/authorize", h.OIDC.Authorize)
+	g.Post("/token", h.OIDC.Token)
+	g.Post("/revoke", h.OIDC.Revoke)
+	g.Post("/introspect", h.OIDC.Introspect)
+	g.Get("/userinfo", h.OIDC.UserInfo)
 
 	for _, group := range groups {
 		if group == SessionGroup {

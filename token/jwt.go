@@ -6,10 +6,14 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/asn1"
+	"encoding/base64"
 	"fmt"
 	"math/big"
+	"slices"
+	"strings"
 	"unsafe"
 
+	"github.com/goccy/go-json"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -24,26 +28,178 @@ type IDTokenClaims struct {
 	Audience  string
 	IssuedAt  int64
 	ExpiresAt int64
+	// Nonce is echoed from the authorization request; omitted when empty.
+	Nonce string
+	// AuthTime is when the user originally authenticated; omitted when zero.
+	AuthTime int64
 }
+
+// accessTokenType is the RFC 9068 typ header value marking a JWT as an access token.
+const accessTokenType = "at+jwt"
 
 // SignIDToken mints a signed ID Token using signingKey.
 func SignIDToken(signingKey SigningKey, claims IDTokenClaims) (string, error) {
-	return sign(signingKey, jwt.MapClaims{
+	m := jwt.MapClaims{
 		"iss": claims.Issuer,
 		"sub": claims.Subject,
 		"aud": claims.Audience,
 		"iat": claims.IssuedAt,
 		"exp": claims.ExpiresAt,
+	}
+
+	if claims.Nonce != "" {
+		m["nonce"] = claims.Nonce
+	}
+
+	if claims.AuthTime != 0 {
+		m["auth_time"] = claims.AuthTime
+	}
+
+	return sign(signingKey, "", m)
+}
+
+// AccessTokenClaims are the claims of a signed JWT access token.
+type AccessTokenClaims struct {
+	Issuer    string
+	Subject   string
+	ClientID  string // aud
+	Scope     string
+	TokenID   string // jti, checked against the revocation deny-list
+	IssuedAt  int64
+	ExpiresAt int64
+}
+
+// SignAccessToken mints a signed JWT access token using signingKey.
+func SignAccessToken(signingKey SigningKey, claims AccessTokenClaims) (string, error) {
+	return sign(signingKey, accessTokenType, jwt.MapClaims{
+		"iss":   claims.Issuer,
+		"sub":   claims.Subject,
+		"aud":   claims.ClientID,
+		"scope": claims.Scope,
+		"jti":   claims.TokenID,
+		"iat":   claims.IssuedAt,
+		"exp":   claims.ExpiresAt,
 	})
 }
 
-func sign(signingKey SigningKey, claims jwt.MapClaims) (string, error) {
+// allAlgorithms are the JWS algorithms accepted when verifying inbound JWTs.
+var allAlgorithms = []string{AlgRS256, AlgRS384, AlgRS512, AlgES256, AlgES384, AlgES512}
+
+// VerifyAccessToken verifies a signed JWT access token against set - the key matching the
+// kid header when the header names a known key, otherwise primary, signing and secondary
+// keys in order.
+func VerifyAccessToken(set *KeySet, tok string) (AccessTokenClaims, error) {
+	type candidate struct {
+		id  string
+		pub crypto.PublicKey
+	}
+
+	candidates := make([]candidate, 0, 1+len(set.Signing)+len(set.Secondary))
+	candidates = append(candidates, candidate{set.Primary.ID, set.Primary.Public})
+
+	for _, k := range set.Signing {
+		candidates = append(candidates, candidate{k.ID, k.Public})
+	}
+
+	for _, k := range set.Secondary {
+		candidates = append(candidates, candidate{k.ID, k.Public})
+	}
+
+	if kid := jwtKID(tok); kid != "" {
+		if i := slices.IndexFunc(candidates,
+			func(c candidate) bool {
+				return c.id == kid
+			},
+		); i >= 0 {
+			// kid names a known key - only that key is tried.
+			candidates = candidates[i : i+1]
+		}
+	}
+
+	claims := jwt.MapClaims{}
+	err := ErrInvalidToken
+
+	for _, c := range candidates {
+		if _, err = jwt.ParseWithClaims(tok, claims,
+			func(t *jwt.Token) (any, error) {
+				// Only RFC 9068 access tokens are accepted
+				if typ, _ := t.Header["typ"].(string); !strings.EqualFold(typ, accessTokenType) &&
+					!strings.EqualFold(typ, "application/"+accessTokenType) {
+					return nil, ErrInvalidToken
+				}
+
+				return c.pub, nil
+			},
+			jwt.WithValidMethods(allAlgorithms),
+			jwt.WithExpirationRequired(),
+		); err == nil {
+			break
+		}
+	}
+
+	if err != nil {
+		return AccessTokenClaims{}, err
+	}
+
+	out := AccessTokenClaims{}
+	out.Issuer, _ = claims["iss"].(string)
+	out.Subject, _ = claims["sub"].(string)
+	out.ClientID, _ = claims["aud"].(string)
+	out.Scope, _ = claims["scope"].(string)
+
+	out.TokenID, _ = claims["jti"].(string)
+	if out.TokenID == "" {
+		return AccessTokenClaims{}, ErrInvalidToken
+	}
+
+	if v, err := claims.GetIssuedAt(); err == nil && v != nil {
+		out.IssuedAt = v.Unix()
+	}
+
+	exp, err := claims.GetExpirationTime()
+	if err != nil || exp == nil {
+		return AccessTokenClaims{}, ErrInvalidToken
+	}
+
+	out.ExpiresAt = exp.Unix()
+
+	return out, nil
+}
+
+// jwtKID extracts the kid header from a serialized JWT without verifying it.
+func jwtKID(tok string) string {
+	head, _, ok := strings.Cut(tok, ".")
+	if !ok {
+		return ""
+	}
+
+	raw, err := base64.RawURLEncoding.DecodeString(head)
+	if err != nil {
+		return ""
+	}
+
+	var header struct {
+		KID string `json:"kid"`
+	}
+
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return ""
+	}
+
+	return header.KID
+}
+
+func sign(signingKey SigningKey, typ string, claims jwt.MapClaims) (string, error) {
 	method, err := signerMethodFor(signingKey.Algorithm)
 	if err != nil {
 		return "", err
 	}
 
 	tok := jwt.NewWithClaims(method, claims)
+
+	if typ != "" {
+		tok.Header["typ"] = typ
+	}
 
 	if signingKey.ID != "" {
 		tok.Header["kid"] = signingKey.ID

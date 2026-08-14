@@ -213,4 +213,3 @@ func TestNewBuildsConfigKeyProviderFromEnvBoundKeys(t *testing.T) {
 	qt.Check(t, qt.Equals(set.Primary.Algorithm, "RS256"))
 	qt.Check(t, qt.IsNotNil(set.Primary.Public))
 }
-

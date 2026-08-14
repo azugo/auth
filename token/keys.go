@@ -179,7 +179,7 @@ func parseSigningKey(kc contract.KeyConfig) (SigningKey, error) {
 	pub := priv.Public()
 
 	if kc.PublicKey != "" {
-		if pub, err = parsePublicKey(kc.PublicKey); err != nil {
+		if pub, err = ParsePublicKeyPEM(kc.PublicKey); err != nil {
 			return SigningKey{}, err
 		}
 	}
@@ -197,7 +197,7 @@ func parseVerificationKey(kc contract.KeyConfig) (VerificationKey, error) {
 		return VerificationKey{}, errors.New("public key is required for a secondary key")
 	}
 
-	pub, err := parsePublicKey(kc.PublicKey)
+	pub, err := ParsePublicKeyPEM(kc.PublicKey)
 	if err != nil {
 		return VerificationKey{}, err
 	}
@@ -272,7 +272,9 @@ func parsePrivateKey(pemStr string) (crypto.Signer, error) {
 	return nil, errors.New("unsupported private key format")
 }
 
-func parsePublicKey(pemStr string) (crypto.PublicKey, error) {
+// ParsePublicKeyPEM decodes a PEM-encoded PKIX public key, PKCS#1 (RSA) public key, or
+// certificate (using its public key).
+func ParsePublicKeyPEM(pemStr string) (crypto.PublicKey, error) {
 	block, _ := pem.Decode([]byte(pemStr))
 	if block == nil {
 		return nil, errors.New("invalid PEM block")

@@ -3,6 +3,7 @@ package token
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"azugo.io/auth/contract"
 
@@ -77,7 +78,7 @@ func TestSignIDTokenOmitsKidWhenSigningKeyIDEmpty(t *testing.T) {
 	signer, err := parsePrivateKey(priv)
 	qt.Assert(t, qt.IsNil(err))
 
-	pubKey, err := parsePublicKey(pub)
+	pubKey, err := ParsePublicKeyPEM(pub)
 	qt.Assert(t, qt.IsNil(err))
 
 	signingKey := SigningKey{Algorithm: "RS256", Private: signer, Public: pubKey}
@@ -122,5 +123,149 @@ func TestSignIDTokenTamperedSignatureFailsVerification(t *testing.T) {
 
 func TestSignerMethodUnsupportedAlgorithm(t *testing.T) {
 	_, err := signerMethodFor("HS256")
+	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestSignVerifyAccessTokenRoundTrip(t *testing.T) {
+	_, priv, pub := genRSA(t)
+
+	kp, err := NewConfigKeyProvider(keySetConfigFor("k1", "RS256", priv, pub))
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	now := time.Now()
+
+	raw, err := SignAccessToken(set.Primary, AccessTokenClaims{
+		Issuer: "https://issuer.example", Subject: "u1", ClientID: "svc",
+		Scope: "items:read", TokenID: "jti1",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	claims, err := VerifyAccessToken(set, raw)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(claims.Issuer, "https://issuer.example"))
+	qt.Check(t, qt.Equals(claims.Subject, "u1"))
+	qt.Check(t, qt.Equals(claims.ClientID, "svc"))
+	qt.Check(t, qt.Equals(claims.Scope, "items:read"))
+	qt.Check(t, qt.Equals(claims.TokenID, "jti1"))
+	qt.Check(t, qt.Equals(claims.ExpiresAt, now.Add(time.Minute).Unix()))
+}
+
+func TestVerifyAccessTokenRejectsExpired(t *testing.T) {
+	_, priv, pub := genRSA(t)
+
+	kp, err := NewConfigKeyProvider(keySetConfigFor("k1", "RS256", priv, pub))
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	raw, err := SignAccessToken(set.Primary, AccessTokenClaims{
+		Subject: "u1", ClientID: "svc", TokenID: "jti1",
+		IssuedAt: time.Now().Add(-2 * time.Minute).Unix(), ExpiresAt: time.Now().Add(-time.Minute).Unix(),
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = VerifyAccessToken(set, raw)
+	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestVerifyAccessTokenSelectsSigningKeyByKid(t *testing.T) {
+	_, rsaPriv, rsaPub := genRSA(t)
+	_, ecPriv, ecPub := genECDSA(t)
+
+	kp, err := NewConfigKeyProvider(&contract.KeySetConfig{
+		Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: rsaPriv, PublicKey: rsaPub},
+		Signing: []contract.KeyConfig{{ID: "k2", Algorithm: "ES256", PrivateKey: ecPriv, PublicKey: ecPub}},
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	now := time.Now()
+
+	raw, err := SignAccessToken(set.Signing[0], AccessTokenClaims{
+		Subject: "u1", ClientID: "svc", TokenID: "jti1",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	claims, err := VerifyAccessToken(set, raw)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(claims.Subject, "u1"))
+}
+
+func TestVerifyAccessTokenRejectsForeignKey(t *testing.T) {
+	_, priv, pub := genRSA(t)
+	_, otherPriv, otherPub := genRSA(t)
+
+	kp, err := NewConfigKeyProvider(keySetConfigFor("k1", "RS256", priv, pub))
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	foreign, err := NewConfigKeyProvider(keySetConfigFor("k1", "RS256", otherPriv, otherPub))
+	qt.Assert(t, qt.IsNil(err))
+
+	foreignSet, err := foreign.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	now := time.Now()
+
+	raw, err := SignAccessToken(foreignSet.Primary, AccessTokenClaims{
+		Subject: "u1", ClientID: "svc", TokenID: "jti1",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = VerifyAccessToken(set, raw)
+	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestVerifyAccessTokenRejectsIDToken(t *testing.T) {
+	_, priv, pub := genRSA(t)
+
+	kp, err := NewConfigKeyProvider(keySetConfigFor("k1", "RS256", priv, pub))
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	now := time.Now()
+
+	// An id_token signed with the same key must not pass as an access token.
+	raw, err := SignIDToken(set.Primary, IDTokenClaims{
+		Issuer: "https://issuer.example", Subject: "u1", Audience: "client1",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = VerifyAccessToken(set, raw)
+	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestVerifyAccessTokenRejectsMissingJTI(t *testing.T) {
+	_, priv, pub := genRSA(t)
+
+	kp, err := NewConfigKeyProvider(keySetConfigFor("k1", "RS256", priv, pub))
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	now := time.Now()
+
+	raw, err := SignAccessToken(set.Primary, AccessTokenClaims{
+		Subject: "u1", ClientID: "svc",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = VerifyAccessToken(set, raw)
 	qt.Check(t, qt.IsNotNil(err))
 }

@@ -10,33 +10,39 @@ import (
 )
 
 // RequireAuthOption configures RequireAuth.
-type RequireAuthOption func(*requireAuthOptions)
+type RequireAuthOption interface {
+	apply(o *requireAuthOptions)
+}
 
 type requireAuthOptions struct {
 	redirectTo string
 	returnTo   bool
 }
 
-// RedirectTo makes RequireAuth redirect an anonymous request to path.
-func RedirectTo(path string) RequireAuthOption {
-	return func(o *requireAuthOptions) {
-		o.redirectTo = path
-	}
+// RedirectTo makes RequireAuth redirect an anonymous request to the given path.
+type RedirectTo string
+
+func (o RedirectTo) apply(opts *requireAuthOptions) {
+	opts.redirectTo = string(o)
 }
 
 // ReturnTo appends the originally requested path and query string as a return_to query
 // parameter on the RedirectTo target.
 func ReturnTo() RequireAuthOption {
-	return func(o *requireAuthOptions) {
-		o.returnTo = true
-	}
+	return returnToOption{}
+}
+
+type returnToOption struct{}
+
+func (returnToOption) apply(o *requireAuthOptions) {
+	o.returnTo = true
 }
 
 // RequireAuth halts the chain unless a prior Auth middleware resolved an authenticated user.
 func RequireAuth(opts ...RequireAuthOption) azugo.RequestHandlerFunc {
 	var o requireAuthOptions
 	for _, opt := range opts {
-		opt(&o)
+		opt.apply(&o)
 	}
 
 	return func(next azugo.RequestHandler) azugo.RequestHandler {

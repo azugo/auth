@@ -369,7 +369,7 @@ func TestConfigKeyProviderDerivesPrimaryPublicKeyFromPrivateWhenOmitted(t *testi
 
 	// The explicitly-supplied PublicKey (if any) would parse to the same value - confirms the
 	// derived key is actually usable, not just structurally present.
-	explicitPub, err := parsePublicKey(pub)
+	explicitPub, err := ParsePublicKeyPEM(pub)
 	qt.Assert(t, qt.IsNil(err))
 	explicitRSAPub, ok := explicitPub.(*rsa.PublicKey)
 	qt.Assert(t, qt.IsTrue(ok))

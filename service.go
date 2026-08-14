@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
 	"azugo.io/auth/client"
+	"azugo.io/auth/event"
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
@@ -48,6 +50,8 @@ type LoginRequest struct {
 	RequestTLS bool
 	BaseURL    string
 	MountPath  string
+	// IP is the caller's remote address.
+	IP string
 }
 
 // RefreshRequest carries the presented refresh token and the request-derived values.
@@ -84,10 +88,49 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		return LoginResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeUnauthorizedClient, "client is not allowed to use the password grant")
 	}
 
+	// Throttle keys combine the stable identity with the IP so neither a single account nor
+	// a single source can be brute-forced.
+	throttleKeys := make([]string, 0, 2)
+
+	if in.Username != "" {
+		throttleKeys = append(throttleKeys, "pwd:"+in.Username)
+	}
+
+	if in.IP != "" {
+		throttleKeys = append(throttleKeys, "ip:"+in.IP)
+	}
+
+	for _, key := range throttleKeys {
+		ok, retryAfter, err := a.throttle.Allow(ctx, key)
+		if err != nil {
+			return LoginResult{}, NewOAuthErrorFrom(err)
+		}
+
+		if !ok {
+			a.emit(ctx, event.Event{Type: event.TypeLockout, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"key": key}})
+
+			return LoginResult{}, NewThrottledError(retryAfter)
+		}
+	}
+
 	info, err := a.users.Authenticate(ctx, in.Username, in.Password)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			for _, key := range throttleKeys {
+				_ = a.throttle.Fail(ctx, key)
+			}
+		}
+
+		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
+
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
+
+	for _, key := range throttleKeys {
+		_ = a.throttle.Reset(ctx, key)
+	}
+
+	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
 
 	now := time.Now()
 	sess := &session.Session{
@@ -100,13 +143,20 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		ExpiresAt: now.Add(a.config.SessionTTL),
 	}
 
-	if err := a.sessions.Create(ctx, sess); err != nil {
-		return LoginResult{}, NewOAuthErrorFrom(err)
-	}
+	var cookie string
 
-	cookie, err := a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
-	if err != nil {
-		return LoginResult{}, err
+	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
+		if err := a.sessions.Create(ctx, sess); err != nil {
+			return err
+		}
+
+		var err error
+
+		cookie, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
+
+		return err
+	}); err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
 	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BaseURL, in.MountPath)
@@ -188,11 +238,13 @@ func (a *Auth) Logout(ctx context.Context, in LogoutRequest) (LogoutResult, erro
 	}
 
 	if claims, err := a.codec.DecodeAccess(in.Token); err == nil {
-		if err := a.sessions.Revoke(ctx, claims.SessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
-			return LogoutResult{}, NewOAuthErrorFrom(err)
-		}
+		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
+			if err := a.sessions.Revoke(ctx, claims.SessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
+				return err
+			}
 
-		if err := a.jti.Revoke(ctx, claims.TokenID); err != nil {
+			return a.jti.Revoke(ctx, claims.TokenID)
+		}); err != nil {
 			return LogoutResult{}, NewOAuthErrorFrom(err)
 		}
 	}
@@ -237,6 +289,10 @@ func (a *Auth) IntrospectToken(ctx context.Context, tok string) (UserInfo, *sess
 	info, err := a.users.GetUser(ctx, sess.UserID)
 	if err != nil {
 		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+	}
+
+	if claims.Scope != "" {
+		info.Scope = claims.Scope
 	}
 
 	return info, sess, nil
@@ -313,34 +369,16 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 
 	switch cl.ResponseMode {
 	case client.ResponseModeJSON:
-		now := time.Now()
-		expiresAt := now.Add(a.config.AccessTokenTTL)
-
-		atJTI, err := newJTI()
+		at, _, err := a.issueAccessToken(ctx, sess, cl, sess.Scope, baseURL, mountPath)
 		if err != nil {
-			return LoginResult{}, NewOAuthErrorFrom(err)
-		}
-
-		if err := a.jti.Issue(ctx, atJTI, sess.ID, a.config.AccessTokenTTL); err != nil {
-			return LoginResult{}, NewOAuthErrorFrom(err)
-		}
-
-		at, err := a.codec.Encrypt(token.AccessClaims{
-			Type:      token.TypeAccessToken,
-			SessionID: sess.ID,
-			TokenID:   atJTI,
-			IssuedAt:  now.Unix(),
-			ExpiresAt: expiresAt.Unix(),
-		})
-		if err != nil {
-			return LoginResult{}, NewOAuthErrorFrom(err)
+			return LoginResult{}, err
 		}
 
 		result.AccessToken = at
 		result.ExpiresIn = int(a.config.AccessTokenTTL.Seconds())
 
 		if a.keys != nil && scopeContains(sess.Scope, "openid") {
-			idToken, err := a.issueIDToken(ctx, sess, cl, baseURL, mountPath)
+			idToken, err := a.issueIDToken(ctx, sess, cl, baseURL, mountPath, "")
 			if err != nil {
 				return LoginResult{}, NewOAuthErrorFrom(err)
 			}
@@ -348,10 +386,13 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 			result.IDToken = idToken
 		}
 	case client.ResponseModeRedirect:
-		if returnTo != "" {
-			result.Redirect = returnTo
-		} else {
+		// validate redirect path
+		u, err := url.Parse(returnTo)
+		if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/") ||
+			strings.HasPrefix(u.Path, "//") || strings.HasPrefix(u.Path, "/\\") {
 			result.Redirect = "/"
+		} else {
+			result.Redirect = (&url.URL{Path: u.Path, RawQuery: u.RawQuery}).String()
 		}
 	case client.ResponseModeCookie:
 		// nothing else to do
@@ -361,7 +402,7 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 }
 
 // issueIDToken issues a signed ID Token for session using client configuration.
-func (a *Auth) issueIDToken(ctx context.Context, sess *session.Session, cl *client.Client, baseURL, mountPath string) (string, error) {
+func (a *Auth) issueIDToken(ctx context.Context, sess *session.Session, cl *client.Client, baseURL, mountPath, nonce string) (string, error) {
 	keys, err := a.keys.KeySet(ctx)
 	if err != nil {
 		return "", err
@@ -380,6 +421,8 @@ func (a *Auth) issueIDToken(ctx context.Context, sess *session.Session, cl *clie
 		Audience:  cl.ID,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(a.config.AccessTokenTTL).Unix(),
+		Nonce:     nonce,
+		AuthTime:  sess.CreatedAt.Unix(),
 	})
 }
 

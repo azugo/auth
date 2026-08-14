@@ -3,7 +3,9 @@ package auth
 import (
 	"errors"
 	"iter"
+	"strconv"
 	"strings"
+	"time"
 
 	"azugo.io/auth/client"
 	"azugo.io/auth/contract"
@@ -49,6 +51,9 @@ const (
 	ErrCodeInvalidToken                    ErrorCode = "invalid_token"
 	ErrCodeInsufficientScope               ErrorCode = "insufficient_scope"
 	ErrCodeServerError                     ErrorCode = "server_error"
+	ErrCodeUnsupportedResponseType         ErrorCode = "unsupported_response_type"
+	ErrCodeInvalidScope                    ErrorCode = "invalid_scope"
+	ErrCodeSlowDown                        ErrorCode = "slow_down"
 )
 
 var (
@@ -64,6 +69,8 @@ type OAuthError struct {
 	Code ErrorCode
 	// Description is the human-readable error_description.
 	Description string
+	// RetryAfter, when non-zero, is surfaced as a Retry-After header (throttled requests).
+	RetryAfter time.Duration
 
 	uri    string // optional error_uri
 	realm  string
@@ -104,6 +111,16 @@ func NewOAuthError(status int, code ErrorCode, description string, opts ...OAuth
 	return e
 }
 
+// NewThrottledError creates a 429 Too Many Requests OAuthError carrying a Retry-After hint.
+func NewThrottledError(retryAfter time.Duration) error {
+	return &OAuthError{
+		Code:        ErrCodeSlowDown,
+		Description: "too many attempts",
+		RetryAfter:  retryAfter,
+		status:      http.StatusTooManyRequests,
+	}
+}
+
 // NewOAuthAuthenticateError creates a 401 Unauthorized OAuthError that emits an RFC 6750
 // WWW-Authenticate: Bearer challenge.
 func NewOAuthAuthenticateError(code ErrorCode, description, realm, scope string, opts ...OAuthErrorOption) error {
@@ -124,9 +141,14 @@ func NewOAuthAuthenticateError(code ErrorCode, description, realm, scope string,
 
 // NewOAuthErrorFrom maps a authentication specifc errors to OAuth 2.0 error and status code.
 func NewOAuthErrorFrom(err error) error {
+	var oe *OAuthError
+
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &oe):
+		// Already mapped - pass through unchanged.
+		return err
 	case errors.Is(err, contract.ErrInvalidCredentials):
 		// Invalid username and/or password.
 		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidGrant, "invalid credentials", err)
@@ -177,9 +199,15 @@ func (e *OAuthError) SafeError() string {
 	return e.Description
 }
 
-// ErrorHeaders sets the WWW-Authenticate: Bearer header.
+// ErrorHeaders sets the WWW-Authenticate: Bearer header and, when throttled, Retry-After.
 func (e *OAuthError) ErrorHeaders() iter.Seq2[string, string] {
 	return func(yield func(string, string) bool) {
+		if e.RetryAfter > 0 {
+			if !yield(http.HeaderRetryAfter, strconv.Itoa(int(e.RetryAfter.Seconds()+0.999))) {
+				return
+			}
+		}
+
 		if e.status != http.StatusUnauthorized {
 			return
 		}

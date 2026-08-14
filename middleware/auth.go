@@ -11,7 +11,9 @@ import (
 )
 
 // AuthOption configures Auth.
-type AuthOption func(*authOptions)
+type AuthOption interface {
+	apply(o *authOptions)
+}
 
 type authOptions struct {
 	useCookie bool
@@ -19,16 +21,20 @@ type authOptions struct {
 
 // Cookie enables the session cookie as a credential source.
 func Cookie() AuthOption {
-	return func(o *authOptions) {
-		o.useCookie = true
-	}
+	return cookieOption{}
+}
+
+type cookieOption struct{}
+
+func (cookieOption) apply(o *authOptions) {
+	o.useCookie = true
 }
 
 // Auth resolves the current user from the Authorization if present.
 func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 	var o authOptions
 	for _, opt := range opts {
-		opt(&o)
+		opt.apply(&o)
 	}
 
 	return func(next azugo.RequestHandler) azugo.RequestHandler {
@@ -42,8 +48,14 @@ func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 				tok = ctx.Cookie.Get(a.Config().CookieName)
 			}
 
-			if tok != "" {
+			// Opaque PASETO tokens validate through the session-store introspection, JWT
+			// bearer tokens by signature + revocation deny-list.
+			if strings.HasPrefix(tok, "v4.local.") {
 				if info, _, err := a.IntrospectToken(ctx, tok); err == nil {
+					ctx.SetUser(info.ToUser())
+				}
+			} else if tok != "" {
+				if info, err := a.ValidateJWTAccessToken(ctx, tok); err == nil {
 					ctx.SetUser(info.ToUser())
 				}
 			}

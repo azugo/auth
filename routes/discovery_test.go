@@ -79,7 +79,9 @@ func TestDiscoveryIntrospectOnlyOmitsJWTFields(t *testing.T) {
 	qt.Check(t, qt.Equals(doc.JWKSURI, ""))
 	qt.Check(t, qt.HasLen(doc.ScopesSupported, 0))
 	qt.Check(t, qt.HasLen(doc.IDTokenSigningAlgValuesSupported, 0))
-	qt.Check(t, qt.DeepEquals(doc.GrantTypesSupported, []string{client.GrantTypePassword}))
+	// client_credentials requires a KeyProvider (JWT access tokens) and is not advertised
+	// without one.
+	qt.Check(t, qt.DeepEquals(doc.GrantTypesSupported, []string{"authorization_code", client.GrantTypePassword}))
 	qt.Check(t, qt.DeepEquals(doc.SubjectTypesSupported, []string{"public"}))
 }
 
@@ -101,6 +103,7 @@ func TestDiscoveryWithKeyProviderIncludesJWKSAndAlgorithms(t *testing.T) {
 	qt.Check(t, qt.Equals(doc.JWKSURI, "https://issuer.example/.well-known/jwks.json"))
 	qt.Check(t, qt.DeepEquals(doc.ScopesSupported, []string{"openid"}))
 	qt.Check(t, qt.DeepEquals(doc.IDTokenSigningAlgValuesSupported, []string{"RS256"}))
+	qt.Check(t, qt.DeepEquals(doc.GrantTypesSupported, []string{"authorization_code", "client_credentials", client.GrantTypePassword}))
 }
 
 func mustKeyProvider(t *testing.T, priv, pub string) token.KeyProvider {
