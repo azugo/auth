@@ -9,6 +9,7 @@ import (
 
 	"azugo.io/auth/client"
 	"azugo.io/auth/contract"
+	"azugo.io/auth/provider"
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
@@ -162,6 +163,12 @@ func NewOAuthErrorFrom(err error) error {
 	case errors.Is(err, contract.ErrUserAlreadyExists):
 		// Account registration conflict.
 		return newOAuthErrorWrapped(http.StatusConflict, ErrCodeInvalidRequest, "account already exists", err)
+	case errors.Is(err, provider.ErrNotFound):
+		return newOAuthErrorWrapped(http.StatusNotFound, ErrCodeInvalidRequest, "unknown provider", err)
+	case errors.Is(err, provider.ErrLinkNotFound):
+		return newOAuthErrorWrapped(http.StatusNotFound, ErrCodeInvalidRequest, "identity link not found", err)
+	case errors.Is(err, provider.ErrIdentityLinked):
+		return newOAuthErrorWrapped(http.StatusConflict, ErrCodeInvalidRequest, "identity already linked to another user", err)
 	case errors.Is(err, ErrUnsupportedGrantType):
 		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeUnsupportedGrantType, "unsupported grant type", err)
 	case errors.Is(err, ErrLoginRequired):
@@ -214,7 +221,7 @@ func (e *OAuthError) ErrorHeaders() iter.Seq2[string, string] {
 
 		var b strings.Builder
 
-		b.WriteString("Bearer")
+		b.WriteString(tokenTypeBearer)
 
 		if e.realm != "" {
 			b.WriteString(` realm="`)

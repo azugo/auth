@@ -12,12 +12,16 @@ import (
 	"azugo.io/auth/contract"
 	"azugo.io/auth/event"
 	"azugo.io/auth/jti"
+	"azugo.io/auth/provider"
 	"azugo.io/auth/session"
 	"azugo.io/auth/throttle"
 	"azugo.io/auth/token"
 
+	"azugo.io/azugo"
 	"azugo.io/core"
+	"azugo.io/core/cache"
 	"azugo.io/core/validation"
+	"go.uber.org/zap"
 )
 
 type (
@@ -75,6 +79,15 @@ type Auth struct {
 	throttle   throttle.Throttle
 	events     event.Sink // nil = no audit events
 
+	providers      provider.Registry
+	providerClaims ClaimMapper               // app-wide external claim mapper (nil = driver default)
+	identities     provider.IdentityStore    // nil = app-managed linking via FindOrCreateUser only
+	relink         provider.RelinkAuthorizer // nil = refuse moves
+	// State of external IdP redirects
+	extstate cache.Instance[externalState]
+	// Cache of the IdP id_token per session for federated-logout id_token_hint
+	fedIDTokens cache.Instance[string]
+
 	// Cookie provides session cookie attribute helpers.
 	Cookie CookieCtx
 	// Issuer provides OIDC issuer resolution helpers.
@@ -115,6 +128,29 @@ func Events(sink event.Sink) Option {
 // Transactor to allow to run multi-write handler sequences so they can be made atomic.
 func Transactor(t TxRunner) Option {
 	return func(a *Auth) { a.Transaction.tx = t }
+}
+
+// ProviderRegistry replaces the default Configuration.Providers-backed external provider
+// registry with a custom.
+func ProviderRegistry(r provider.Registry) Option {
+	return func(a *Auth) { a.providers = r }
+}
+
+// ClaimMapping registers a single app-wide claim mapper consulted for every external provider
+// that has no per-provider override.
+func ClaimMapping(m ClaimMapper) Option {
+	return func(a *Auth) { a.providerClaims = m }
+}
+
+// IdentityStore enables library-owned account linking of external identities.
+func IdentityStore(s provider.IdentityStore) Option {
+	return func(a *Auth) { a.identities = s }
+}
+
+// RelinkPolicy permits moving an already-linked external identity to another user under the
+// authorizer's rules. Without it, conflicts are refused.
+func RelinkPolicy(p provider.RelinkAuthorizer) Option {
+	return func(a *Auth) { a.relink = p }
 }
 
 // CookieScopeToBasePath makes the default session cookie Path resolve to the app's base path.
@@ -221,8 +257,33 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 	}
 
 	if a.events == nil {
-		a.events = &logEventSink{app: app}
+		a.events = &logEventSink{auth: a}
 	}
+
+	if a.providers == nil {
+		a.providers = provider.NewConfigRegistry(config)
+	}
+
+	// Best-effort check for provider misconfiguration surfaces early
+	if p, ok := a.providers.(provider.Prewarmer); ok {
+		if err := p.Prewarm(context.Background()); err != nil {
+			a.Log(a.app.BackgroundContext()).Warn("failed to pre-warm external providers", zap.Error(err))
+		}
+	}
+
+	extstate, err := cache.Create[externalState](app.Cache(), "auth:extstate")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create external state store: %w", err)
+	}
+
+	a.extstate = extstate
+
+	fedIDTokens, err := cache.Create[string](app.Cache(), "auth:fedidt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create federated id_token store: %w", err)
+	}
+
+	a.fedIDTokens = fedIDTokens
 
 	return a, nil
 }
@@ -257,6 +318,17 @@ func (a *Auth) Codes() code.Store {
 	return a.codes
 }
 
+// Providers returns the configured external provider registry.
+func (a *Auth) Providers() provider.Registry {
+	return a.providers
+}
+
+// Identities returns the configured external identity link store, or nil when account linking
+// is app-managed.
+func (a *Auth) Identities() provider.IdentityStore {
+	return a.identities
+}
+
 // emit sends e to the configured event sink, stamping At.
 func (a *Auth) emit(ctx context.Context, e event.Event) {
 	if a.events == nil {
@@ -270,6 +342,16 @@ func (a *Auth) emit(ctx context.Context, e event.Event) {
 // Config returns the auth Configuration.
 func (a *Auth) Config() *Configuration {
 	return a.config
+}
+
+// Log returns the "auth" logger, request-scoped when ctx carries a request.
+func (a *Auth) Log(ctx context.Context) *zap.Logger {
+	log := a.app.Log()
+	if actx := azugo.RequestContext(ctx); actx != nil {
+		log = actx.Log()
+	}
+
+	return log.Named("auth")
 }
 
 func setDefaults(cfg *Configuration) {
@@ -287,6 +369,10 @@ func setDefaults(cfg *Configuration) {
 
 	if cfg.CodeTTL == 0 {
 		cfg.CodeTTL = 60 * time.Second
+	}
+
+	if cfg.ExternalStateTTL == 0 {
+		cfg.ExternalStateTTL = 15 * time.Minute
 	}
 
 	if cfg.Throttle.MaxAttempts == 0 {

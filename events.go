@@ -6,23 +6,16 @@ import (
 	"azugo.io/auth/event"
 
 	"azugo.io/azugo"
-	"azugo.io/core"
 	"go.uber.org/zap"
 )
 
 type logEventSink struct {
-	app *core.App
+	auth *Auth
 }
 
 func (s *logEventSink) Emit(ctx context.Context, e event.Event) {
-	log := s.app.Log()
-
-	actx, isRequest := ctx.(*azugo.Context)
-	if isRequest {
-		log = actx.Log()
-	}
-
-	log = log.Named("auth.event").WithOptions(zap.AddCallerSkip(2))
+	actx := azugo.RequestContext(ctx)
+	log := s.auth.Log(ctx).Named("event").WithOptions(zap.AddCallerSkip(2))
 
 	fields := make([]zap.Field, 0, 4+len(e.Detail))
 	fields = append(fields, zap.String("event.action", e.Type))
@@ -36,12 +29,12 @@ func (s *logEventSink) Emit(ctx context.Context, e event.Event) {
 	}
 
 	// The request logger already carries source.ip.
-	if e.IP != "" && !isRequest {
+	if e.IP != "" && actx == nil {
 		fields = append(fields, zap.String("source.ip", e.IP))
 	}
 
 	for k, v := range e.Detail {
-		if k == "username" {
+		if k == detailKeyUsername {
 			fields = append(fields, zap.Any("user.name", v))
 
 			continue

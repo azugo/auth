@@ -16,6 +16,7 @@ type discoveryDocument struct {
 	UserinfoEndpoint                          string   `json:"userinfo_endpoint"`
 	RevocationEndpoint                        string   `json:"revocation_endpoint"`
 	IntrospectionEndpoint                     string   `json:"introspection_endpoint"`
+	EndSessionEndpoint                        string   `json:"end_session_endpoint,omitempty"`
 	JWKSURI                                   string   `json:"jwks_uri,omitempty"`
 	ScopesSupported                           []string `json:"scopes_supported,omitempty"`
 	ResponseTypesSupported                    []string `json:"response_types_supported"`
@@ -34,7 +35,7 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 
 	ep := h.endpoints
 
-	for _, p := range []*string{&ep.Authorize, &ep.Token, &ep.Userinfo, &ep.JWKS, &ep.Revoke, &ep.Introspect} {
+	for _, p := range []*string{&ep.Authorize, &ep.Token, &ep.Userinfo, &ep.JWKS, &ep.Revoke, &ep.Introspect, &ep.EndSession} {
 		if *p == "" || strings.Contains(*p, "://") {
 			continue
 		}
@@ -46,19 +47,22 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 
 	// client_credentials issues signed JWT access tokens, so it is only available - and only
 	// advertised - with a key provider.
-	grantTypes := []string{"authorization_code", client.GrantTypePassword}
+	grantTypes := []string{client.GrantTypeAuthorizationCode, client.GrantTypePassword}
 	if kp != nil {
-		grantTypes = []string{"authorization_code", "client_credentials", client.GrantTypePassword}
+		grantTypes = []string{client.GrantTypeAuthorizationCode, "client_credentials", client.GrantTypePassword}
 	}
 
 	doc := discoveryDocument{
-		Issuer:                                    issuer,
-		AuthorizationEndpoint:                     ep.Authorize,
-		TokenEndpoint:                             ep.Token,
-		UserinfoEndpoint:                          ep.Userinfo,
-		RevocationEndpoint:                        ep.Revoke,
-		IntrospectionEndpoint:                     ep.Introspect,
-		JWKSURI:                                   ep.JWKS,
+		Issuer: issuer,
+		// Endpoints
+		AuthorizationEndpoint: ep.Authorize,
+		TokenEndpoint:         ep.Token,
+		UserinfoEndpoint:      ep.Userinfo,
+		RevocationEndpoint:    ep.Revoke,
+		IntrospectionEndpoint: ep.Introspect,
+		EndSessionEndpoint:    ep.EndSession,
+		JWKSURI:               ep.JWKS,
+		// Supported features
 		ResponseTypesSupported:                    []string{"code"},
 		GrantTypesSupported:                       grantTypes,
 		CodeChallengeMethodsSupported:             []string{"S256"},

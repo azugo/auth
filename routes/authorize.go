@@ -55,7 +55,7 @@ func (h *Handler) authorizeCode(ctx *azugo.Context) {
 		return
 	}
 
-	ctx.RedirectUnsafe(res.RedirectURI)
+	ctx.RedirectUnsafe(res.Redirect)
 }
 
 // authorize implements POST /authorize: the portal's silent re-authentication over the

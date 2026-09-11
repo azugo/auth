@@ -1,11 +1,11 @@
 module azugo.io/auth
 
-go 1.25.0
+go 1.26.0
 
 require (
 	aidanwoods.dev/go-paseto v1.6.0
-	azugo.io/azugo v0.37.1
-	azugo.io/core v0.37.1
+	azugo.io/azugo v0.38.1
+	azugo.io/core v0.38.1
 	github.com/go-quicktest/qt v1.102.0
 	github.com/goccy/go-json v0.10.6
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -13,12 +13,13 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/valyala/fasthttp v1.73.0
 	go.uber.org/zap v1.28.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 )
 
 require (
 	aidanwoods.dev/go-result v0.3.1 // indirect
 	github.com/andybalholm/brotli v1.2.2 // indirect
+	github.com/cenkalti/backoff/v7 v7.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -26,7 +27,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-playground/validator/v10 v10.30.3 // indirect
+	github.com/go-playground/validator/v10 v10.30.4 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -47,7 +48,7 @@ require (
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/valkey-io/valkey-go v1.0.76 // indirect
+	github.com/valkey-io/valkey-go v1.0.77 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fastrand v1.1.0 // indirect
 	go.elastic.co/ecszap v1.0.3 // indirect

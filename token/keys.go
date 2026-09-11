@@ -335,33 +335,41 @@ type JWKS struct {
 	Keys []JWK `json:"keys"`
 }
 
-// JWKSFrom renders set's public keys as a JWKS document.
+// JWKSFrom renders set's public keys as a JWKS document, skipping keys that have no JWK
+// representation.
 func JWKSFrom(set *KeySet) JWKS {
 	keys := make([]JWK, 0, 1+len(set.Signing)+len(set.Secondary))
-	keys = append(keys, jwkFor(set.Primary.ID, set.Primary.Algorithm, set.Primary.Public))
+
+	if jwk, err := jwkFor(set.Primary.ID, set.Primary.Algorithm, set.Primary.Public); err == nil {
+		keys = append(keys, jwk)
+	}
 
 	for _, sk := range set.Signing {
-		keys = append(keys, jwkFor(sk.ID, sk.Algorithm, sk.Public))
+		if jwk, err := jwkFor(sk.ID, sk.Algorithm, sk.Public); err == nil {
+			keys = append(keys, jwk)
+		}
 	}
 
 	for _, vk := range set.Secondary {
-		keys = append(keys, jwkFor(vk.ID, vk.Algorithm, vk.Public))
+		if jwk, err := jwkFor(vk.ID, vk.Algorithm, vk.Public); err == nil {
+			keys = append(keys, jwk)
+		}
 	}
 
 	return JWKS{Keys: keys}
 }
 
-func jwkFor(kid, alg string, pub crypto.PublicKey) JWK {
+func jwkFor(kid, alg string, pub crypto.PublicKey) (JWK, error) {
 	fields, err := publicKeyFields(pub)
 	if err != nil {
-		return JWK{}
+		return JWK{}, err
 	}
 
 	return JWK{
 		Kty: fields.Kty, Use: "sig", Kid: kid, Alg: alg,
 		N: fields.N, E: fields.E,
 		Crv: fields.Crv, X: fields.X, Y: fields.Y,
-	}
+	}, nil
 }
 
 type jwkPublicFields struct {

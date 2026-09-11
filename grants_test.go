@@ -14,10 +14,10 @@ import (
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
+	"azugo.io/core/password"
 	"azugo.io/core/test"
 	"github.com/go-quicktest/qt"
 	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // newGrantsTestAuth builds an Auth with the standard fake users and any number of clients.
@@ -93,7 +93,7 @@ func authorizeCode(t *testing.T, a *Auth, sessionToken, scope, nonce string) str
 	})
 	qt.Assert(t, qt.IsNil(err))
 
-	u, err := url.Parse(res.RedirectURI)
+	u, err := url.Parse(res.Redirect)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(u.Query().Get("state"), "xyz"))
 	qt.Assert(t, qt.IsTrue(u.Query().Get("code") != ""))
@@ -184,8 +184,8 @@ func TestAuthorizeErrorsRedirectAfterURIValidation(t *testing.T) {
 		SessionToken: cookie,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "error=unsupported_response_type"))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "state=xyz"))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=unsupported_response_type"))
+	qt.Check(t, qt.StringContains(res.Redirect, "state=xyz"))
 }
 
 func TestAuthorizeRequiresPKCEForPublicClient(t *testing.T) {
@@ -198,8 +198,8 @@ func TestAuthorizeRequiresPKCEForPublicClient(t *testing.T) {
 		SessionToken: cookie,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "error=invalid_request"))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "code_challenge"))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_request"))
+	qt.Check(t, qt.StringContains(res.Redirect, "code_challenge"))
 }
 
 func TestAuthorizeRejectsMalformedCodeChallenge(t *testing.T) {
@@ -213,7 +213,7 @@ func TestAuthorizeRejectsMalformedCodeChallenge(t *testing.T) {
 		SessionToken: cookie,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "error=invalid_request"))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_request"))
 }
 
 func TestAuthorizationCodeGrantRejectsMalformedVerifier(t *testing.T) {
@@ -243,7 +243,7 @@ func TestAuthorizeRejectsPlainPKCEMethod(t *testing.T) {
 		SessionToken: cookie,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "error=invalid_request"))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_request"))
 }
 
 func TestAuthorizeRequiresLogin(t *testing.T) {
@@ -269,7 +269,7 @@ func TestAuthorizeRejectsScopeBeyondSession(t *testing.T) {
 		SessionToken: cookie,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "error=invalid_scope"))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_scope"))
 }
 
 func TestAuthorizationCodeReplayRevokesSession(t *testing.T) {
@@ -455,7 +455,7 @@ func TestAuthorizeRejectsScopeBeyondClientRegistration(t *testing.T) {
 		SessionToken: cookie,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.StringContains(res.RedirectURI, "error=invalid_scope"))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_scope"))
 }
 
 func TestAuthorizeDefaultScopeNarrowedToClientRegistration(t *testing.T) {
@@ -527,13 +527,13 @@ func TestAuthorizationCodeGrantRejectsRedirectURIMismatch(t *testing.T) {
 func serviceClient(t *testing.T, secret string) *client.Client {
 	t.Helper()
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.MinCost)
+	hash, err := password.Hash(secret)
 	qt.Assert(t, qt.IsNil(err))
 
 	return &client.Client{
 		ID: "svc", GrantTypes: []string{"client_credentials"},
 		Scopes:                  []string{"items:read", "items:write"},
-		SecretHash:              string(hash),
+		SecretHash:              hash,
 		AccessTokenType:         client.AccessTokenTypeJWT,
 		TokenEndpointAuthMethod: client.TokenEndpointAuthClientSecret,
 	}
@@ -1010,7 +1010,7 @@ func TestLoginRedirectSanitizesReturnTo(t *testing.T) {
 			ClientID: "ssr", Username: "alice", Password: "secret123", ReturnTo: in,
 		})
 		qt.Assert(t, qt.IsNil(err))
-		qt.Check(t, qt.Equals(res.Redirect, want), qt.Commentf("returnTo %q", in))
+		qt.Check(t, qt.Equals(res.ReturnTo, want), qt.Commentf("returnTo %q", in))
 	}
 }
 

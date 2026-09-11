@@ -11,6 +11,9 @@ import (
 	"azugo.io/core/http"
 )
 
+// tokenTypeBearer is the RFC 6750 token_type value.
+const tokenTypeBearer = "Bearer"
+
 // OIDCRoutes holds the always-mounted protocol adapters.
 type OIDCRoutes struct {
 	Authorize     azugo.RequestHandler // POST /authorize (portal silent re-auth)
@@ -21,6 +24,19 @@ type OIDCRoutes struct {
 	Discovery     azugo.RequestHandler // GET /.well-known/openid-configuration
 	UserInfo      azugo.RequestHandler // GET /userinfo
 	JWKS          azugo.RequestHandler // GET /.well-known/jwks.json
+	Logout        azugo.RequestHandler // GET /logout (RP-initiated browser logout)
+}
+
+// ExternalRoutes holds the external-provider adapters: the browser redirects are always
+// mounted ({provider} resolves per request, 404 on unknown); the linking adapters are set only
+// when an IdentityStore is configured and mounted under LinkingGroup.
+type ExternalRoutes struct {
+	Login          azugo.RequestHandler // GET /external/{provider}/login
+	Callback       azugo.RequestHandler // GET /external/{provider}/callback
+	LogoutCallback azugo.RequestHandler // GET /external/{provider}/logout/callback
+	Link           azugo.RequestHandler // GET /external/{provider}/link
+	Identities     azugo.RequestHandler // GET /external/identities
+	Unlink         azugo.RequestHandler // DELETE /external/{provider}/identities/{id}
 }
 
 // SessionRoutes holds the suppressible self-service session adapters.
@@ -33,8 +49,9 @@ type SessionRoutes struct {
 
 // Handler exposes the HTTP adapters over a constructed *auth.Auth as grouped fields.
 type Handler struct {
-	OIDC    OIDCRoutes
-	Session SessionRoutes
+	OIDC     OIDCRoutes
+	External ExternalRoutes
+	Session  SessionRoutes
 
 	auth *auth.Auth
 	// mountPrefix is the prefix Bind mounted this Handler under.
@@ -52,6 +69,7 @@ type discoveryEndpoints struct {
 	JWKS       string
 	Revoke     string
 	Introspect string
+	EndSession string
 }
 
 // Group identifies a suppressible endpoint group for Bind.
@@ -60,6 +78,9 @@ type Group int
 const (
 	// SessionGroup mounts /sessions and /session routes.
 	SessionGroup Group = iota
+	// LinkingGroup mounts the account-linking routes (/external/{provider}/link and
+	// /external/identities), distinct from the always-on external login redirects.
+	LinkingGroup
 )
 
 func (g Group) apply(o *bindOptions) {
@@ -83,6 +104,7 @@ type bindOptions struct {
 	jwksEndpoint       string
 	revokeEndpoint     string
 	introspectEndpoint string
+	endSessionEndpoint string
 }
 
 // OIDC explicitly forces Bind to mount only OIDC routes.
@@ -148,9 +170,23 @@ func (o IntrospectEndpoint) apply(b *bindOptions) {
 	b.introspectEndpoint = string(o)
 }
 
+// EndSessionEndpoint overrides the end_session_endpoint URL reported by the discovery
+// document.
+type EndSessionEndpoint string
+
+func (o EndSessionEndpoint) apply(b *bindOptions) {
+	b.endSessionEndpoint = string(o)
+}
+
 // supportedGroups calculates supported groups to mount based on implemented stores.
-func supportedGroups(_ *auth.Auth) []Group {
-	return []Group{SessionGroup}
+func supportedGroups(a *auth.Auth) []Group {
+	groups := []Group{SessionGroup}
+
+	if a.Identities() != nil {
+		groups = append(groups, LinkingGroup)
+	}
+
+	return groups
 }
 
 // New builds the grouped HTTP adapters.
@@ -169,6 +205,7 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 			JWKS:       cmp.Or(o.jwksEndpoint, "/.well-known/jwks.json"),
 			Revoke:     cmp.Or(o.revokeEndpoint, "/revoke"),
 			Introspect: cmp.Or(o.introspectEndpoint, "/introspect"),
+			EndSession: cmp.Or(o.endSessionEndpoint, "/logout"),
 		},
 	}
 
@@ -183,6 +220,17 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	h.OIDC.Introspect = h.introspect
 	h.OIDC.Discovery = h.discovery
 	h.OIDC.UserInfo = h.userInfo
+	h.OIDC.Logout = h.logout
+
+	h.External.Login = h.externalLogin
+	h.External.Callback = h.externalCallback
+	h.External.LogoutCallback = h.externalLogoutCallback
+
+	if a.Identities() != nil {
+		h.External.Link = h.externalLink
+		h.External.Identities = h.listIdentities
+		h.External.Unlink = h.unlinkIdentity
+	}
 
 	// Bind mounts the route and discovery advertises
 	// the endpoint based on what is set here.
@@ -245,9 +293,15 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 	g.Post("/revoke", h.OIDC.Revoke)
 	g.Post("/introspect", h.OIDC.Introspect)
 	g.Get("/userinfo", h.OIDC.UserInfo)
+	g.Get("/logout", h.OIDC.Logout)
+
+	g.Get("/external/{provider}/login", h.External.Login)
+	g.Get("/external/{provider}/callback", h.External.Callback)
+	g.Get("/external/{provider}/logout/callback", h.External.LogoutCallback)
 
 	for _, group := range groups {
-		if group == SessionGroup {
+		switch group {
+		case SessionGroup:
 			g.Get("/session", h.Session.Get)
 			g.Delete("/session", h.Session.Delete)
 
@@ -258,6 +312,14 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 			if h.Session.Revoke != nil {
 				g.Delete("/sessions/{id}", h.Session.Revoke)
 			}
+		case LinkingGroup:
+			if h.External.Link == nil {
+				continue
+			}
+
+			g.Get("/external/{provider}/link", h.External.Link)
+			g.Get("/external/identities", h.External.Identities)
+			g.Delete("/external/{provider}/identities/{id}", h.External.Unlink)
 		}
 	}
 
@@ -277,9 +339,9 @@ func (h *Handler) writeLoginResult(ctx *azugo.Context, res auth.LoginResult) {
 			TokenType   string `json:"token_type"`
 			ExpiresIn   int    `json:"expires_in"`
 			IDToken     string `json:"id_token,omitempty"`
-		}{AccessToken: res.AccessToken, TokenType: "Bearer", ExpiresIn: res.ExpiresIn, IDToken: res.IDToken})
-	case res.Redirect != "":
-		ctx.Redirect(res.Redirect)
+		}{AccessToken: res.AccessToken, TokenType: tokenTypeBearer, ExpiresIn: res.ExpiresIn, IDToken: res.IDToken})
+	case res.ReturnTo != "":
+		ctx.Redirect(res.ReturnTo)
 	default:
 		ctx.StatusCode(http.StatusNoContent)
 	}

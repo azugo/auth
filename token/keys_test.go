@@ -2,6 +2,7 @@ package token
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
@@ -206,6 +207,28 @@ func TestJWKSFromRSA(t *testing.T) {
 	e, err := base64.RawURLEncoding.DecodeString(jwk.E)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(int(new(big.Int).SetBytes(e).Int64()), key.E))
+}
+
+func TestJWKSFromSkipsKeysWithoutJWKRepresentation(t *testing.T) {
+	_, priv, pub := genRSA(t)
+
+	kp, err := NewConfigKeyProvider(&contract.KeySetConfig{
+		Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: priv, PublicKey: pub},
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	edPub, _, err := ed25519.GenerateKey(rand.Reader)
+	qt.Assert(t, qt.IsNil(err))
+
+	set.Secondary = append(set.Secondary, VerificationKey{ID: "ed", Public: edPub})
+
+	// The unrepresentable key is dropped rather than published as an empty entry.
+	jwks := JWKSFrom(set)
+	qt.Assert(t, qt.HasLen(jwks.Keys, 1))
+	qt.Check(t, qt.Equals(jwks.Keys[0].Kid, "k1"))
 }
 
 func TestJWKSFromECDSA(t *testing.T) {

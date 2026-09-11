@@ -29,6 +29,11 @@ type Configuration struct {
 	AccessTokenTTL          time.Duration `mapstructure:"access_token_ttl" validate:"required"` // default: 20m
 	SessionTTL              time.Duration `mapstructure:"session_ttl"      validate:"required"` // default: 8h
 	CodeTTL                 time.Duration `mapstructure:"code_ttl"`                             // authorization-code lifetime; default: 60s
+	// ExternalStateTTL bounds one external IdP round-trip, from redirect to callback.
+	ExternalStateTTL time.Duration `mapstructure:"external_state_ttl"`
+	// ClockSkew is the leeway allowed on external id_token time claims, inherited by every
+	// provider that does not set its own. Default 1m; keep it under 2m.
+	ClockSkew time.Duration `mapstructure:"clock_skew"`
 	// BaseURL pins the public base URL used to resolve the issuer and the default cookie
 	// path instead of deriving them from the incoming request (proxies, split origin).
 	BaseURL string `mapstructure:"base_url" validate:"omitempty,url"`
@@ -112,8 +117,23 @@ type ExternalProviderConfig struct {
 	Scopes       []string
 	// LogoutAfterAuth is the "no-SSO" mode: RP-initiate logout at the IdP immediately after a
 	// successful login and finalize the local session only on the logout callback.
-	LogoutAfterAuth bool              `mapstructure:"logout_after_auth"`
-	Config          map[string]string `mapstructure:"config"` // driver-specific extra options
+	LogoutAfterAuth bool `mapstructure:"logout_after_auth"`
+	// ClockSkew pins the leeway allowed on this provider's id_token time claims, nil inherits
+	// Configuration.ClockSkew and zero validates strictly. The registry resolves it before
+	// opening a driver, so drivers see it set.
+	ClockSkew   *time.Duration    `mapstructure:"clock_skew"`
+	Config      map[string]string `mapstructure:"config"` // driver-specific extra options
+	ClaimMapper ClaimMapper       `mapstructure:"-"`
+}
+
+// EffectiveClockSkew returns the resolved id_token leeway, treating an unresolved nil as
+// strict.
+func (e *ExternalProviderConfig) EffectiveClockSkew() time.Duration {
+	if e.ClockSkew == nil {
+		return 0
+	}
+
+	return *e.ClockSkew
 }
 
 // Bind registers defaults and environment variable bindings for the auth configuration
@@ -127,6 +147,8 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	v.SetDefault(prefix+".access_token_ttl", 20*time.Minute)
 	v.SetDefault(prefix+".session_ttl", 8*time.Hour)
 	v.SetDefault(prefix+".code_ttl", 60*time.Second)
+	v.SetDefault(prefix+".external_state_ttl", 15*time.Minute)
+	v.SetDefault(prefix+".clock_skew", time.Minute)
 	v.SetDefault(prefix+".throttle.enabled", true)
 	v.SetDefault(prefix+".throttle.max_attempts", 5)
 	v.SetDefault(prefix+".throttle.window", 15*time.Minute)
@@ -143,6 +165,8 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".access_token_ttl", "AUTH_ACCESS_TOKEN_TTL")
 	_ = v.BindEnv(prefix+".session_ttl", "AUTH_SESSION_TTL")
 	_ = v.BindEnv(prefix+".code_ttl", "AUTH_CODE_TTL")
+	_ = v.BindEnv(prefix+".external_state_ttl", "AUTH_EXTERNAL_STATE_TTL")
+	_ = v.BindEnv(prefix+".clock_skew", "AUTH_CLOCK_SKEW")
 	_ = v.BindEnv(prefix+".base_url", "AUTH_BASE_URL")
 	_ = v.BindEnv(prefix+".issuer", "AUTH_ISSUER")
 	_ = v.BindEnv(prefix+".throttle.enabled", "AUTH_THROTTLE_ENABLED")

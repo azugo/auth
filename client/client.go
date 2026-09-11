@@ -10,6 +10,9 @@ import (
 // AuthMethodPassword is the method name for internal username/password login.
 const AuthMethodPassword = "password"
 
+// GrantTypeAuthorizationCode is the RFC 6749 grant_type value for the authorization code grant.
+const GrantTypeAuthorizationCode = "authorization_code"
+
 // GrantTypePassword is the RFC 6749 grant_type value for the password grant.
 const GrantTypePassword = "password"
 
@@ -33,7 +36,7 @@ type TokenEndpointAuthMethod string
 // Registered OIDC token_endpoint_auth_method values.
 const (
 	TokenEndpointAuthNone         TokenEndpointAuthMethod = "none"          // public client - no secret
-	TokenEndpointAuthClientSecret TokenEndpointAuthMethod = "client_secret" // shared secret (bcrypt-hashed)
+	TokenEndpointAuthClientSecret TokenEndpointAuthMethod = "client_secret" // shared secret (PHC-hashed)
 	//nolint:gosec
 	TokenEndpointAuthPrivateKeyJWT TokenEndpointAuthMethod = "private_key_jwt"
 )
@@ -62,7 +65,7 @@ const (
 type Client struct {
 	ID            string
 	Name          string
-	SecretHash    string // bcrypt; required when TokenEndpointAuthMethod = client_secret
+	SecretHash    string // PHC-encoded; required when TokenEndpointAuthMethod = client_secret
 	PublicKey     string // PEM; required when TokenEndpointAuthMethod = private_key_jwt
 	GrantTypes    []string
 	Scopes        []string

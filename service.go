@@ -19,6 +19,9 @@ import (
 	"azugo.io/core/paginator"
 )
 
+// detailKeyUsername is the event detail key for username/password login flows.
+const detailKeyUsername = "username"
+
 // CookieDirective describes how to set or clear the session cookie.
 //
 // A negative MaxAge deletes the cookie.
@@ -38,7 +41,8 @@ type LoginResult struct {
 	// "openid".
 	IDToken   string
 	ExpiresIn int
-	Redirect  string
+	// ReturnTo is the local redirect target for a client.ResponseModeRedirect client.
+	ReturnTo string
 }
 
 // LoginRequest carries the password-grant credentials and the request-derived values.
@@ -121,7 +125,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 			}
 		}
 
-		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
+		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
 
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
@@ -130,7 +134,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		_ = a.throttle.Reset(ctx, key)
 	}
 
-	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
+	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
 
 	now := time.Now()
 	sess := &session.Session{
@@ -247,6 +251,8 @@ func (a *Auth) Logout(ctx context.Context, in LogoutRequest) (LogoutResult, erro
 		}); err != nil {
 			return LogoutResult{}, NewOAuthErrorFrom(err)
 		}
+
+		_ = a.fedIDTokens.Delete(ctx, claims.SessionID)
 	}
 
 	return LogoutResult{ClearCookie: clearCookie}, nil
@@ -323,6 +329,8 @@ func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) erro
 		return NewOAuthErrorFrom(err)
 	}
 
+	_ = a.fedIDTokens.Delete(ctx, sessionID)
+
 	return nil
 }
 
@@ -354,7 +362,7 @@ func (a *Auth) issueSessionCookie(ctx context.Context, sess *session.Session, is
 
 // buildLoginResult assembles the session-cookie directive based on client mode and configuration.
 func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, returnTo, cookie string, requestTLS bool, baseURL, mountPath string) (LoginResult, error) {
-	result := LoginResult{
+	res := LoginResult{
 		Status: sess.Status,
 		Cookie: &CookieDirective{
 			Name:     a.config.CookieName,
@@ -374,8 +382,8 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 			return LoginResult{}, err
 		}
 
-		result.AccessToken = at
-		result.ExpiresIn = int(a.config.AccessTokenTTL.Seconds())
+		res.AccessToken = at
+		res.ExpiresIn = int(a.config.AccessTokenTTL.Seconds())
 
 		if a.keys != nil && scopeContains(sess.Scope, "openid") {
 			idToken, err := a.issueIDToken(ctx, sess, cl, baseURL, mountPath, "")
@@ -383,22 +391,15 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 				return LoginResult{}, NewOAuthErrorFrom(err)
 			}
 
-			result.IDToken = idToken
+			res.IDToken = idToken
 		}
 	case client.ResponseModeRedirect:
-		// validate redirect path
-		u, err := url.Parse(returnTo)
-		if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/") ||
-			strings.HasPrefix(u.Path, "//") || strings.HasPrefix(u.Path, "/\\") {
-			result.Redirect = "/"
-		} else {
-			result.Redirect = (&url.URL{Path: u.Path, RawQuery: u.RawQuery}).String()
-		}
+		res.ReturnTo = safeLocalRedirect(returnTo)
 	case client.ResponseModeCookie:
 		// nothing else to do
 	}
 
-	return result, nil
+	return res, nil
 }
 
 // issueIDToken issues a signed ID Token for session using client configuration.
@@ -424,6 +425,17 @@ func (a *Auth) issueIDToken(ctx context.Context, sess *session.Session, cl *clie
 		Nonce:     nonce,
 		AuthTime:  sess.CreatedAt.Unix(),
 	})
+}
+
+// safeLocalRedirect validates returnTo as a local absolute path, falling back to "/".
+func safeLocalRedirect(returnTo string) string {
+	u, err := url.Parse(returnTo)
+	if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/") ||
+		strings.HasPrefix(u.Path, "//") || strings.HasPrefix(u.Path, "/\\") {
+		return "/"
+	}
+
+	return (&url.URL{Path: u.Path, RawQuery: u.RawQuery}).String()
 }
 
 // scopeContains reports whether value is one of scope's space-separated fields.

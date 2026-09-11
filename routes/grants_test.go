@@ -10,10 +10,10 @@ import (
 	"azugo.io/auth/client"
 	"azugo.io/auth/session"
 
+	"azugo.io/core/password"
 	"github.com/go-quicktest/qt"
 	"github.com/goccy/go-json"
 	"github.com/valyala/fasthttp"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // grantsTestClients returns the portal (password) and code-flow clients used by the
@@ -203,11 +203,11 @@ func TestTokenEndpointResponseIsNotCacheable(t *testing.T) {
 func confidentialClient(t *testing.T, id, secret string) *client.Client {
 	t.Helper()
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.MinCost)
+	hash, err := password.Hash(secret)
 	qt.Assert(t, qt.IsNil(err))
 
 	return &client.Client{
-		ID: id, SecretHash: string(hash),
+		ID: id, SecretHash: hash,
 		TokenEndpointAuthMethod: client.TokenEndpointAuthClientSecret,
 	}
 }

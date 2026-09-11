@@ -8,12 +8,14 @@ import (
 
 // Well-known event types.
 const (
-	TypeLoginSuccess   = "login.success"
-	TypeLoginFailure   = "login.failure"
-	TypeLockout        = "lockout"
-	TypeTokenIssued    = "token.issued"
-	TypeTokenRevoked   = "token.revoked"
-	TypeSessionRevoked = "session.revoked"
+	TypeLoginSuccess     = "login.success"
+	TypeLoginFailure     = "login.failure"
+	TypeLockout          = "lockout"
+	TypeTokenIssued      = "token.issued"
+	TypeTokenRevoked     = "token.revoked"
+	TypeSessionRevoked   = "session.revoked"
+	TypeIdentityLinked   = "identity.linked"
+	TypeIdentityUnlinked = "identity.unlinked"
 )
 
 // Event is one security-relevant occurrence for audit/SIEM.

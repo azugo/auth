@@ -20,6 +20,9 @@ import (
 	"azugo.io/core/http"
 )
 
+// tokenTypeBearer is the RFC 6750 token_type value.
+const tokenTypeBearer = "Bearer"
+
 // AuthorizeRequest carries an OIDC authorization request (GET /authorize, response_type=code).
 type AuthorizeRequest struct {
 	ResponseType        string
@@ -37,7 +40,7 @@ type AuthorizeRequest struct {
 
 // AuthorizeResult carries the redirect the caller should perform.
 type AuthorizeResult struct {
-	RedirectURI string
+	Redirect string
 }
 
 // Authorize handles the authorization-code flow: it validates the request, establishes the
@@ -57,7 +60,7 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 		return authorizeErrorRedirect(in, ErrCodeUnsupportedResponseType, "only response_type=code is supported"), nil
 	}
 
-	if !cl.GrantTypeAllowed("authorization_code") {
+	if !cl.GrantTypeAllowed(client.GrantTypeAuthorizationCode) {
 		return authorizeErrorRedirect(in, ErrCodeUnauthorizedClient, "client is not allowed to use the authorization_code grant"), nil
 	}
 
@@ -124,7 +127,7 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 	}
 
 	return AuthorizeResult{
-		RedirectURI: appendQuery(in.RedirectURI, url.Values{
+		Redirect: appendQuery(in.RedirectURI, url.Values{
 			"code":  {val},
 			"state": {in.State},
 		}),
@@ -161,7 +164,7 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 		return TokenResult{}, err
 	}
 
-	if !cl.GrantTypeAllowed("authorization_code") {
+	if !cl.GrantTypeAllowed(client.GrantTypeAuthorizationCode) {
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeUnauthorizedClient, "client is not allowed to use the authorization_code grant")
 	}
 
@@ -231,7 +234,7 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 
 	res := TokenResult{
 		AccessToken: at,
-		TokenType:   "Bearer",
+		TokenType:   tokenTypeBearer,
 		ExpiresIn:   int(a.config.AccessTokenTTL.Seconds()),
 		Scope:       rec.Scope,
 	}
@@ -245,7 +248,7 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 		res.IDToken = idToken
 	}
 
-	a.emit(ctx, event.Event{Type: event.TypeTokenIssued, UserID: sess.UserID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"grant_type": "authorization_code"}})
+	a.emit(ctx, event.Event{Type: event.TypeTokenIssued, UserID: sess.UserID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"grant_type": client.GrantTypeAuthorizationCode}})
 
 	return res, nil
 }
@@ -298,7 +301,7 @@ func (a *Auth) ClientCredentialsGrant(ctx context.Context, in ClientCredentialsG
 
 	return TokenResult{
 		AccessToken: at,
-		TokenType:   "Bearer",
+		TokenType:   tokenTypeBearer,
 		ExpiresIn:   int(a.config.AccessTokenTTL.Seconds()),
 		Scope:       scope,
 	}, nil
@@ -410,7 +413,7 @@ func grantedScope(requested, available string) (string, bool) {
 // redirect_uri.
 func authorizeErrorRedirect(in AuthorizeRequest, errCode ErrorCode, description string) AuthorizeResult {
 	return AuthorizeResult{
-		RedirectURI: appendQuery(in.RedirectURI, url.Values{
+		Redirect: appendQuery(in.RedirectURI, url.Values{
 			"error":             {string(errCode)},
 			"error_description": {description},
 			"state":             {in.State},

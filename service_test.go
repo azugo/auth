@@ -116,7 +116,7 @@ func TestLoginJSONResponseMode(t *testing.T) {
 	qt.Check(t, qt.Equals(res.Cookie.Secure, true))
 	qt.Check(t, qt.IsTrue(res.AccessToken != ""))
 	qt.Check(t, qt.Equals(res.ExpiresIn, int(20*time.Minute/time.Second)))
-	qt.Check(t, qt.Equals(res.Redirect, ""))
+	qt.Check(t, qt.Equals(res.ReturnTo, ""))
 }
 
 func TestLoginRedirectResponseMode(t *testing.T) {
@@ -131,12 +131,12 @@ func TestLoginRedirectResponseMode(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	qt.Check(t, qt.Equals(res.AccessToken, ""))
-	qt.Check(t, qt.Equals(res.Redirect, "/dashboard"))
+	qt.Check(t, qt.Equals(res.ReturnTo, "/dashboard"))
 
 	// No ReturnTo defaults to "/".
 	res2, err := a.Login(context.Background(), LoginRequest{ClientID: "ssr", Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(res2.Redirect, "/"))
+	qt.Check(t, qt.Equals(res2.ReturnTo, "/"))
 }
 
 func TestLoginCookieResponseMode(t *testing.T) {
@@ -149,7 +149,7 @@ func TestLoginCookieResponseMode(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	qt.Check(t, qt.Equals(res.AccessToken, ""))
-	qt.Check(t, qt.Equals(res.Redirect, ""))
+	qt.Check(t, qt.Equals(res.ReturnTo, ""))
 	qt.Assert(t, qt.IsNotNil(res.Cookie))
 	qt.Check(t, qt.IsTrue(res.Cookie.Value != ""))
 }

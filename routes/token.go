@@ -24,7 +24,7 @@ func (h *Handler) token(ctx *azugo.Context) {
 	switch grantType {
 	case client.GrantTypePassword:
 		h.passwordGrant(ctx)
-	case "authorization_code":
+	case client.GrantTypeAuthorizationCode:
 		h.authorizationCodeGrant(ctx)
 	case "client_credentials":
 		h.clientCredentialsGrant(ctx)

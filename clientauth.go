@@ -10,18 +10,14 @@ import (
 	"azugo.io/auth/token"
 
 	"azugo.io/core/http"
+	"azugo.io/core/password"
 	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // AssertionTypeJWTBearer is the RFC 7523 client_assertion_type for private_key_jwt.
 //
 //nolint:gosec
 const AssertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-
-// dummySecretHash is a bcrypt hash compared against for unknown clients and clients without
-// a stored secret, so those paths cost the same as a real comparison (anti-enumeration).
-var dummySecretHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
 // ClientCredentials carries the authentication material presented at a client-authenticated
 // endpoint (/token, /introspect, /revoke).
@@ -38,19 +34,20 @@ func (a *Auth) AuthenticateClient(ctx context.Context, creds ClientCredentials, 
 	cl, err := a.clients.GetClient(ctx, creds.ClientID)
 	if err != nil {
 		// Equivalent dummy work so an unknown client_id costs the same as a bad secret.
-		_ = bcrypt.CompareHashAndPassword(dummySecretHash, []byte(creds.Secret))
+		password.VerifyEmpty(creds.Secret)
 
 		return nil, NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client")
 	}
 
 	switch cl.TokenEndpointAuthMethod {
 	case client.TokenEndpointAuthClientSecret:
-		hash := []byte(cl.SecretHash)
-		if cl.SecretHash == "" {
-			hash = dummySecretHash
+		if cl.SecretHash == "" || creds.Secret == "" {
+			password.VerifyEmpty(creds.Secret)
+
+			return nil, NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client")
 		}
 
-		if err := bcrypt.CompareHashAndPassword(hash, []byte(creds.Secret)); err != nil || cl.SecretHash == "" || creds.Secret == "" {
+		if ok, err := password.Verify(creds.Secret, cl.SecretHash); err != nil || !ok {
 			return nil, NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client")
 		}
 	case client.TokenEndpointAuthPrivateKeyJWT:
