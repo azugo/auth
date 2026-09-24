@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,4 +257,49 @@ func TestLogoutURL(t *testing.T) {
 	qt.Check(t, qt.Equals(u.Query().Get("id_token_hint"), "idt"))
 	qt.Check(t, qt.Equals(u.Query().Get("state"), "st1"))
 	qt.Check(t, qt.Equals(u.Query().Get("post_logout_redirect_uri"), "https://app.example/auth/external/x/logout/callback"))
+}
+
+func TestDefaultClientBoundsSlowIdP(t *testing.T) {
+	blocked := make(chan struct{})
+
+	srv := httptest.NewServer(nethttp.HandlerFunc(func(nethttp.ResponseWriter, *nethttp.Request) {
+		<-blocked
+	}))
+
+	// Close runs last and waits for the handler, so the handler is released first.
+	defer srv.Close()
+	defer close(blocked)
+
+	p := New(Config{Issuer: srv.URL, ClientID: "cid", RedirectURL: "https://app.example/cb"})
+
+	// A context deadline bounds the call even though the handler never responds.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := p.AuthURL(ctx, "state", "nonce", "challenge")
+
+	qt.Check(t, qt.IsNotNil(err))
+	qt.Check(t, qt.IsTrue(time.Since(start) < 5*time.Second), qt.Commentf("took %s", time.Since(start)))
+}
+
+func TestDiscoveryFetchDoesNotHoldTheLock(t *testing.T) {
+	idp := newTestIdP(t)
+	p := newTestProvider(idp)
+
+	// Concurrent first uses must not serialize behind one another's network call.
+	var wg sync.WaitGroup
+
+	wg.Add(8)
+
+	for range 8 {
+		go func() {
+			defer wg.Done()
+
+			_, err := p.AuthURL(context.Background(), "state", "nonce", "challenge")
+			qt.Check(t, qt.IsNil(err))
+		}()
+	}
+
+	wg.Wait()
 }

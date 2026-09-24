@@ -33,14 +33,6 @@ func (h *Handler) token(ctx *azugo.Context) {
 	}
 }
 
-func (h *Handler) tokenEndpointURL(ctx *azugo.Context) string {
-	if strings.Contains(h.endpoints.Token, "://") {
-		return h.endpoints.Token
-	}
-
-	return h.auth.Issuer.URL(ctx.BaseURL(), h.mountPrefix) + h.endpoints.Token
-}
-
 // clientCredentials collects the client authentication material from the Authorization
 // header (client_secret_basic) or the request body (client_secret_post, private_key_jwt).
 func (h *Handler) clientCredentials(ctx *azugo.Context) (auth.ClientCredentials, error) {
@@ -102,7 +94,7 @@ func (h *Handler) clientCredentials(ctx *azugo.Context) (auth.ClientCredentials,
 
 // passwordGrant handles the password grant_type.
 func (h *Handler) passwordGrant(ctx *azugo.Context) {
-	clientID, err := ctx.Form.String("client_id")
+	creds, err := h.clientCredentials(ctx)
 	if err != nil {
 		ctx.Error(err)
 
@@ -123,20 +115,28 @@ func (h *Handler) passwordGrant(ctx *azugo.Context) {
 		return
 	}
 
-	returnTo := ""
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
-		returnTo = *v
+	req := auth.LoginRequest{
+		Credentials: creds,
+		Username:    username,
+		Password:    password,
+		BaseURL:     ctx.BaseURL(),
+		MountPath:   h.mountPrefix,
+		IP:          ctx.IP().String(),
 	}
 
-	res, err := h.auth.Login(ctx, auth.LoginRequest{
-		ClientID:   clientID,
-		Username:   username,
-		Password:   password,
-		ReturnTo:   returnTo,
-		RequestTLS: ctx.IsTLS(),
-		BaseURL:    ctx.BaseURL(),
-		IP:         ctx.IP().String(),
-	})
+	if v := ctx.Form.StringOptional("return_to"); v != nil {
+		req.ReturnTo = *v
+	}
+
+	if v := ctx.Form.StringOptional("acr_values"); v != nil {
+		req.ACRValues = *v
+	}
+
+	if v := ctx.Form.StringOptional("claims"); v != nil {
+		req.Claims = *v
+	}
+
+	res, err := h.auth.Login(ctx, req)
 	if err != nil {
 		ctx.Error(err)
 
@@ -163,12 +163,11 @@ func (h *Handler) authorizationCodeGrant(ctx *azugo.Context) {
 	}
 
 	req := auth.AuthorizationCodeGrantRequest{
-		Credentials:   creds,
-		Code:          codeVal,
-		BaseURL:       ctx.BaseURL(),
-		MountPath:     h.mountPrefix,
-		TokenEndpoint: h.tokenEndpointURL(ctx),
-		IP:            ctx.IP().String(),
+		Credentials: creds,
+		Code:        codeVal,
+		BaseURL:     ctx.BaseURL(),
+		MountPath:   h.mountPrefix,
+		IP:          ctx.IP().String(),
 	}
 
 	if v := ctx.Form.StringOptional("redirect_uri"); v != nil {
@@ -204,12 +203,11 @@ func (h *Handler) clientCredentialsGrant(ctx *azugo.Context) {
 	}
 
 	res, err := h.auth.ClientCredentialsGrant(ctx, auth.ClientCredentialsGrantRequest{
-		Credentials:   creds,
-		Scope:         scope,
-		BaseURL:       ctx.BaseURL(),
-		MountPath:     h.mountPrefix,
-		TokenEndpoint: h.tokenEndpointURL(ctx),
-		IP:            ctx.IP().String(),
+		Credentials: creds,
+		Scope:       scope,
+		BaseURL:     ctx.BaseURL(),
+		MountPath:   h.mountPrefix,
+		IP:          ctx.IP().String(),
 	})
 	if err != nil {
 		ctx.Error(err)

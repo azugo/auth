@@ -51,7 +51,6 @@ func TestRevokeSessionOwnershipEnforced(t *testing.T) {
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 204))
-	settle()
 
 	resp2, err := tc.Get("/auth/session", tc.WithHeader("Authorization", "Bearer "+login.AccessToken))
 	defer fasthttp.ReleaseResponse(resp2)

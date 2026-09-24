@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,20 @@ type IntrospectionOption interface {
 }
 
 type introspectionOptions struct {
-	cacheTTL time.Duration
+	cacheTTL  time.Duration
+	audiences []string
+}
+
+// IntrospectionAudience restricts Introspection to tokens whose audience or client_id is one of
+// the given client IDs.
+func IntrospectionAudience(clientIDs ...string) IntrospectionOption {
+	return introspectionAudience(clientIDs)
+}
+
+type introspectionAudience []string
+
+func (o introspectionAudience) apply(opts *introspectionOptions) {
+	opts.audiences = o
 }
 
 // IntrospectionCacheTTL caps the positive-result cache TTL.
@@ -97,7 +111,18 @@ func Introspection(endpoint string, creds ClientCredentials, opts ...Introspecti
 				return
 			}
 
-			info := auth.UserInfo{ID: res.Subject, Name: res.Username, Scope: res.Scope}
+			if len(o.audiences) > 0 && !slices.Contains(o.audiences, res.Audience) && !slices.Contains(o.audiences, res.ClientID) {
+				next(ctx)
+
+				return
+			}
+
+			info := auth.UserInfo{
+				ID:       res.Subject,
+				Name:     res.Username,
+				Scope:    res.Scope,
+				ClientID: res.ClientID,
+			}
 			ctx.SetUser(info.ToUser())
 
 			if results != nil {

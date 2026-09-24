@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"azugo.io/auth"
 	"azugo.io/auth/client"
@@ -62,17 +63,12 @@ func (extUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) {
 	return auth.UserInfo{ID: id, Name: "Ext Alice", Scope: "openid"}, nil
 }
 
-func newExternalTestAuth(t *testing.T, opts ...auth.Option) *auth.Auth {
-	t.Helper()
+func (extUsers) FindOrCreateUser(_ context.Context, _ string, info auth.UserInfo) (auth.UserInfo, error) {
+	return info, nil
+}
 
-	app := core.New()
-
-	conf := config.New()
-	qt.Assert(t, qt.IsNil(conf.Load(nil, conf, string(app.Env()))))
-	app.SetConfig(nil, conf)
-	t.Cleanup(app.Stop)
-
-	cfg := &auth.Configuration{
+func externalTestConfig() *auth.Configuration {
+	return &auth.Configuration{
 		Secret:                  "0123456789abcdef0123456789abcdef",
 		SameSite:                "strict",
 		Issuer:                  "https://issuer.example/auth",
@@ -81,6 +77,23 @@ func newExternalTestAuth(t *testing.T, opts ...auth.Option) *auth.Auth {
 			{Name: "corp", Driver: "fake", ClientID: "app-client", RedirectURL: "https://issuer.example/auth/external/corp/callback"},
 		},
 	}
+}
+
+func newExternalTestAuth(t *testing.T, opts ...auth.Option) *auth.Auth {
+	t.Helper()
+
+	return newExternalAuth(t, externalTestConfig(), opts...)
+}
+
+func newExternalAuth(t *testing.T, cfg *auth.Configuration, opts ...auth.Option) *auth.Auth {
+	t.Helper()
+
+	app := core.New()
+
+	conf := config.New()
+	qt.Assert(t, qt.IsNil(conf.Load(nil, conf, string(app.Env()))))
+	app.SetConfig(nil, conf)
+	t.Cleanup(app.Stop)
 
 	cl := &client.Client{
 		ID: "ssr", GrantTypes: []string{client.GrantTypePassword},
@@ -115,6 +128,29 @@ func TestExternalLoginRouteRedirectsToIdP(t *testing.T) {
 	qt.Check(t, qt.Equals(resp2.StatusCode(), 404))
 }
 
+func TestExternalLoginRouteIsThrottledPerIP(t *testing.T) {
+	cfg := externalTestConfig()
+	cfg.Throttle = contract.ThrottleConfig{
+		Enabled: true, MaxAttempts: 5, Window: time.Minute, LockoutTTL: time.Minute,
+		ExternalStartMax: 2,
+	}
+
+	a := newExternalAuth(t, cfg)
+	app := newTestApp(t)
+	Bind(app, "/auth", a)
+
+	tc := app.TestClient()
+
+	// The handler hands the caller's IP to the start throttle, so the same caller spends the
+	// budget and is then refused.
+	for _, want := range []int{302, 302, 429} {
+		resp, err := tc.Get("/auth/external/corp/login?client_id=ssr")
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.Equals(resp.StatusCode(), want))
+		fasthttp.ReleaseResponse(resp)
+	}
+}
+
 func TestExternalCallbackRouteCreatesSession(t *testing.T) {
 	a := newExternalTestAuth(t)
 	app := newTestApp(t)
@@ -132,15 +168,13 @@ func TestExternalCallbackRouteCreatesSession(t *testing.T) {
 	state := u.Query().Get("state")
 	qt.Assert(t, qt.IsTrue(state != ""))
 
-	settle()
-
-	resp2, err := tc.Get("/auth/external/corp/callback?state=" + url.QueryEscape(state) + "&code=c1")
+	resp2, err := tc.Get("/auth/external/corp/callback?state="+url.QueryEscape(state)+"&code=c1", tc.WithHeader("Cookie", bindingCookie(t, resp)))
 	defer fasthttp.ReleaseResponse(resp2)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp2.StatusCode(), 302))
 
 	qt.Check(t, qt.Equals(string(resp2.Header.Peek("Location")), "/home"))
-	qt.Check(t, qt.StringContains(string(resp2.Header.Peek("Set-Cookie")), "__session="))
+	qt.Check(t, qt.StringContains(string(resp2.Header.Peek("Set-Cookie")), "session="))
 }
 
 func TestLogoutRouteClearsCookieAndRedirects(t *testing.T) {
@@ -148,21 +182,18 @@ func TestLogoutRouteClearsCookieAndRedirects(t *testing.T) {
 	app := newTestApp(t)
 	Bind(app, "/auth", a)
 
-	login, err := a.Login(context.Background(), auth.LoginRequest{ClientID: "ssr", Username: "alice", Password: "right"})
+	login, err := a.Login(context.Background(), auth.LoginRequest{Credentials: auth.ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "right"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	tc := app.TestClient()
 
-	resp, err := tc.Get("/auth/logout", tc.WithHeader("Cookie", "__session="+login.Cookie.Value))
+	resp, err := tc.Get("/auth/logout", tc.WithHeader("Cookie", "session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp.StatusCode(), 302))
 
 	qt.Check(t, qt.Equals(string(resp.Header.Peek("Location")), "/"))
-	qt.Check(t, qt.StringContains(string(resp.Header.Peek("Set-Cookie")), "__session=;"))
-
-	settle()
+	qt.Check(t, qt.StringContains(string(resp.Header.Peek("Set-Cookie")), "session=;"))
 
 	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
@@ -188,19 +219,18 @@ func TestLinkingRoutesRequireIdentityStore(t *testing.T) {
 	h2 := Bind(app2, "/auth", a2)
 	qt.Check(t, qt.IsNotNil(h2.External.Link))
 
-	login, err := a2.Login(context.Background(), auth.LoginRequest{ClientID: "ssr", Username: "alice", Password: "right"})
+	login, err := a2.Login(context.Background(), auth.LoginRequest{Credentials: auth.ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "right"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	tc2 := app2.TestClient()
 
-	resp2, err := tc2.Get("/auth/external/identities", tc2.WithHeader("Cookie", "__session="+login.Cookie.Value))
+	resp2, err := tc2.Get("/auth/external/identities", tc2.WithHeader("Cookie", "session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp2)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp2.StatusCode(), 200))
 
 	// The linking ceremony starts an IdP redirect for the authenticated caller.
-	resp3, err := tc2.Get("/auth/external/corp/link", tc2.WithHeader("Cookie", "__session="+login.Cookie.Value))
+	resp3, err := tc2.Get("/auth/external/corp/link", tc2.WithHeader("Cookie", "session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp3)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp3.StatusCode(), 302))
@@ -214,22 +244,20 @@ func TestExternalLinkCallbackReturnToPrefixesBasePath(t *testing.T) {
 	app := newTestApp(t)
 	Bind(app, "/auth", a)
 
-	login, err := a.Login(context.Background(), auth.LoginRequest{ClientID: "ssr", Username: "alice", Password: "right"})
+	login, err := a.Login(context.Background(), auth.LoginRequest{Credentials: auth.ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "right"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	tc := app.TestClient()
 
-	resp, err := tc.Get("/app/auth/external/corp/link?return_to=/profile", tc.WithHeader("Cookie", "__session="+login.Cookie.Value))
+	resp, err := tc.Get("/app/auth/external/corp/link?return_to=/profile", tc.WithHeader("Cookie", "session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp.StatusCode(), 302))
 
 	u, err := url.Parse(string(resp.Header.Peek("Location")))
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
-	resp2, err := tc.Get("/app/auth/external/corp/callback?state=" + url.QueryEscape(u.Query().Get("state")) + "&code=c1")
+	resp2, err := tc.Get("/app/auth/external/corp/callback?state="+url.QueryEscape(u.Query().Get("state"))+"&code=c1", tc.WithHeader("Cookie", bindingCookie(t, resp)))
 	defer fasthttp.ReleaseResponse(resp2)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp2.StatusCode(), 302))
@@ -251,4 +279,43 @@ func TestDiscoveryAdvertisesEndSessionEndpoint(t *testing.T) {
 	qt.Assert(t, qt.Equals(resp.StatusCode(), 200))
 
 	qt.Check(t, qt.StringContains(string(resp.Body()), `"end_session_endpoint":"https://issuer.example/auth/logout"`))
+}
+
+// bindingCookie returns the Cookie header carrying the browser-binding cookie set by resp.
+func bindingCookie(t *testing.T, resp *fasthttp.Response) string {
+	t.Helper()
+
+	c := fasthttp.AcquireCookie()
+	defer fasthttp.ReleaseCookie(c)
+
+	qt.Assert(t, qt.IsNil(c.ParseBytes(resp.Header.Peek("Set-Cookie"))))
+	qt.Check(t, qt.Equals(string(c.Key()), "__Secure-session_ext"))
+
+	return "session_ext=" + string(c.Value())
+}
+
+func TestExternalCallbackRouteRequiresBindingCookie(t *testing.T) {
+	a := newExternalTestAuth(t)
+	app := newTestApp(t)
+	Bind(app, "/auth", a)
+
+	tc := app.TestClient()
+
+	resp, err := tc.Get("/auth/external/corp/login?client_id=ssr")
+	defer fasthttp.ReleaseResponse(resp)
+	qt.Assert(t, qt.IsNil(err))
+
+	setCookie := string(resp.Header.Peek("Set-Cookie"))
+	qt.Check(t, qt.StringContains(setCookie, "session_ext="))
+	qt.Check(t, qt.StringContains(setCookie, "SameSite=Lax"))
+	qt.Check(t, qt.StringContains(setCookie, "HttpOnly"))
+
+	u, err := url.Parse(string(resp.Header.Peek("Location")))
+	qt.Assert(t, qt.IsNil(err))
+
+	// A callback arriving in a browser that did not start the round-trip is refused.
+	resp2, err := app.TestClient().Get("/auth/external/corp/callback?state=" + url.QueryEscape(u.Query().Get("state")) + "&code=c1")
+	defer fasthttp.ReleaseResponse(resp2)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(resp2.StatusCode(), 400))
 }

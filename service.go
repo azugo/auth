@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -15,6 +16,7 @@ import (
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
+	"azugo.io/azugo"
 	"azugo.io/core/http"
 	"azugo.io/core/paginator"
 )
@@ -22,14 +24,15 @@ import (
 // detailKeyUsername is the event detail key for username/password login flows.
 const detailKeyUsername = "username"
 
-// CookieDirective describes how to set or clear the session cookie.
+// CookieDirective describes how to set or clear a cookie.
 //
 // A negative MaxAge deletes the cookie.
 type CookieDirective struct {
-	Name, Value, Path, Domain string
-	MaxAge                    int
-	Secure, HTTPOnly          bool
-	SameSite                  string
+	Name     string
+	Value    string
+	Path     string
+	MaxAge   int
+	SameSite azugo.CookieSameSite
 }
 
 // LoginResult is returned by Login and Refresh based on client mode and configuration.
@@ -43,36 +46,47 @@ type LoginResult struct {
 	ExpiresIn int
 	// ReturnTo is the local redirect target for a client.ResponseModeRedirect client.
 	ReturnTo string
+	// StepToken is set while a step is pending; feed it to the step endpoints.
+	StepToken string
+	// Available, Selected, Interaction and Data describe the pending_mfa prompt.
+	Available   []string
+	Selected    string
+	Interaction string
+	Data        map[string]any
+	// ACR and AMR are the session's satisfied authentication context and methods.
+	ACR string
+	AMR []string
 }
 
 // LoginRequest carries the password-grant credentials and the request-derived values.
 type LoginRequest struct {
-	ClientID   string
-	Username   string
-	Password   string
-	ReturnTo   string
-	RequestTLS bool
-	BaseURL    string
-	MountPath  string
+	Credentials ClientCredentials
+	Username    string
+	Password    string
+	// ACRValues is the space-separated voluntary acr_values request.
+	ACRValues string
+	// Claims is the raw OIDC claims parameter; its id_token.acr entry may be essential.
+	Claims    string
+	ReturnTo  string
+	BaseURL   string
+	MountPath string
 	// IP is the caller's remote address.
 	IP string
 }
 
 // RefreshRequest carries the presented refresh token and the request-derived values.
 type RefreshRequest struct {
-	Token      string
-	ReturnTo   string
-	RequestTLS bool
-	BaseURL    string
-	MountPath  string
+	Token     string
+	ReturnTo  string
+	BaseURL   string
+	MountPath string
 }
 
 // LogoutRequest carries the presented token and the request-derived values.
 type LogoutRequest struct {
-	Token      string
-	RequestTLS bool
-	BasePath   string
-	MountPath  string
+	Token     string
+	BasePath  string
+	MountPath string
 }
 
 // LogoutResult is returned by Logout.
@@ -83,9 +97,9 @@ type LogoutResult struct {
 // Login authenticates a password-grant request, creates an active session and returns the
 // directives the caller should apply.
 func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) {
-	cl, err := a.clients.GetClient(ctx, in.ClientID)
+	cl, err := a.AuthenticateClient(ctx, in.Credentials, in.BaseURL, in.MountPath)
 	if err != nil {
-		return LoginResult{}, NewOAuthErrorFrom(err)
+		return LoginResult{}, err
 	}
 
 	if !cl.GrantTypeAllowed(client.GrantTypePassword) || !cl.AuthMethodAllowed(client.AuthMethodPassword) {
@@ -94,35 +108,19 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 
 	// Throttle keys combine the stable identity with the IP so neither a single account nor
 	// a single source can be brute-forced.
-	throttleKeys := make([]string, 0, 2)
-
+	keys := throttleKeys("", in.IP)
 	if in.Username != "" {
-		throttleKeys = append(throttleKeys, "pwd:"+in.Username)
+		keys = throttleKeys("pwd:"+in.Username, in.IP)
 	}
 
-	if in.IP != "" {
-		throttleKeys = append(throttleKeys, "ip:"+in.IP)
-	}
-
-	for _, key := range throttleKeys {
-		ok, retryAfter, err := a.throttle.Allow(ctx, key)
-		if err != nil {
-			return LoginResult{}, NewOAuthErrorFrom(err)
-		}
-
-		if !ok {
-			a.emit(ctx, event.Event{Type: event.TypeLockout, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"key": key}})
-
-			return LoginResult{}, NewThrottledError(retryAfter)
-		}
+	if err := a.checkThrottle(ctx, keys, cl.ID, in.IP); err != nil {
+		return LoginResult{}, err
 	}
 
 	info, err := a.users.Authenticate(ctx, in.Username, in.Password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
-			for _, key := range throttleKeys {
-				_ = a.throttle.Fail(ctx, key)
-			}
+			a.failThrottle(ctx, keys)
 		}
 
 		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
@@ -130,40 +128,20 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
-	for _, key := range throttleKeys {
-		_ = a.throttle.Reset(ctx, key)
+	if in.Username != "" {
+		a.resetThrottle(ctx, keys[:1])
 	}
 
 	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
 
-	now := time.Now()
 	sess := &session.Session{
-		UserID:    info.ID,
-		ClientID:  cl.ID,
-		Scope:     info.Scope,
-		Status:    session.StatusActive,
-		CreatedAt: now,
-		LastSeen:  now,
-		ExpiresAt: now.Add(a.config.SessionTTL),
+		UserID:   info.ID,
+		ClientID: cl.ID,
+		Scope:    clientScope(cl, info.Scope),
+		AMR:      mergeAMR([]string{amrPassword}, info.AMR),
 	}
 
-	var cookie string
-
-	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
-		if err := a.sessions.Create(ctx, sess); err != nil {
-			return err
-		}
-
-		var err error
-
-		cookie, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
-
-		return err
-	}); err != nil {
-		return LoginResult{}, NewOAuthErrorFrom(err)
-	}
-
-	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BaseURL, in.MountPath)
+	return a.startSession(ctx, sess, cl, parseACRRequest(in.ACRValues, in.Claims), in.ReturnTo, in.BaseURL, in.MountPath)
 }
 
 // Refresh performs the portal's silent re-authentication.
@@ -172,7 +150,7 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
 	}
 
-	claims, err := a.codec.DecodeAccess(in.Token)
+	claims, err := a.codec.DecodeSessionCookie(in.Token)
 	if err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
 	}
@@ -223,7 +201,7 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
-	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.RequestTLS, in.BaseURL, in.MountPath)
+	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.BaseURL, in.MountPath)
 }
 
 // Logout is the authoritative server-side logout.
@@ -232,8 +210,6 @@ func (a *Auth) Logout(ctx context.Context, in LogoutRequest) (LogoutResult, erro
 		Name:     a.config.CookieName,
 		Path:     a.Cookie.Path(in.BasePath, in.MountPath),
 		MaxAge:   -1,
-		Secure:   a.Cookie.Secure(in.RequestTLS),
-		HTTPOnly: true,
 		SameSite: a.Cookie.SameSite(),
 	}
 
@@ -241,19 +217,41 @@ func (a *Auth) Logout(ctx context.Context, in LogoutRequest) (LogoutResult, erro
 		return LogoutResult{ClearCookie: clearCookie}, nil
 	}
 
-	if claims, err := a.codec.DecodeAccess(in.Token); err == nil {
-		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
-			if err := a.sessions.Revoke(ctx, claims.SessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
-				return err
-			}
+	claims, err := a.codec.DecodeAccess(in.Token)
+	if err != nil {
+		return LogoutResult{ClearCookie: clearCookie}, nil //nolint:nilerr
+	}
 
-			return a.jti.Revoke(ctx, claims.TokenID)
-		}); err != nil {
-			return LogoutResult{}, NewOAuthErrorFrom(err)
+	live, err := a.live(ctx, claims)
+	if err != nil {
+		return LogoutResult{}, NewOAuthErrorFrom(err)
+	}
+
+	if !live {
+		return LogoutResult{ClearCookie: clearCookie}, nil
+	}
+
+	sess, err := a.sessions.Get(ctx, claims.SessionID)
+
+	switch {
+	case errors.Is(err, session.ErrNotFound), err == nil && !firstParty(claims, sess):
+		// Missing session needs no revocation
+		return LogoutResult{ClearCookie: clearCookie}, nil
+	case err != nil:
+		return LogoutResult{}, NewOAuthErrorFrom(err)
+	}
+
+	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
+		if err := a.sessions.Revoke(ctx, sess.ID); err != nil && !errors.Is(err, session.ErrNotFound) {
+			return err
 		}
 
-		_ = a.fedIDTokens.Delete(ctx, claims.SessionID)
+		return a.jti.Revoke(ctx, claims.TokenID)
+	}); err != nil {
+		return LogoutResult{}, NewOAuthErrorFrom(err)
 	}
+
+	_ = deleteSynced(ctx, a.fedIDTokens, sess.ID)
 
 	return LogoutResult{ClearCookie: clearCookie}, nil
 }
@@ -261,47 +259,109 @@ func (a *Auth) Logout(ctx context.Context, in LogoutRequest) (LogoutResult, erro
 // IntrospectToken validates a Bearer access token or session-cookie token
 // and returns the resolved user and session.
 func (a *Auth) IntrospectToken(ctx context.Context, tok string) (UserInfo, *session.Session, error) {
+	info, sess, _, err := a.introspect(ctx, tok)
+
+	return info, sess, err
+}
+
+// IntrospectFirstParty validates a token like IntrospectToken but additionally requires it to
+// be the session's own credential.
+func (a *Auth) IntrospectFirstParty(ctx context.Context, tok string) (UserInfo, *session.Session, error) {
+	info, sess, claims, err := a.introspect(ctx, tok)
+	if err != nil {
+		return UserInfo{}, nil, err
+	}
+
+	if !firstParty(claims, sess) {
+		return UserInfo{}, nil, NewOAuthErrorFrom(ErrFirstPartyRequired)
+	}
+
+	return info, sess, nil
+}
+
+func (a *Auth) introspect(ctx context.Context, tok string) (UserInfo, *session.Session, *token.AccessClaims, error) {
 	if tok == "" {
-		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
 	claims, err := a.codec.DecodeAccess(tok)
 	if err != nil {
-		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(err)
 	}
 
 	if time.Now().Unix() >= claims.ExpiresAt {
-		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
 	valid, err := a.jti.Validate(ctx, claims.TokenID, claims.SessionID)
 	if err != nil {
-		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(err)
 	}
 
 	if !valid {
-		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
 	sess, err := a.sessions.Get(ctx, claims.SessionID)
 	if err != nil {
-		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(err)
 	}
 
 	if !sess.Active() {
-		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
 	info, err := a.users.GetUser(ctx, sess.UserID)
 	if err != nil {
-		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+		return UserInfo{}, nil, nil, NewOAuthErrorFrom(err)
 	}
 
+	info.Scope = allowedScope(info.Scope, strings.FieldsSeq(sess.Scope))
 	if claims.Scope != "" {
 		info.Scope = claims.Scope
 	}
 
-	return info, sess, nil
+	info.ACR = sess.ACR
+	info.AMR = sess.AMR
+	info.ClientID = cmp.Or(claims.ClientID, sess.ClientID)
+
+	return info, sess, claims, nil
+}
+
+// live reports whether claims still name a usable and not expired credential.
+func (a *Auth) live(ctx context.Context, claims *token.AccessClaims) (bool, error) {
+	if time.Now().Unix() >= claims.ExpiresAt {
+		return false, nil
+	}
+
+	return a.jti.Validate(ctx, claims.TokenID, claims.SessionID)
+}
+
+// firstParty reports whether claims are session's own credential.
+func firstParty(claims *token.AccessClaims, sess *session.Session) bool {
+	return claims.Type != token.TypeAccessToken || claims.ClientID == sess.ClientID
+}
+
+// UserInfoClaims resolves the OIDC UserInfo claims a token's granted scope permits.
+func (a *Auth) UserInfoClaims(ctx context.Context, tok string) (UserInfo, error) {
+	info, _, err := a.IntrospectToken(ctx, tok)
+	if err != nil {
+		return UserInfo{}, err
+	}
+
+	if !scopeContains(info.Scope, ScopeOpenID) {
+		return UserInfo{}, NewOAuthError(http.StatusForbidden, ErrCodeInsufficientScope, "openid scope is required")
+	}
+
+	if !scopeContains(info.Scope, ScopeProfile) {
+		info.Name = ""
+	}
+
+	if !scopeContains(info.Scope, ScopeEmail) {
+		info.Email = ""
+	}
+
+	return info, nil
 }
 
 // ListSessions returns userID's sessions, ordered by LastSeen descending.
@@ -329,7 +389,7 @@ func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) erro
 		return NewOAuthErrorFrom(err)
 	}
 
-	_ = a.fedIDTokens.Delete(ctx, sessionID)
+	_ = deleteSynced(ctx, a.fedIDTokens, sessionID)
 
 	return nil
 }
@@ -360,19 +420,24 @@ func (a *Auth) issueSessionCookie(ctx context.Context, sess *session.Session, is
 	return cookie, nil
 }
 
+// cookieDirective builds the session-cookie directive for value.
+func (a *Auth) cookieDirective(value string, maxAge time.Duration, baseURL, mountPath string) *CookieDirective {
+	return &CookieDirective{
+		Name:     a.config.CookieName,
+		Value:    value,
+		Path:     a.Cookie.Path(baseURL, mountPath),
+		MaxAge:   int(maxAge.Seconds()),
+		SameSite: a.Cookie.SameSite(),
+	}
+}
+
 // buildLoginResult assembles the session-cookie directive based on client mode and configuration.
-func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, returnTo, cookie string, requestTLS bool, baseURL, mountPath string) (LoginResult, error) {
+func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, returnTo, cookie string, baseURL, mountPath string) (LoginResult, error) {
 	res := LoginResult{
 		Status: sess.Status,
-		Cookie: &CookieDirective{
-			Name:     a.config.CookieName,
-			Value:    cookie,
-			Path:     a.Cookie.Path(baseURL, mountPath),
-			MaxAge:   int(a.config.SessionTTL.Seconds()),
-			Secure:   a.Cookie.Secure(requestTLS),
-			HTTPOnly: true,
-			SameSite: a.Cookie.SameSite(),
-		},
+		Cookie: a.cookieDirective(cookie, a.config.SessionTTL, baseURL, mountPath),
+		ACR:    sess.ACR,
+		AMR:    sess.AMR,
 	}
 
 	switch cl.ResponseMode {
@@ -385,7 +450,7 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 		res.AccessToken = at
 		res.ExpiresIn = int(a.config.AccessTokenTTL.Seconds())
 
-		if a.keys != nil && scopeContains(sess.Scope, "openid") {
+		if a.keys != nil && scopeContains(sess.Scope, ScopeOpenID) {
 			idToken, err := a.issueIDToken(ctx, sess, cl, baseURL, mountPath, "")
 			if err != nil {
 				return LoginResult{}, NewOAuthErrorFrom(err)
@@ -424,6 +489,8 @@ func (a *Auth) issueIDToken(ctx context.Context, sess *session.Session, cl *clie
 		ExpiresAt: now.Add(a.config.AccessTokenTTL).Unix(),
 		Nonce:     nonce,
 		AuthTime:  sess.CreatedAt.Unix(),
+		ACR:       sess.ACR,
+		AMR:       sess.AMR,
 	})
 }
 
@@ -436,24 +503,6 @@ func safeLocalRedirect(returnTo string) string {
 	}
 
 	return (&url.URL{Path: u.Path, RawQuery: u.RawQuery}).String()
-}
-
-// scopeContains reports whether value is one of scope's space-separated fields.
-func scopeContains(scope, value string) bool {
-	for scope != "" {
-		tok, rest, found := strings.Cut(scope, " ")
-		if tok == value {
-			return true
-		}
-
-		if !found {
-			return false
-		}
-
-		scope = rest
-	}
-
-	return false
 }
 
 // newJTI generates a fresh random JTI value for a session cookie or access token.

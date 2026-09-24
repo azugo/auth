@@ -7,18 +7,39 @@ templ layout(title string) {
 		<head>
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
-			<title>{ title }</title>
+			<title>{ title } - Auth Portal Example</title>
 			<style>
-				body { font-family: sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; }
-				form { display: grid; gap: .75rem; max-width: 20rem; }
-				input { padding: .5rem; }
-				button { padding: .5rem; cursor: pointer; }
-				.error { color: #b00020; }
+				body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: #1f2328; background: #f4f5f7; }
+				header { background: #fff; border-bottom: 1px solid #d9dce1; }
+				header a { display: block; max-width: 40rem; margin: 0 auto; padding: .9rem 1rem; font-weight: 600; color: inherit; text-decoration: none; }
+				main { max-width: 40rem; margin: 2rem auto; padding: 1.5rem; background: #fff; border: 1px solid #d9dce1; border-radius: .5rem; }
+				h1 { margin-top: 0; font-size: 1.5rem; }
+				h2 { font-size: 1.1rem; margin-top: 1.5rem; }
+				a { color: #1f6feb; }
+				form { display: grid; gap: .6rem; max-width: 22rem; margin-bottom: 1rem; }
+				label { font-size: .9rem; color: #57606a; }
+				input { padding: .55rem .7rem; font: inherit; border: 1px solid #b7bcc4; border-radius: .375rem; }
+				button { justify-self: start; padding: .55rem .9rem; font: inherit; color: #fff; background: #1f6feb; border: 0; border-radius: .375rem; cursor: pointer; }
+				table { width: 100%; border-collapse: collapse; }
+				th, td { padding: .5rem; text-align: left; border-bottom: 1px solid #e3e6ea; }
+				td form { margin: 0; }
+				code { padding: .1rem .3rem; background: #f4f5f7; border-radius: .25rem; }
+				.error { margin: 0; font-size: .9rem; color: #b42318; }
 			</style>
 		</head>
 		<body>
-			<h1>{ title }</h1>
-			{ children... }
+			<header><a href="/">Auth Portal Example</a></header>
+			<main>
+				<h1>{ title }</h1>
+				{ children... }
+			</main>
 		</body>
 	</html>
+}
+
+// fieldError renders a validation message directly under the input it belongs to.
+templ fieldError(message string) {
+	if message != "" {
+		<p class="error" role="alert">{ message }</p>
+	}
 }

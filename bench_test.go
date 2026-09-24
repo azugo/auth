@@ -47,7 +47,7 @@ func BenchmarkLogin(b *testing.B) {
 
 	for b.Loop() {
 		if _, err := a.Login(context.Background(), LoginRequest{
-			ClientID: "spa", Username: "alice", Password: "secret123", IP: "203.0.113.9",
+			Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", IP: "203.0.113.9",
 		}); err != nil {
 			b.Fatal(err)
 		}
@@ -58,13 +58,11 @@ func BenchmarkIntrospectToken(b *testing.B) {
 	a := benchAuth(b)
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123",
 	})
 	if err != nil {
 		b.Fatal(err)
 	}
-
-	settle()
 
 	b.ReportAllocs()
 

@@ -9,6 +9,7 @@ import (
 
 	"azugo.io/auth/client"
 	"azugo.io/auth/contract"
+	"azugo.io/auth/mfa"
 	"azugo.io/auth/provider"
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
@@ -31,6 +32,12 @@ var (
 	// ErrLoginRequired is returned by Refresh when the presented session cookie is missing,
 	// expired, or otherwise cannot be silently re-authenticated.
 	ErrLoginRequired = errors.New("login required")
+	// ErrUnmetAuthenticationRequirements is returned when an essential acr request or the
+	// client's MinACR floor cannot be satisfied.
+	ErrUnmetAuthenticationRequirements = errors.New("unmet authentication requirements")
+	// ErrFirstPartyRequired is returned when an access token issued to another client is
+	// presented where only the session's own credential is accepted.
+	ErrFirstPartyRequired = errors.New("first-party credential required")
 )
 
 // ErrorCode is an RFC 6749 / RFC 6750 / RFC 9470 OAuth 2.0 error code.
@@ -173,6 +180,16 @@ func NewOAuthErrorFrom(err error) error {
 		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeUnsupportedGrantType, "unsupported grant type", err)
 	case errors.Is(err, ErrLoginRequired):
 		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeLoginRequired, "login required", err)
+	case errors.Is(err, ErrUnmetAuthenticationRequirements):
+		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeUnmetAuthenticationRequirements, "authentication requirements not met", err)
+	case errors.Is(err, ErrFirstPartyRequired):
+		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeInsufficientScope, "first-party credential required", err)
+	case errors.Is(err, mfa.ErrUnknownMethod):
+		return newOAuthErrorWrapped(http.StatusNotFound, ErrCodeInvalidRequest, "unknown mfa method", err)
+	case errors.Is(err, mfa.ErrNotEnrolled):
+		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidRequest, "mfa method not enrolled", err)
+	case errors.Is(err, mfa.ErrInvalidResponse):
+		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidGrant, "invalid mfa response", err)
 	default:
 		return newOAuthErrorWrapped(http.StatusInternalServerError, ErrCodeServerError, "internal error", err)
 	}

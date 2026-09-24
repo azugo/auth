@@ -119,7 +119,7 @@ func TestMemoryStoreListOrdersByLastSeenDesc(t *testing.T) {
 	lister, ok := store.(Lister)
 	qt.Assert(t, qt.IsTrue(ok))
 
-	// reqPage builds a request paginator the way ctx.Paging() does — with a placeholder total of
+	// reqPage builds a request paginator the way ctx.Paging() does - with a placeholder total of
 	// page*size so the requested page is not clamped away.
 	reqPage := func(page, size int) *paginator.Paginator { return paginator.New(page*size, size, page) }
 

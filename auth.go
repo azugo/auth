@@ -12,6 +12,7 @@ import (
 	"azugo.io/auth/contract"
 	"azugo.io/auth/event"
 	"azugo.io/auth/jti"
+	"azugo.io/auth/mfa"
 	"azugo.io/auth/provider"
 	"azugo.io/auth/session"
 	"azugo.io/auth/throttle"
@@ -77,7 +78,9 @@ type Auth struct {
 	// assertions deny-lists already-seen client_assertion JTIs (replay defence).
 	assertions jti.DenyList
 	throttle   throttle.Throttle
-	events     event.Sink // nil = no audit events
+	// extstart bounds how often one caller may start an external IdP round-trip
+	extstart throttle.Throttle
+	events   event.Sink // nil = no audit events
 
 	providers      provider.Registry
 	providerClaims ClaimMapper               // app-wide external claim mapper (nil = driver default)
@@ -87,6 +90,15 @@ type Auth struct {
 	extstate cache.Instance[externalState]
 	// Cache of the IdP id_token per session for federated-logout id_token_hint
 	fedIDTokens cache.Instance[string]
+
+	mfaStore   mfa.Store // nil = MFA disabled
+	mfaMethods mfa.Registry
+	// pending holds the step state of pending sessions, keyed by session ID
+	pending cache.Instance[pendingState]
+	// enrollments holds in-progress MFA enrollment state, keyed by user ID and method
+	enrollments cache.Instance[mfaEnrollment]
+	// challenges counts issued MFA challenges per session and method
+	challenges cache.Counter
 
 	// Cookie provides session cookie attribute helpers.
 	Cookie CookieCtx
@@ -151,6 +163,18 @@ func IdentityStore(s provider.IdentityStore) Option {
 // authorizer's rules. Without it, conflicts are refused.
 func RelinkPolicy(p provider.RelinkAuthorizer) Option {
 	return func(a *Auth) { a.relink = p }
+}
+
+// MFAStore enables MFA. Without it no MFA endpoint is mounted and every client's MFAPolicy is
+// treated as disabled.
+func MFAStore(s mfa.Store) Option {
+	return func(a *Auth) { a.mfaStore = s }
+}
+
+// MFARegistry replaces the default Configuration.MFAMethods-backed method registry with a
+// custom.
+func MFARegistry(r mfa.Registry) Option {
+	return func(a *Auth) { a.mfaMethods = r }
 }
 
 // CookieScopeToBasePath makes the default session cookie Path resolve to the app's base path.
@@ -256,12 +280,23 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 		a.throttle = t
 	}
 
+	extstart, err := throttle.NewLimit(app.Cache(), "auth:extstart", config.Throttle.ExternalStartMax, config.Throttle.Window)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create external start throttle: %w", err)
+	}
+
+	a.extstart = extstart
+
 	if a.events == nil {
 		a.events = &logEventSink{auth: a}
 	}
 
 	if a.providers == nil {
 		a.providers = provider.NewConfigRegistry(config)
+	}
+
+	if _, ok := users.(ExternalUserProvider); !ok && a.identities == nil && len(config.Providers) > 0 {
+		return nil, errors.New("external providers require a user provider implementing ExternalUserProvider or an identity store")
 	}
 
 	// Best-effort check for provider misconfiguration surfaces early
@@ -284,6 +319,33 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 	}
 
 	a.fedIDTokens = fedIDTokens
+
+	pending, err := cache.Create[pendingState](app.Cache(), "auth:pending")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pending step store: %w", err)
+	}
+
+	a.pending = pending
+
+	if a.mfaStore != nil {
+		if a.mfaMethods == nil {
+			a.mfaMethods = mfa.NewConfigRegistry(config, a.mfaStore)
+		}
+
+		enrollments, err := cache.Create[mfaEnrollment](app.Cache(), "auth:mfa:enroll")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create MFA enrollment store: %w", err)
+		}
+
+		a.enrollments = enrollments
+
+		challenges, err := cache.CreateCounter(app.Cache(), "auth:mfa:challenge")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create MFA challenge counter: %w", err)
+		}
+
+		a.challenges = challenges
+	}
 
 	return a, nil
 }
@@ -329,6 +391,16 @@ func (a *Auth) Identities() provider.IdentityStore {
 	return a.identities
 }
 
+// MFA returns the configured MFA enrollment store, or nil when MFA is disabled.
+func (a *Auth) MFA() mfa.Store {
+	return a.mfaStore
+}
+
+// MFAMethods returns the configured MFA method registry, or nil when MFA is disabled.
+func (a *Auth) MFAMethods() mfa.Registry {
+	return a.mfaMethods
+}
+
 // emit sends e to the configured event sink, stamping At.
 func (a *Auth) emit(ctx context.Context, e event.Event) {
 	if a.events == nil {
@@ -356,7 +428,7 @@ func (a *Auth) Log(ctx context.Context) *zap.Logger {
 
 func setDefaults(cfg *Configuration) {
 	if cfg.CookieName == "" {
-		cfg.CookieName = "__session"
+		cfg.CookieName = "session"
 	}
 
 	if cfg.AccessTokenTTL == 0 {
@@ -393,5 +465,9 @@ func setDefaults(cfg *Configuration) {
 
 	if cfg.Throttle.MFAMaxResends == 0 {
 		cfg.Throttle.MFAMaxResends = 3
+	}
+
+	if cfg.Throttle.ExternalStartMax == 0 {
+		cfg.Throttle.ExternalStartMax = 300
 	}
 }

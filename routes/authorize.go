@@ -40,6 +40,10 @@ func (h *Handler) authorizeCode(ctx *azugo.Context) {
 		req.ACRValues = *v
 	}
 
+	if v := ctx.Query.StringOptional("claims"); v != nil {
+		req.Claims = *v
+	}
+
 	if v := ctx.Query.StringOptional("code_challenge"); v != nil {
 		req.CodeChallenge = *v
 	}
@@ -67,10 +71,10 @@ func (h *Handler) authorize(ctx *azugo.Context) {
 	}
 
 	res, err := h.auth.Refresh(ctx, auth.RefreshRequest{
-		Token:      ctx.Cookie.Get(h.auth.Config().CookieName),
-		ReturnTo:   returnTo,
-		RequestTLS: ctx.IsTLS(),
-		BaseURL:    ctx.BaseURL(),
+		Token:     ctx.Cookie.Get(h.auth.Config().CookieName),
+		ReturnTo:  returnTo,
+		BaseURL:   ctx.BaseURL(),
+		MountPath: h.mountPrefix,
 	})
 	if err != nil {
 		ctx.Error(err)

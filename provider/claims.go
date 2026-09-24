@@ -24,8 +24,7 @@ var protocolClaims = map[string]struct{}{
 }
 
 // MapStandardClaims is the shared default claim mapping: sub → ID, name (or
-// given_name+family_name) → Name, email → Email, scp/scope/groups/roles → Scope
-// (space-joined), everything else except protocol claims → Claims.
+// given_name+family_name) → Name, email → Email, everything else except protocol claims → Claims.
 func MapStandardClaims(_ context.Context, _ string, raw map[string]any) (UserInfo, error) {
 	info := UserInfo{Claims: make(map[string]any, len(raw))}
 
@@ -37,8 +36,6 @@ func MapStandardClaims(_ context.Context, _ string, raw map[string]any) (UserInf
 			info.Name, _ = v.(string)
 		case "email":
 			info.Email, _ = v.(string)
-		case "scp", "scope", "groups", "roles":
-			info.Scope = joinScope(info.Scope, v)
 		default:
 			if _, skip := protocolClaims[k]; !skip {
 				info.Claims[k] = v
@@ -57,32 +54,4 @@ func MapStandardClaims(_ context.Context, _ string, raw map[string]any) (UserInf
 	}
 
 	return info, nil
-}
-
-// joinScope appends a string or string-slice claim value to a space-separated scope.
-func joinScope(scope string, v any) string {
-	fields := make([]string, 0, 4)
-
-	switch val := v.(type) {
-	case string:
-		fields = strings.Fields(val)
-	case []string:
-		fields = val
-	case []any:
-		for _, item := range val {
-			if s, ok := item.(string); ok {
-				fields = append(fields, s)
-			}
-		}
-	}
-
-	for _, f := range fields {
-		if scope == "" {
-			scope = f
-		} else {
-			scope += " " + f
-		}
-	}
-
-	return scope
 }

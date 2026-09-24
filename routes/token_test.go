@@ -27,7 +27,7 @@ func TestTokenPasswordGrantJSON(t *testing.T) {
 	qt.Check(t, qt.Equals(resp.StatusCode(), 200))
 
 	var cookie fasthttp.Cookie
-	cookie.SetKey(a.Config().CookieName)
+	cookie.SetKey("__Secure-" + a.Config().CookieName)
 	qt.Check(t, qt.IsTrue(resp.Header.Cookie(&cookie)))
 
 	body, err := resp.BodyUncompressed()
@@ -49,7 +49,8 @@ func TestTokenPasswordGrantRedirect(t *testing.T) {
 	})
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(resp.StatusCode(), 302))
+	// A POST redirect answers 303 See Other so the browser follows with a GET.
+	qt.Check(t, qt.Equals(resp.StatusCode(), 303))
 	qt.Check(t, qt.Equals(string(resp.Header.Peek("Location")), "/dashboard"))
 }
 
@@ -73,7 +74,7 @@ func TestTokenPasswordGrantRedirectRejectsOffOriginReturnTo(t *testing.T) {
 			"grant_type": "password", "client_id": "ssr", "username": "alice", "password": "right", "return_to": returnTo,
 		})
 		qt.Assert(t, qt.IsNil(err))
-		qt.Check(t, qt.Equals(resp.StatusCode(), 302))
+		qt.Check(t, qt.Equals(resp.StatusCode(), 303))
 
 		loc := string(resp.Header.Peek("Location"))
 		fasthttp.ReleaseResponse(resp)

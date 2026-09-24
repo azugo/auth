@@ -3,7 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"slices"
@@ -13,17 +13,13 @@ import (
 	"azugo.io/auth/event"
 	"azugo.io/auth/provider"
 	"azugo.io/auth/session"
+	"azugo.io/auth/token"
 
+	"azugo.io/azugo"
 	"azugo.io/core/cache"
 	"azugo.io/core/http"
 	"azugo.io/core/paginator"
 	"go.uber.org/zap"
-)
-
-// Event detail map keys used across external identity flows.
-const (
-	detailKeyProvider = "provider"
-	detailKeySubject  = "subject"
 )
 
 // External state entry kinds.
@@ -47,27 +43,61 @@ type externalState struct {
 	// Info, IDToken carry the deferred session identity (kind login_finalize).
 	Info    UserInfo
 	IDToken string
-	// RedirectURI is the validated post_logout_redirect_uri (kind logout).
+	// RedirectURI is the validated post_logout_redirect_uri.
 	RedirectURI string
+	// ACR is the authentication-context request bound to the login.
+	ACR acrRequest
+	// Browser is the hash of the binding cookie set on the browser that started the
+	// round-trip.
+	Browser string
 }
 
 // ExternalLoginRequest starts an external IdP login round-trip.
 type ExternalLoginRequest struct {
 	Provider string
 	ClientID string
-	ReturnTo string
+	// ACRValues and Claims carry the acr request.
+	ACRValues string
+	Claims    string
+	ReturnTo  string
+	BaseURL   string
+	MountPath string
+	// IP is the caller's remote address.
+	IP string
 }
 
 // ExternalLinkRequest starts an account-linking round-trip for the presented session.
 type ExternalLinkRequest struct {
-	Provider string
-	Token    string
-	ReturnTo string
+	Provider  string
+	Token     string
+	ReturnTo  string
+	BaseURL   string
+	MountPath string
+	// IP is the caller's remote address.
+	IP string
 }
 
-// RedirectResult carries the IdP redirect the caller should perform.
+// RedirectResult carries the IdP redirect the caller should perform and the browser-binding
+// cookie to set alongside it.
 type RedirectResult struct {
 	Redirect string
+	Cookie   *CookieDirective
+}
+
+// ExternalBindingCookieName returns the name of the browser-binding cookie for external IdP
+// round-trips.
+func (a *Auth) ExternalBindingCookieName() string {
+	return a.config.CookieName + "_ext"
+}
+
+// externalBindingCookie builds the browser-binding cookie directive; a negative maxAge
+// clears it.
+func (a *Auth) externalBindingCookie(value string, maxAge time.Duration, baseURL, mountPath string) *CookieDirective {
+	d := a.cookieDirective(value, maxAge, baseURL, mountPath)
+	d.Name = a.ExternalBindingCookieName()
+	d.SameSite = azugo.CookieSameSiteLax
+
+	return d
 }
 
 // BeginExternalLogin resolves the provider, stashes the round-trip state and returns the IdP
@@ -92,7 +122,8 @@ func (a *Auth) BeginExternalLogin(ctx context.Context, in ExternalLoginRequest) 
 		Provider: in.Provider,
 		ClientID: cl.ID,
 		ReturnTo: in.ReturnTo,
-	})
+		ACR:      parseACRRequest(in.ACRValues, in.Claims),
+	}, in.BaseURL, in.MountPath, in.IP)
 }
 
 // BeginExternalLink starts the linking ceremony: the same IdP round-trip as login bound to the
@@ -102,7 +133,7 @@ func (a *Auth) BeginExternalLink(ctx context.Context, in ExternalLinkRequest) (R
 		return RedirectResult{}, NewOAuthError(http.StatusNotFound, ErrCodeInvalidRequest, "account linking is not enabled")
 	}
 
-	info, sess, err := a.IntrospectToken(ctx, in.Token)
+	info, sess, err := a.IntrospectFirstParty(ctx, in.Token)
 	if err != nil {
 		return RedirectResult{}, err
 	}
@@ -118,10 +149,23 @@ func (a *Auth) BeginExternalLink(ctx context.Context, in ExternalLinkRequest) (R
 		ClientID: sess.ClientID,
 		ReturnTo: in.ReturnTo,
 		UserID:   info.ID,
-	})
+	}, in.BaseURL, in.MountPath, in.IP)
 }
 
-func (a *Auth) beginExternal(ctx context.Context, p provider.Provider, st externalState) (RedirectResult, error) {
+func (a *Auth) beginExternal(ctx context.Context, p provider.Provider, st externalState, baseURL, mountPath, ip string) (RedirectResult, error) {
+	if ip != "" {
+		ok, retryAfter, err := a.extstart.Allow(ctx, ip)
+		if err != nil {
+			return RedirectResult{}, NewOAuthErrorFrom(err)
+		}
+
+		if !ok {
+			a.emit(ctx, event.Event{Type: event.TypeLockout, ClientID: st.ClientID, IP: ip, Detail: map[string]any{"key": "extstart"}})
+
+			return RedirectResult{}, NewThrottledError(retryAfter)
+		}
+	}
+
 	state, err := newJTI()
 	if err != nil {
 		return RedirectResult{}, NewOAuthErrorFrom(err)
@@ -131,6 +175,13 @@ func (a *Auth) beginExternal(ctx context.Context, p provider.Provider, st extern
 	if err != nil {
 		return RedirectResult{}, NewOAuthErrorFrom(err)
 	}
+
+	binding, err := newJTI()
+	if err != nil {
+		return RedirectResult{}, NewOAuthErrorFrom(err)
+	}
+
+	st.Browser = s256(binding)
 
 	// A 32-byte verifier encodes to the RFC 7636 minimum of 43 unreserved characters.
 	vb := make([]byte, 32)
@@ -143,18 +194,23 @@ func (a *Auth) beginExternal(ctx context.Context, p provider.Provider, st extern
 	st.Nonce = nonce
 	st.CodeVerifier = verifier
 
-	if err := a.extstate.Set(ctx, state, st, cache.TTL[externalState](a.config.ExternalStateTTL)); err != nil {
+	if err := setSynced(ctx, a.extstate, state, st, cache.TTL[externalState](a.config.ExternalStateTTL)); err != nil {
 		return RedirectResult{}, NewOAuthErrorFrom(err)
 	}
 
-	sum := sha256.Sum256([]byte(verifier))
+	if ip != "" {
+		_ = a.extstart.Fail(ctx, ip)
+	}
 
-	uri, err := p.AuthURL(ctx, state, nonce, base64.RawURLEncoding.EncodeToString(sum[:]))
+	uri, err := p.AuthURL(ctx, state, nonce, s256(verifier))
 	if err != nil {
 		return RedirectResult{}, NewOAuthErrorFrom(err)
 	}
 
-	return RedirectResult{Redirect: uri}, nil
+	return RedirectResult{
+		Redirect: uri,
+		Cookie:   a.externalBindingCookie(binding, a.config.ExternalStateTTL, baseURL, mountPath),
+	}, nil
 }
 
 // ExternalCallbackRequest carries the IdP redirect back to /external/{provider}/callback.
@@ -165,10 +221,11 @@ type ExternalCallbackRequest struct {
 	// Error and ErrorDescription pass through an upstream IdP error response.
 	Error            string
 	ErrorDescription string
-	RequestTLS       bool
-	BaseURL          string
-	MountPath        string
-	IP               string
+	// Binding is the presented browser-binding cookie value.
+	Binding   string
+	BaseURL   string
+	MountPath string
+	IP        string
 }
 
 // ExternalCallbackResult is returned by ExternalCallback.
@@ -181,15 +238,19 @@ type ExternalCallbackResult struct {
 	ReturnTo string
 	// Link is the resulting identity link (link ceremony only).
 	Link *provider.IdentityLink
+	// ClearCookie removes the browser-binding cookie once the round-trip is complete.
+	ClearCookie *CookieDirective
 }
 
 // ExternalCallback validates the IdP redirect, exchanges the code and branches on the stashed
 // entry kind.
 func (a *Auth) ExternalCallback(ctx context.Context, in ExternalCallbackRequest) (ExternalCallbackResult, error) {
-	st, err := a.consumeExternalState(ctx, in.State, in.Provider, extKindLogin, extKindLink)
+	st, err := a.consumeExternalState(ctx, in.State, in.Provider, in.Binding, extKindLogin, extKindLink)
 	if err != nil {
 		return ExternalCallbackResult{}, err
 	}
+
+	clearCookie := a.externalBindingCookie("", -time.Second, in.BaseURL, in.MountPath)
 
 	if in.Error != "" {
 		return ExternalCallbackResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeAccessDenied, "external provider error: "+in.Error)
@@ -202,14 +263,14 @@ func (a *Auth) ExternalCallback(ctx context.Context, in ExternalCallbackRequest)
 
 	tokens, err := p.Exchange(ctx, in.Code, st.CodeVerifier, st.Nonce)
 	if err != nil {
-		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: st.ClientID, IP: in.IP, Detail: map[string]any{detailKeyProvider: in.Provider}})
+		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: st.ClientID, IP: in.IP, Detail: map[string]any{"provider": in.Provider}})
 
 		return ExternalCallbackResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "external token exchange failed")
 	}
 
 	info, err := a.mapExternalClaims(ctx, cfg, in.Provider, tokens.RawClaims)
 	if err != nil {
-		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: st.ClientID, IP: in.IP, Detail: map[string]any{detailKeyProvider: in.Provider}})
+		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: st.ClientID, IP: in.IP, Detail: map[string]any{"provider": in.Provider}})
 
 		return ExternalCallbackResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "external identity rejected")
 	}
@@ -220,7 +281,7 @@ func (a *Auth) ExternalCallback(ctx context.Context, in ExternalCallbackRequest)
 			return ExternalCallbackResult{}, err
 		}
 
-		res := ExternalCallbackResult{Link: link}
+		res := ExternalCallbackResult{Link: link, ClearCookie: clearCookie}
 		if st.ReturnTo != "" {
 			res.ReturnTo = safeLocalRedirect(st.ReturnTo)
 		}
@@ -241,12 +302,12 @@ func (a *Auth) ExternalCallback(ctx context.Context, in ExternalCallbackRequest)
 		return a.deferExternalLogin(ctx, p, *st, in.BaseURL, in.MountPath)
 	}
 
-	login, err := a.finalizeExternalLogin(ctx, *st, in.RequestTLS, in.BaseURL, in.MountPath, in.IP)
+	login, err := a.finalizeExternalLogin(ctx, *st, in.BaseURL, in.MountPath, in.IP)
 	if err != nil {
 		return ExternalCallbackResult{}, err
 	}
 
-	return ExternalCallbackResult{Login: &login}, nil
+	return ExternalCallbackResult{Login: &login, ClearCookie: clearCookie}, nil
 }
 
 func (a *Auth) deferExternalLogin(ctx context.Context, p provider.Provider, st externalState, baseURL, mountPath string) (ExternalCallbackResult, error) {
@@ -263,7 +324,7 @@ func (a *Auth) deferExternalLogin(ctx context.Context, p provider.Provider, st e
 	idToken := st.IDToken
 	st.Kind = extKindLoginFinalize
 
-	if err := a.extstate.Set(ctx, state, st, cache.TTL[externalState](a.config.ExternalStateTTL)); err != nil {
+	if err := setSynced(ctx, a.extstate, state, st, cache.TTL[externalState](a.config.ExternalStateTTL)); err != nil {
 		return ExternalCallbackResult{}, NewOAuthErrorFrom(err)
 	}
 
@@ -277,12 +338,13 @@ func (a *Auth) deferExternalLogin(ctx context.Context, p provider.Provider, st e
 
 // ExternalLogoutCallbackRequest carries the IdP redirect back from its end-session endpoint.
 type ExternalLogoutCallbackRequest struct {
-	Provider   string
-	State      string
-	RequestTLS bool
-	BaseURL    string
-	MountPath  string
-	IP         string
+	Provider string
+	State    string
+	// Binding is the presented browser-binding cookie value.
+	Binding   string
+	BaseURL   string
+	MountPath string
+	IP        string
 }
 
 // ExternalLogoutCallbackResult is returned by ExternalLogoutCallback.
@@ -291,12 +353,14 @@ type ExternalLogoutCallbackResult struct {
 	Login *LoginResult
 	// Redirect is the validated post-logout target (logout kind), which may be off-origin.
 	Redirect string
+	// ClearCookie removes the browser-binding cookie of a finalized deferred login.
+	ClearCookie *CookieDirective
 }
 
 // ExternalLogoutCallback validates the returned state and either finalizes a deferred external
 // login or completes a federated logout.
 func (a *Auth) ExternalLogoutCallback(ctx context.Context, in ExternalLogoutCallbackRequest) (ExternalLogoutCallbackResult, error) {
-	st, err := a.consumeExternalState(ctx, in.State, in.Provider, extKindLoginFinalize, extKindLogout)
+	st, err := a.consumeExternalState(ctx, in.State, in.Provider, in.Binding, extKindLoginFinalize, extKindLogout)
 	if err != nil {
 		return ExternalLogoutCallbackResult{}, err
 	}
@@ -305,21 +369,28 @@ func (a *Auth) ExternalLogoutCallback(ctx context.Context, in ExternalLogoutCall
 		return ExternalLogoutCallbackResult{Redirect: st.RedirectURI}, nil
 	}
 
-	login, err := a.finalizeExternalLogin(ctx, *st, in.RequestTLS, in.BaseURL, in.MountPath, in.IP)
+	login, err := a.finalizeExternalLogin(ctx, *st, in.BaseURL, in.MountPath, in.IP)
 	if err != nil {
 		return ExternalLogoutCallbackResult{}, err
 	}
 
-	return ExternalLogoutCallbackResult{Login: &login}, nil
+	return ExternalLogoutCallbackResult{
+		Login:       &login,
+		ClearCookie: a.externalBindingCookie("", -time.Second, in.BaseURL, in.MountPath),
+	}, nil
 }
 
-func (a *Auth) consumeExternalState(ctx context.Context, state, providerName string, kinds ...string) (*externalState, error) {
+func (a *Auth) consumeExternalState(ctx context.Context, state, providerName, binding string, kinds ...string) (*externalState, error) {
 	if state == "" {
 		return nil, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "missing state")
 	}
 
 	st, err := a.extstate.Pop(ctx, state)
 	if err != nil || st.Provider != providerName {
+		return nil, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "invalid state")
+	}
+
+	if st.Browser != "" && subtle.ConstantTimeCompare([]byte(s256(binding)), []byte(st.Browser)) != 1 {
 		return nil, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "invalid state")
 	}
 
@@ -373,15 +444,18 @@ func (a *Auth) resolveExternalUser(ctx context.Context, providerName string, inf
 		}
 	}
 
-	if resolver, ok := a.users.(ExternalUserProvider); ok {
-		resolved, err := resolver.FindOrCreateUser(ctx, providerName, info)
-		if err != nil {
-			return UserInfo{}, err
-		}
-
-		resolved.AMR = mergeAMR(resolved.AMR, info.AMR)
-		info = resolved
+	resolver, ok := a.users.(ExternalUserProvider)
+	if !ok {
+		return UserInfo{}, errors.New("external login requires an ExternalUserProvider when no identity link matches")
 	}
+
+	resolved, err := resolver.FindOrCreateUser(ctx, providerName, info)
+	if err != nil {
+		return UserInfo{}, err
+	}
+
+	resolved.AMR = mergeAMR(resolved.AMR, info.AMR)
+	info = resolved
 
 	if a.identities != nil {
 		if err := a.identities.Link(ctx, &provider.IdentityLink{
@@ -394,7 +468,7 @@ func (a *Auth) resolveExternalUser(ctx context.Context, providerName string, inf
 			return UserInfo{}, err
 		}
 
-		a.emit(ctx, event.Event{Type: event.TypeIdentityLinked, UserID: info.ID, Detail: map[string]any{detailKeyProvider: providerName, detailKeySubject: subject}})
+		a.emit(ctx, event.Event{Type: event.TypeIdentityLinked, UserID: info.ID, Detail: map[string]any{"provider": providerName, "subject": subject}})
 	}
 
 	return info, nil
@@ -440,8 +514,8 @@ func (a *Auth) linkExternalIdentity(ctx context.Context, userID, providerName st
 			return nil, NewOAuthErrorFrom(err)
 		}
 
-		a.emit(ctx, event.Event{Type: event.TypeIdentityUnlinked, UserID: existing.UserID, IP: ip, Detail: map[string]any{detailKeyProvider: providerName, detailKeySubject: info.ID}})
-		a.emit(ctx, event.Event{Type: event.TypeIdentityLinked, UserID: userID, IP: ip, Detail: map[string]any{detailKeyProvider: providerName, detailKeySubject: info.ID}})
+		a.emit(ctx, event.Event{Type: event.TypeIdentityUnlinked, UserID: existing.UserID, IP: ip, Detail: map[string]any{"provider": providerName, "subject": info.ID}})
+		a.emit(ctx, event.Event{Type: event.TypeIdentityLinked, UserID: userID, IP: ip, Detail: map[string]any{"provider": providerName, "subject": info.ID}})
 
 		return link, nil
 	}
@@ -450,72 +524,63 @@ func (a *Auth) linkExternalIdentity(ctx context.Context, userID, providerName st
 		return nil, NewOAuthErrorFrom(err)
 	}
 
-	a.emit(ctx, event.Event{Type: event.TypeIdentityLinked, UserID: userID, IP: ip, Detail: map[string]any{detailKeyProvider: providerName, detailKeySubject: info.ID}})
+	a.emit(ctx, event.Event{Type: event.TypeIdentityLinked, UserID: userID, IP: ip, Detail: map[string]any{"provider": providerName, "subject": info.ID}})
 
 	return link, nil
 }
 
-func (a *Auth) finalizeExternalLogin(ctx context.Context, st externalState, requestTLS bool, baseURL, mountPath, ip string) (LoginResult, error) {
+func (a *Auth) finalizeExternalLogin(ctx context.Context, st externalState, baseURL, mountPath, ip string) (LoginResult, error) {
 	cl, err := a.clients.GetClient(ctx, st.ClientID)
 	if err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
 	info := st.Info
-	now := time.Now()
 	sess := &session.Session{
 		UserID:       info.ID,
 		ClientID:     cl.ID,
-		Scope:        info.Scope,
-		Status:       session.StatusActive,
+		Scope:        clientScope(cl, info.Scope),
 		AuthProvider: st.Provider,
 		AMR:          info.AMR,
-		CreatedAt:    now,
-		LastSeen:     now,
-		ExpiresAt:    now.Add(a.config.SessionTTL),
 	}
 
-	var cookie string
-
-	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
-		if err := a.sessions.Create(ctx, sess); err != nil {
-			return err
-		}
-
-		cookie, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
-
-		return err
-	}); err != nil {
-		return LoginResult{}, NewOAuthErrorFrom(err)
+	res, err := a.startSession(ctx, sess, cl, st.ACR, st.ReturnTo, baseURL, mountPath)
+	if err != nil {
+		return LoginResult{}, err
 	}
 
 	if st.IDToken != "" {
-		if err := a.fedIDTokens.Set(ctx, sess.ID, st.IDToken, cache.TTL[string](a.config.SessionTTL)); err != nil {
+		if err := setSynced(ctx, a.fedIDTokens, sess.ID, st.IDToken, cache.TTL[string](a.config.SessionTTL)); err != nil {
 			// The login still succeeds; federated logout for this session runs without id_token_hint.
 			a.Log(ctx).Warn("failed to cache IdP id_token for federated logout", zap.String("session.id", sess.ID), zap.Error(err))
 		}
 	}
 
-	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: ip, Detail: map[string]any{detailKeyProvider: st.Provider}})
+	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: ip, Detail: map[string]any{"provider": st.Provider}})
 
-	return a.buildLoginResult(ctx, sess, cl, st.ReturnTo, cookie, requestTLS, baseURL, mountPath)
+	return res, nil
 }
 
 // BrowserLogoutRequest carries GET /logout: the redirect-based browser logout.
 type BrowserLogoutRequest struct {
 	Token                 string
 	PostLogoutRedirectURI string
+	// IDTokenHint is the RP-supplied id_token identifying the session to end.
+	IDTokenHint string
+	// Confirmed marks the request as user-confirmed.
+	Confirmed bool
 	// Federated forces the IdP end-session hop even when Client.FederatedLogout is unset.
-	Federated  bool
-	RequestTLS bool
-	BaseURL    string
-	MountPath  string
-	IP         string
+	Federated bool
+	BaseURL   string
+	MountPath string
+	IP        string
 }
 
 // BrowserLogoutResult is browser logout result.
 type BrowserLogoutResult struct {
 	ClearCookie *CookieDirective
+	// ConfirmationRequired reports that logout confirmation is required.
+	ConfirmationRequired bool
 	// Redirect is the IdP end-session hop or the validated post-logout target.
 	Redirect string
 }
@@ -528,8 +593,6 @@ func (a *Auth) BrowserLogout(ctx context.Context, in BrowserLogoutRequest) (Brow
 			Name:     a.config.CookieName,
 			Path:     a.Cookie.Path(in.BaseURL, in.MountPath),
 			MaxAge:   -1,
-			Secure:   a.Cookie.Secure(in.RequestTLS),
-			HTTPOnly: true,
 			SameSite: a.Cookie.SameSite(),
 		},
 		Redirect: "/",
@@ -546,11 +609,29 @@ func (a *Auth) BrowserLogout(ctx context.Context, in BrowserLogoutRequest) (Brow
 	}
 
 	sess, err := a.sessions.Get(ctx, claims.SessionID)
-	if err != nil {
+	if err != nil || !firstParty(claims, sess) {
 		return result, nil //nolint:nilerr
 	}
 
-	if a.config.LogoutInvalidatesCookie {
+	// Nothing is ended, and the cookie is left alone, until the policy is satisfied.
+	switch hinted := a.validLogoutHint(ctx, in.IDTokenHint, sess); a.config.LogoutPolicy {
+	case contract.LogoutPolicyIDTokenHint:
+		if !hinted {
+			return BrowserLogoutResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "id_token_hint is required")
+		}
+	case contract.LogoutPolicyConfirm:
+		if !hinted && !in.Confirmed {
+			return BrowserLogoutResult{ConfirmationRequired: true}, nil
+		}
+	case contract.LogoutPolicyCookie:
+	}
+
+	live, err := a.live(ctx, claims)
+	if err != nil {
+		return BrowserLogoutResult{}, NewOAuthErrorFrom(err)
+	}
+
+	if a.config.LogoutInvalidatesCookie && live {
 		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
 			if err := a.sessions.Revoke(ctx, sess.ID); err != nil && !errors.Is(err, session.ErrNotFound) {
 				return err
@@ -595,7 +676,7 @@ func (a *Auth) BrowserLogout(ctx context.Context, in BrowserLogoutRequest) (Brow
 		return BrowserLogoutResult{}, NewOAuthErrorFrom(err)
 	}
 
-	if err := a.extstate.Set(ctx, state, externalState{
+	if err := setSynced(ctx, a.extstate, state, externalState{
 		Kind:        extKindLogout,
 		Provider:    sess.AuthProvider,
 		RedirectURI: result.Redirect,
@@ -611,6 +692,25 @@ func (a *Auth) BrowserLogout(ctx context.Context, in BrowserLogoutRequest) (Brow
 	result.Redirect = uri
 
 	return result, nil
+}
+
+// validLogoutHint reports whether hint is an id_token this server issued for this session.
+func (a *Auth) validLogoutHint(ctx context.Context, hint string, sess *session.Session) bool {
+	if hint == "" || a.keys == nil {
+		return false
+	}
+
+	set, err := a.keys.KeySet(ctx)
+	if err != nil {
+		return false
+	}
+
+	claims, err := token.VerifyIDToken(set, hint)
+	if err != nil {
+		return false
+	}
+
+	return claims.Subject == sess.UserID && claims.Audience == sess.ClientID
 }
 
 func (a *Auth) externalLogoutCallbackURL(baseURL, mountPath, providerName string) string {

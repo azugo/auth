@@ -28,7 +28,7 @@ func TestAuthorizeSilentRefreshRotatesCookie(t *testing.T) {
 	qt.Check(t, qt.Equals(resp.StatusCode(), 204))
 
 	var cookie fasthttp.Cookie
-	cookie.SetKey(a.Config().CookieName)
+	cookie.SetKey("__Secure-" + a.Config().CookieName)
 	qt.Assert(t, qt.IsTrue(resp.Header.Cookie(&cookie)))
 	qt.Check(t, qt.Not(qt.Equals(string(cookie.Value()), login.Cookie.Value)))
 }

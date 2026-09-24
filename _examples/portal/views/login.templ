@@ -1,20 +1,16 @@
 package views
 
-templ Login(errorMessage, returnTo string) {
+templ Login(username, errorMessage, returnTo string) {
 	@layout("Sign in") {
-		if errorMessage != "" {
-			<p class="error">{ errorMessage }</p>
-		}
-		<form method="post" action="/auth/token">
-			<input type="hidden" name="grant_type" value="password"/>
-			<input type="hidden" name="client_id" value="portal"/>
+		<form method="post" action="/login">
 			if returnTo != "" {
 				<input type="hidden" name="return_to" value={ returnTo }/>
 			}
 			<label for="username">Username</label>
-			<input id="username" name="username" autocomplete="username" required/>
+			<input id="username" name="username" value={ username } autocomplete="username" required/>
 			<label for="password">Password</label>
 			<input id="password" name="password" type="password" autocomplete="current-password" required/>
+			@fieldError(errorMessage)
 			<button type="submit">Sign in</button>
 		</form>
 		<p>Demo accounts: <code>admin / admin123</code>, <code>user / user123</code></p>

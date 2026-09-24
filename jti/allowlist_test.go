@@ -9,9 +9,6 @@ import (
 	"github.com/go-quicktest/qt"
 )
 
-// settle waits for the eventually-consistent memory cache to apply a write.
-func settle() { time.Sleep(10 * time.Millisecond) }
-
 func newStore(t *testing.T) Store {
 	t.Helper()
 
@@ -30,7 +27,6 @@ func TestIssueAndValidate(t *testing.T) {
 	ctx := context.Background()
 
 	qt.Assert(t, qt.IsNil(store.Issue(ctx, "jti-1", "sid-1", time.Minute)))
-	settle()
 
 	ok, err := store.Validate(ctx, "jti-1", "sid-1")
 	qt.Assert(t, qt.IsNil(err))
@@ -51,12 +47,10 @@ func TestRotate(t *testing.T) {
 	ctx := context.Background()
 
 	qt.Assert(t, qt.IsNil(store.Issue(ctx, "jti-1", "sid-1", time.Minute)))
-	settle()
 
 	ok, err := store.Rotate(ctx, "jti-1", "jti-2", "sid-1", time.Minute)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.IsTrue(ok))
-	settle()
 
 	valid, err := store.Validate(ctx, "jti-2", "sid-1")
 	qt.Assert(t, qt.IsNil(err))
@@ -78,7 +72,6 @@ func TestRotateSessionMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	qt.Assert(t, qt.IsNil(store.Issue(ctx, "jti-1", "sid-1", time.Minute)))
-	settle()
 
 	ok, err := store.Rotate(ctx, "jti-1", "jti-2", "other-sid", time.Minute)
 	qt.Assert(t, qt.IsNil(err))
@@ -90,10 +83,8 @@ func TestRevoke(t *testing.T) {
 	ctx := context.Background()
 
 	qt.Assert(t, qt.IsNil(store.Issue(ctx, "jti-1", "sid-1", time.Minute)))
-	settle()
 
 	qt.Assert(t, qt.IsNil(store.Revoke(ctx, "jti-1")))
-	settle()
 
 	ok, err := store.Validate(ctx, "jti-1", "sid-1")
 	qt.Assert(t, qt.IsNil(err))

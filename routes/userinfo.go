@@ -6,7 +6,7 @@ import (
 
 // userInfo implements GET /userinfo and returns authenticated user's OIDC UserInfo claims.
 func (h *Handler) userInfo(ctx *azugo.Context) {
-	info, _, err := h.auth.IntrospectToken(ctx, h.auth.ReadSessionToken(ctx))
+	info, err := h.auth.UserInfoClaims(ctx, h.auth.ReadSessionToken(ctx))
 	if err != nil {
 		ctx.Error(err)
 
@@ -15,12 +15,16 @@ func (h *Handler) userInfo(ctx *azugo.Context) {
 
 	// Standard OIDC UserInfo response body.
 	ctx.JSON(&struct {
-		Subject string `json:"sub"`
-		Name    string `json:"name,omitempty"`
-		Email   string `json:"email,omitempty"`
+		Subject string   `json:"sub"`
+		Name    string   `json:"name,omitempty"`
+		Email   string   `json:"email,omitempty"`
+		ACR     string   `json:"acr,omitempty"`
+		AMR     []string `json:"amr,omitempty"`
 	}{
 		Subject: info.ID,
 		Name:    info.Name,
 		Email:   info.Email,
+		ACR:     info.ACR,
+		AMR:     info.AMR,
 	})
 }

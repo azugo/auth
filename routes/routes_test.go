@@ -3,7 +3,6 @@ package routes
 import (
 	"context"
 	"testing"
-	"time"
 
 	"azugo.io/auth"
 	"azugo.io/auth/client"
@@ -15,10 +14,6 @@ import (
 	"github.com/go-quicktest/qt"
 	"github.com/valyala/fasthttp"
 )
-
-// settle waits for the eventually-consistent memory cache backing the default JTI store to
-// apply a write (see auth/jti/allowlist_test.go's identical helper).
-func settle() { time.Sleep(10 * time.Millisecond) }
 
 type stubUsers struct{ info auth.UserInfo }
 
@@ -61,7 +56,7 @@ func newTestAuthWithOpts(t *testing.T, sessions session.Store, opts []auth.Optio
 		LogoutInvalidatesCookie: true,
 	}
 
-	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid"}}
+	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile email"}}
 
 	a, err := auth.New(app, cfg, users, sessions, client.NewMemoryRegistry(cls...), opts...)
 	qt.Assert(t, qt.IsNil(err))
@@ -72,9 +67,8 @@ func newTestAuthWithOpts(t *testing.T, sessions session.Store, opts []auth.Optio
 func loginFor(t *testing.T, a *auth.Auth, clientID string) auth.LoginResult {
 	t.Helper()
 
-	res, err := a.Login(context.Background(), auth.LoginRequest{ClientID: clientID, Username: "alice", Password: "right"})
+	res, err := a.Login(context.Background(), auth.LoginRequest{Credentials: auth.ClientCredentials{ClientID: clientID}, Username: "alice", Password: "right"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	return res
 }

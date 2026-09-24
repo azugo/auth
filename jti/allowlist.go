@@ -10,9 +10,6 @@ import (
 	"azugo.io/core/cache"
 )
 
-// cacheInstanceName namespaces the allowlist within the shared cache.
-const cacheInstanceName = "auth.jti"
-
 // Store manages the JTI allowlist.
 type Store interface {
 	// Issue registers jti as valid for sessionID with the given TTL.
@@ -35,7 +32,7 @@ type cacheStore struct {
 
 // NewCacheStore creates the default cache-backed JTI Store using the app's cache.
 func NewCacheStore(c *cache.Cache) (Store, error) {
-	inst, err := cache.Create[string](c, cacheInstanceName)
+	inst, err := cache.Create[string](c, "auth.jti")
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +42,11 @@ func NewCacheStore(c *cache.Cache) (Store, error) {
 
 // Issue registers jti as valid for sessionID with the given TTL.
 func (s *cacheStore) Issue(ctx context.Context, jti, sessionID string, ttl time.Duration) error {
-	return s.c.Set(ctx, jti, sessionID, cache.TTL[string](ttl))
+	if err := s.c.Set(ctx, jti, sessionID, cache.TTL[string](ttl)); err != nil {
+		return err
+	}
+
+	return s.c.Sync(ctx)
 }
 
 // Rotate atomically replaces oldJTI with newJTI for sessionID. Return false (no error)
@@ -69,12 +70,20 @@ func (s *cacheStore) Rotate(ctx context.Context, oldJTI, newJTI, sessionID strin
 		return false, err
 	}
 
+	if err := s.c.Sync(ctx); err != nil {
+		return false, err
+	}
+
 	return true, nil
 }
 
 // Revoke removes jti from the allowlist.
 func (s *cacheStore) Revoke(ctx context.Context, jti string) error {
-	return s.c.Delete(ctx, jti)
+	if err := s.c.Delete(ctx, jti); err != nil {
+		return err
+	}
+
+	return s.c.Sync(ctx)
 }
 
 // Validate returns true when jti exists in the allowlist and belongs to sessionID.

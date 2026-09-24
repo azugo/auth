@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"sync"
 
 	"azugo.io/auth/contract"
@@ -19,6 +20,7 @@ import (
 const (
 	TypeAccessToken   = "at" // short-lived introspect access token
 	TypeSessionCookie = "sc" // long-lived session cookie
+	TypeStepToken     = "st" // short-lived token bound to a pending (mid-step) session
 	TypeAPIKey        = "ak" // API-key token
 )
 
@@ -30,8 +32,10 @@ var (
 	ErrUnexpectedTokenType = errors.New("unexpected token type")
 )
 
-// Confirmation carries the DPoP JWK thumbprint (cnf.jkt, RFC 9449 §6.1). Present only
-// when the token was issued with a DPoP proof.
+// Confirmation carries the DPoP JWK thumbprint (cnf.jkt, RFC 9449 §6.1). Present only when the
+// token was issued with a DPoP proof.
+//
+// TODO: not implemented yet.
 type Confirmation struct {
 	JKT string `json:"jkt,omitempty"` // base64url(SHA-256(DPoP public key JWK))
 }
@@ -182,8 +186,26 @@ func (c *Codec) decrypt(raw string) ([]byte, error) {
 	return nil, ErrInvalidToken
 }
 
-// DecodeAccess opens a token and decodes it as AccessClaims.
+// DecodeAccess opens a token and decodes it as AccessClaims, accepting access and
+// session-cookie tokens.
 func (c *Codec) DecodeAccess(raw string) (*AccessClaims, error) {
+	return c.decodeAccessClaims(raw, TypeAccessToken, TypeSessionCookie)
+}
+
+// DecodeSession opens a token and decodes it as AccessClaims, accepting access, session-cookie
+// and step tokens alike.
+func (c *Codec) DecodeSession(raw string) (*AccessClaims, error) {
+	return c.decodeAccessClaims(raw, TypeAccessToken, TypeSessionCookie, TypeStepToken)
+}
+
+// DecodeSessionCookie opens a token and decodes it as AccessClaims, accepting only the
+// session cookie.
+func (c *Codec) DecodeSessionCookie(raw string) (*AccessClaims, error) {
+	return c.decodeAccessClaims(raw, TypeSessionCookie)
+}
+
+// decodeAccessClaims opens a token as AccessClaims and requires its "typ" to be one of types.
+func (c *Codec) decodeAccessClaims(raw string, types ...string) (*AccessClaims, error) {
 	claims, err := c.decrypt(raw)
 	if err != nil {
 		return nil, err
@@ -194,7 +216,7 @@ func (c *Codec) DecodeAccess(raw string) (*AccessClaims, error) {
 		return nil, err
 	}
 
-	if ac.Type != TypeAccessToken && ac.Type != TypeSessionCookie {
+	if !slices.Contains(types, ac.Type) {
 		return nil, ErrUnexpectedTokenType
 	}
 

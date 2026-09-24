@@ -51,7 +51,7 @@ func TestAuthorizeEndpointRedirectsWithCode(t *testing.T) {
 	resp, err := tc.Get("/auth/authorize?response_type=code&client_id=web"+
 		"&redirect_uri="+url.QueryEscape("https://web.example/callback")+
 		"&scope=openid&state=xyz&code_challenge="+pkceChallenge+"&code_challenge_method=S256",
-		tc.WithHeader("Cookie", "__session="+login.Cookie.Value))
+		tc.WithHeader("Cookie", "session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -64,7 +64,6 @@ func TestAuthorizeEndpointRedirectsWithCode(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(u.Query().Get("state"), "xyz"))
 	qt.Assert(t, qt.IsTrue(u.Query().Get("code") != ""))
-	settle()
 
 	// Redeem the code at the token endpoint.
 	resp2, err := tc.PostForm("/auth/token", map[string]any{
@@ -177,13 +176,12 @@ func TestTokenEndpointResponseIsNotCacheable(t *testing.T) {
 	resp, err := tc.Get("/auth/authorize?response_type=code&client_id=web"+
 		"&redirect_uri="+url.QueryEscape("https://web.example/callback")+
 		"&code_challenge="+pkceChallenge+"&code_challenge_method=S256",
-		tc.WithHeader("Cookie", "__session="+login.Cookie.Value))
+		tc.WithHeader("Cookie", "session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 
 	u, err := url.Parse(string(resp.Header.Peek("Location")))
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	resp2, err := tc.PostForm("/auth/token", map[string]any{
 		"grant_type":    "authorization_code",

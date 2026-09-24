@@ -40,6 +40,8 @@ type Session struct {
 	Status    Status
 	Step      string // name of the unresolved login step when Status == pending_step ("" otherwise)
 	MFAMethod string // name of the MFA method used to verify (empty until MFA passed)
+	// MFAEnrollmentID is the enrollment that satisfied MFA, when the method reported one.
+	MFAEnrollmentID string
 	// AuthProvider is the external provider name that authenticated this session ("" = local
 	// login); used as id_token_hint source for RP-initiated federated logout.
 	AuthProvider string
@@ -76,6 +78,8 @@ type Store interface {
 	Create(ctx context.Context, s *Session) error
 	// Get session by ID.
 	Get(ctx context.Context, id string) (*Session, error)
+	// Update persists the current state of an existing session (status, MFA/ACR fields, expiry).
+	Update(ctx context.Context, s *Session) error
 	// Touch updates session as active (usually by updating LastSeen time).
 	Touch(ctx context.Context, id string) error
 	// Revoke session and invalidate it.

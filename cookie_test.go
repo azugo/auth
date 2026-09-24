@@ -6,35 +6,9 @@ import (
 	"azugo.io/auth/client"
 	"azugo.io/auth/session"
 
+	"azugo.io/azugo"
 	"github.com/go-quicktest/qt"
 )
-
-func TestCookieSecure(t *testing.T) {
-	t.Setenv("ENVIRONMENT", "development")
-
-	a, err := New(newApp(t), validConfig(), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
-	qt.Assert(t, qt.IsNil(err))
-
-	// Unset in development: follow the request scheme.
-	qt.Check(t, qt.IsTrue(a.Cookie.Secure(true)))
-	qt.Check(t, qt.IsFalse(a.Cookie.Secure(false)))
-
-	// Unset outside development: always Secure.
-	t.Setenv("ENVIRONMENT", "production")
-
-	a2, err := New(newApp(t), validConfig(), stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
-	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.IsTrue(a2.Cookie.Secure(false)))
-
-	// Explicit value wins over the request scheme.
-	insecure := false
-	cfg := validConfig()
-	cfg.Secure = &insecure
-
-	a3, err := New(newApp(t), cfg, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
-	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.IsFalse(a3.Cookie.Secure(true)))
-}
 
 func TestCookieSameSite(t *testing.T) {
 	t.Setenv("ENVIRONMENT", "development")
@@ -44,7 +18,7 @@ func TestCookieSameSite(t *testing.T) {
 
 	a, err := New(newApp(t), cfg, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(a.Cookie.SameSite(), "lax"))
+	qt.Check(t, qt.Equals(a.Cookie.SameSite(), azugo.CookieSameSiteLax))
 
 	t.Setenv("ENVIRONMENT", "production")
 
@@ -53,7 +27,7 @@ func TestCookieSameSite(t *testing.T) {
 
 	a2, err := New(newApp(t), cfg2, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(a2.Cookie.SameSite(), "strict"))
+	qt.Check(t, qt.Equals(a2.Cookie.SameSite(), azugo.CookieSameSiteStrict))
 
 	// Explicit value wins over the environment.
 	cfg3 := validConfig()
@@ -61,7 +35,7 @@ func TestCookieSameSite(t *testing.T) {
 
 	a3, err := New(newApp(t), cfg3, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(a3.Cookie.SameSite(), "none"))
+	qt.Check(t, qt.Equals(a3.Cookie.SameSite(), azugo.CookieSameSiteNone))
 }
 
 func TestCookiePathFor(t *testing.T) {

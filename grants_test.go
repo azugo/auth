@@ -66,10 +66,9 @@ func login(t *testing.T, a *Auth) string {
 	t.Helper()
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	return res.Cookie.Value
 }
@@ -99,7 +98,6 @@ func authorizeCode(t *testing.T, a *Auth, sessionToken, scope, nonce string) str
 	qt.Assert(t, qt.IsTrue(u.Query().Get("code") != ""))
 
 	// The eventually-consistent memory cache needs a beat before the code is redeemable.
-	settle()
 
 	return u.Query().Get("code")
 }
@@ -133,8 +131,6 @@ func TestAuthorizationCodeFlowEndToEnd(t *testing.T) {
 	qt.Check(t, qt.Equals(claims["nonce"], "n0nce"))
 	qt.Check(t, qt.Equals(claims["aud"], "web"))
 	qt.Check(t, qt.IsTrue(claims["auth_time"] != nil))
-
-	settle()
 
 	info, _, err := a.IntrospectToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
@@ -272,32 +268,66 @@ func TestAuthorizeRejectsScopeBeyondSession(t *testing.T) {
 	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_scope"))
 }
 
-func TestAuthorizationCodeReplayRevokesSession(t *testing.T) {
+func TestAuthorizationCodeReplayRevokesIssuedTokenOnly(t *testing.T) {
 	a := newGrantsTestAuth(t, nil, nil, portalClient(), codeClient())
 	cookie := login(t, a)
 	codeVal := authorizeCode(t, a, cookie, "profile", "")
 
-	redeem := func() error {
-		_, err := a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
+	redeem := func() (TokenResult, error) {
+		return a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
 			Credentials:  ClientCredentials{ClientID: "web"},
 			Code:         codeVal,
 			RedirectURI:  "https://web.example/callback",
 			CodeVerifier: pkceVerifier,
 		})
-
-		return err
 	}
 
-	qt.Assert(t, qt.IsNil(redeem()))
-	settle()
+	res, err := redeem()
+	qt.Assert(t, qt.IsNil(err))
 
-	err := redeem()
+	_, err = redeem()
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
-	settle()
 
-	// The bound session was revoked - the cookie no longer refreshes.
-	_, err = a.Refresh(context.Background(), RefreshRequest{Token: cookie})
+	// The token issued from the replayed code is dead...
+	_, _, err = a.IntrospectToken(context.Background(), res.AccessToken)
 	qt.Check(t, qt.IsNotNil(err))
+
+	// ...but the user's session, shared with every other client, survives.
+	_, err = a.Refresh(context.Background(), RefreshRequest{Token: cookie})
+	qt.Check(t, qt.IsNil(err))
+}
+
+func TestAuthorizationCodeReplayByForeignClientRevokesNothing(t *testing.T) {
+	other := codeClient()
+	other.ID = "other"
+
+	a := newGrantsTestAuth(t, nil, nil, portalClient(), codeClient(), other)
+	cookie := login(t, a)
+	codeVal := authorizeCode(t, a, cookie, "profile", "")
+
+	res, err := a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
+		Credentials:  ClientCredentials{ClientID: "web"},
+		Code:         codeVal,
+		RedirectURI:  "https://web.example/callback",
+		CodeVerifier: pkceVerifier,
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	// Anyone who learns the code can replay it under their own identity; that must not let
+	// them revoke the token, or the session, of the client the code belonged to.
+	_, err = a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
+		Credentials:  ClientCredentials{ClientID: "other"},
+		Code:         codeVal,
+		RedirectURI:  "https://web.example/callback",
+		CodeVerifier: pkceVerifier,
+	})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
+
+	_, _, err = a.IntrospectToken(context.Background(), res.AccessToken)
+	qt.Check(t, qt.IsNil(err))
+
+	_, err = a.Refresh(context.Background(), RefreshRequest{Token: cookie})
+	qt.Check(t, qt.IsNil(err))
 }
 
 // nilReplayStore violates the Store contract by returning ErrReplayed without the record.
@@ -347,7 +377,6 @@ func TestAuthorizationCodeReplayDenyListsIssuedJWT(t *testing.T) {
 
 	res, err := redeem()
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
@@ -355,7 +384,6 @@ func TestAuthorizationCodeReplayDenyListsIssuedJWT(t *testing.T) {
 
 	_, err = redeem()
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
-	settle()
 
 	// The JWT issued at the first redemption is deny-listed by the replay.
 	_, err = a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
@@ -402,7 +430,6 @@ func TestOpaqueCodeGrantTokenBindsScopeAndClient(t *testing.T) {
 		CodeVerifier: pkceVerifier,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	// Introspection reports the token's granted scope and issuing client, not the portal
 	// session's.
@@ -428,7 +455,6 @@ func TestOpaqueCodeGrantTokenBindsScopeAndClient(t *testing.T) {
 		Token:       res.AccessToken,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	out, err = a.Introspect(context.Background(), IntrospectRequest{
 		Credentials: ClientCredentials{ClientID: "svc", Secret: "s3cret"},
@@ -641,7 +667,7 @@ func TestPrivateKeyJWTClientAuthentication(t *testing.T) {
 
 	// The acceptable audiences are derived from the configured issuer: the issuer itself and
 	// its token endpoint URL.
-	assertion := signAssertion(t, clientPriv, "svc", "a1", []string{"https://issuer.example/token"}, time.Now().Add(time.Minute))
+	assertion := signAssertion(t, clientPriv, "svc", "a1", []string{"https://issuer.example"}, time.Now().Add(time.Minute))
 	creds := ClientCredentials{
 		ClientID:      "svc",
 		AssertionType: AssertionTypeJWTBearer,
@@ -650,7 +676,6 @@ func TestPrivateKeyJWTClientAuthentication(t *testing.T) {
 
 	_, err := a.ClientCredentialsGrant(context.Background(), ClientCredentialsGrantRequest{Credentials: creds})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	// Replaying the same assertion (same jti) is rejected.
 	_, err = a.ClientCredentialsGrant(context.Background(), ClientCredentialsGrantRequest{Credentials: creds})
@@ -670,7 +695,7 @@ func TestPrivateKeyJWTClientAuthentication(t *testing.T) {
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidClient))
 }
 
-func TestPrivateKeyJWTAudienceAcceptsOverriddenTokenEndpoint(t *testing.T) {
+func TestPrivateKeyJWTRejectsTokenEndpointAudience(t *testing.T) {
 	keysPriv, keysPub := genTestRSAKeyPair(t)
 	clientPriv, clientPub := genTestRSAKeyPair(t)
 
@@ -687,9 +712,8 @@ func TestPrivateKeyJWTAudienceAcceptsOverriddenTokenEndpoint(t *testing.T) {
 
 	a := newGrantsTestAuth(t, cfg, nil, cl)
 
-	// The assertion audience is the token endpoint the client read from discovery, not the
-	// issuer's default /token path.
-	assertion := signAssertion(t, clientPriv, "svc", "a3", []string{"https://gateway.example/oauth2/token"}, time.Now().Add(time.Minute))
+	// Only the issuer identifier is a valid audience; the token endpoint URL is not.
+	assertion := signAssertion(t, clientPriv, "svc", "a3", []string{"https://issuer.example/token"}, time.Now().Add(time.Minute))
 
 	_, err := a.ClientCredentialsGrant(context.Background(), ClientCredentialsGrantRequest{
 		Credentials: ClientCredentials{
@@ -697,9 +721,8 @@ func TestPrivateKeyJWTAudienceAcceptsOverriddenTokenEndpoint(t *testing.T) {
 			AssertionType: AssertionTypeJWTBearer,
 			Assertion:     assertion,
 		},
-		TokenEndpoint: "https://gateway.example/oauth2/token",
 	})
-	qt.Check(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidClient))
 }
 
 func TestPrivateKeyJWTAssertionLifetimeChecks(t *testing.T) {
@@ -737,44 +760,87 @@ func TestPrivateKeyJWTAssertionLifetimeChecks(t *testing.T) {
 
 	// Missing iat is rejected.
 	err = grant(jwt.MapClaims{
-		"iss": "svc", "sub": "svc", "aud": "https://issuer.example/token",
+		"iss": "svc", "sub": "svc", "aud": "https://issuer.example",
 		"jti": "l1", "exp": time.Now().Add(time.Minute).Unix(),
 	})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidClient))
 
 	// A lifetime beyond the cap is rejected.
 	err = grant(jwt.MapClaims{
-		"iss": "svc", "sub": "svc", "aud": "https://issuer.example/token",
+		"iss": "svc", "sub": "svc", "aud": "https://issuer.example",
 		"jti": "l2", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
 	})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidClient))
 
 	// A conforming assertion still authenticates.
 	err = grant(jwt.MapClaims{
-		"iss": "svc", "sub": "svc", "aud": "https://issuer.example/token",
+		"iss": "svc", "sub": "svc", "aud": "https://issuer.example",
 		"jti": "l3", "iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix(),
 	})
 	qt.Check(t, qt.IsNil(err))
 }
 
-func TestRevokeOpaqueTokenRevokesSession(t *testing.T) {
+func TestRevokeOpaqueAccessTokenSparesTheSession(t *testing.T) {
 	a := newGrantsTestAuth(t, nil, nil, portalClient())
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	err = a.RevokeToken(context.Background(), RevokeTokenRequest{
 		Credentials: ClientCredentials{ClientID: "spa"},
 		Token:       res.AccessToken,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	_, _, err = a.IntrospectToken(context.Background(), res.AccessToken)
 	qt.Check(t, qt.IsNotNil(err))
+
+	// The session cookie is a separate credential and keeps working.
+	_, _, err = a.IntrospectToken(context.Background(), res.Cookie.Value)
+	qt.Check(t, qt.IsNil(err))
+}
+
+func TestRevokeSessionCookieEndsTheSession(t *testing.T) {
+	a := newGrantsTestAuth(t, nil, nil, portalClient())
+
+	res, err := a.Login(context.Background(), LoginRequest{
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	err = a.RevokeToken(context.Background(), RevokeTokenRequest{
+		Credentials: ClientCredentials{ClientID: "spa"},
+		Token:       res.Cookie.Value,
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, _, err = a.IntrospectToken(context.Background(), res.AccessToken)
+	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestRevokeStaleTokenIsSilent(t *testing.T) {
+	a := newGrantsTestAuth(t, nil, nil, portalClient())
+
+	res, err := a.Login(context.Background(), LoginRequest{
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	// Rotating the cookie retires the presented one; replaying that stale value from a log
+	// must not end the live session.
+	rotated, err := a.Refresh(context.Background(), RefreshRequest{Token: res.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+
+	err = a.RevokeToken(context.Background(), RevokeTokenRequest{
+		Credentials: ClientCredentials{ClientID: "spa"},
+		Token:       res.Cookie.Value,
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, _, err = a.IntrospectToken(context.Background(), rotated.Cookie.Value)
+	qt.Check(t, qt.IsNil(err))
 }
 
 func TestRevokeUnknownTokenIsSilent(t *testing.T) {
@@ -822,7 +888,6 @@ func TestRevokeJWTDenyListsIntrospection(t *testing.T) {
 		Token:       res.AccessToken,
 	})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	revoked := introspect()
 	qt.Check(t, qt.IsFalse(revoked.Active))
@@ -834,10 +899,9 @@ func TestIntrospectActiveOpaqueToken(t *testing.T) {
 	a := newGrantsTestAuth(t, nil, nil, portalClient(), rs)
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	out, err := a.Introspect(context.Background(), IntrospectRequest{
 		Credentials: ClientCredentials{ClientID: "svc", Secret: "s3cret"},
@@ -885,7 +949,7 @@ func TestLoginThrottleLocksOutAfterMaxAttempts(t *testing.T) {
 
 	fail := func() error {
 		_, err := a.Login(context.Background(), LoginRequest{
-			ClientID: "spa", Username: "alice", Password: "wrong", IP: "203.0.113.9",
+			Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "wrong", IP: "203.0.113.9",
 		})
 
 		return err
@@ -896,7 +960,7 @@ func TestLoginThrottleLocksOutAfterMaxAttempts(t *testing.T) {
 
 	// Third attempt is locked out even with the correct password.
 	_, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", IP: "203.0.113.9",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", IP: "203.0.113.9",
 	})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeSlowDown))
 }
@@ -910,8 +974,8 @@ func TestLoginEmitsAuditEvents(t *testing.T) {
 
 	a := newGrantsTestAuth(t, nil, []Option{Events(sink)}, portalClient())
 
-	_, _ = a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "alice", Password: "wrong"})
-	_, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "alice", Password: "secret123"})
+	_, _ = a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "wrong"})
+	_, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
 
 	qt.Assert(t, qt.HasLen(got, 2))
@@ -934,12 +998,11 @@ func TestMultiWriteSequencesRunInsideTransactor(t *testing.T) {
 	a := newGrantsTestAuth(t, nil, []Option{Transactor(tx)}, portalClient())
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123",
 	})
 	qt.Assert(t, qt.IsNil(err))
 	// Login wraps session create + cookie JTI issue.
 	qt.Check(t, qt.Equals(calls, 1))
-	settle()
 
 	_, err = a.Logout(context.Background(), LogoutRequest{Token: res.Cookie.Value})
 	qt.Assert(t, qt.IsNil(err))
@@ -963,7 +1026,7 @@ func TestDefaultEventSinkLogsViaAppLogger(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	_, err = a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", IP: "203.0.113.9",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", IP: "203.0.113.9",
 	})
 	qt.Assert(t, qt.IsNil(err))
 
@@ -1007,7 +1070,7 @@ func TestLoginRedirectSanitizesReturnTo(t *testing.T) {
 		"/dashboard#/deep/link": "/dashboard",
 	} {
 		res, err := a.Login(context.Background(), LoginRequest{
-			ClientID: "ssr", Username: "alice", Password: "secret123", ReturnTo: in,
+			Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123", ReturnTo: in,
 		})
 		qt.Assert(t, qt.IsNil(err))
 		qt.Check(t, qt.Equals(res.ReturnTo, want), qt.Commentf("returnTo %q", in))
@@ -1026,7 +1089,7 @@ func TestJWTAccessTokenValidatedByMiddlewarePath(t *testing.T) {
 	a := newGrantsTestAuth(t, cfg, nil, cl)
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsTrue(strings.Count(res.AccessToken, ".") == 2))
@@ -1034,4 +1097,179 @@ func TestJWTAccessTokenValidatedByMiddlewarePath(t *testing.T) {
 	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "u1"))
+}
+
+func TestThirdPartyAccessTokenIsNotASessionCredential(t *testing.T) {
+	a := newGrantsTestAuth(t, nil, nil, portalClient(), codeClient())
+	cookie := login(t, a)
+
+	res, err := a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
+		Credentials: ClientCredentials{ClientID: "web"}, Code: authorizeCode(t, a, cookie, "openid", ""),
+		RedirectURI: "https://web.example/callback", CodeVerifier: pkceVerifier,
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	// The token introspects with its own scope...
+	info, _, err := a.IntrospectToken(context.Background(), res.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.Scope, "openid"))
+
+	// ...but is refused wherever the session cookie or a first-party credential is expected.
+	_, err = a.Refresh(context.Background(), RefreshRequest{Token: res.AccessToken})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeLoginRequired))
+
+	_, err = a.Authorize(context.Background(), AuthorizeRequest{
+		ResponseType: "code", ClientID: "web", RedirectURI: "https://web.example/callback",
+		CodeChallenge: pkceChallenge, CodeChallengeMethod: "S256", SessionToken: res.AccessToken,
+	})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeLoginRequired))
+
+	_, _, err = a.IntrospectFirstParty(context.Background(), res.AccessToken)
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInsufficientScope))
+
+	// Logging out with it leaves the user's session intact.
+	_, err = a.Logout(context.Background(), LogoutRequest{Token: res.AccessToken})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: res.AccessToken})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, _, err = a.IntrospectToken(context.Background(), cookie)
+	qt.Check(t, qt.IsNil(err))
+}
+
+func TestLoginRequiresConfidentialClientSecret(t *testing.T) {
+	hash, err := password.Hash("s3cret")
+	qt.Assert(t, qt.IsNil(err))
+
+	a := newGrantsTestAuth(t, nil, nil, &client.Client{
+		ID: "ssr", GrantTypes: []string{client.GrantTypePassword}, AllowedAuthMethods: []string{client.AuthMethodPassword},
+		ResponseMode: client.ResponseModeCookie, SecretHash: hash, TokenEndpointAuthMethod: client.TokenEndpointAuthClientSecret,
+	})
+
+	for _, secret := range []string{"", "wrong"} {
+		_, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr", Secret: secret}, Username: "alice", Password: "secret123"})
+		qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidClient))
+	}
+
+	res, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr", Secret: "s3cret"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(res.Status, session.StatusActive))
+}
+
+func TestLoginCapsScopeByClientScopes(t *testing.T) {
+	cl := portalClient()
+	cl.Scopes = []string{"openid"}
+	a := newGrantsTestAuth(t, nil, nil, cl)
+
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	// The user's full "openid profile" is narrowed for the token and the session alike.
+	for _, tok := range []string{login.AccessToken, login.Cookie.Value} {
+		info, _, err := a.IntrospectToken(context.Background(), tok)
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.Equals(info.Scope, "openid"))
+	}
+}
+
+func TestClientSecretImpliesConfidentialAuthentication(t *testing.T) {
+	hash, err := password.Hash("s3cret")
+	qt.Assert(t, qt.IsNil(err))
+
+	// A secret registered without TokenEndpointAuthMethod must still be demanded.
+	web := codeClient()
+	web.Public, web.RequirePKCE, web.SecretHash = false, false, hash
+
+	a := newGrantsTestAuth(t, nil, nil, portalClient(), web)
+	cookie := login(t, a)
+
+	redeem := func(secret string) error {
+		_, err := a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
+			Credentials: ClientCredentials{ClientID: "web", Secret: secret}, Code: authorizeCode(t, a, cookie, "openid", ""),
+			RedirectURI: "https://web.example/callback", CodeVerifier: pkceVerifier,
+		})
+
+		return err
+	}
+
+	qt.Check(t, qt.Equals(oauthErrorCode(t, redeem("")), ErrCodeInvalidClient))
+	qt.Check(t, qt.IsNil(redeem("s3cret")))
+}
+
+func TestAuthorizeForcesPKCEForCredentiallessClient(t *testing.T) {
+	// No secret, no key, no method: the client is public whatever its flags say.
+	web := codeClient()
+	web.Public, web.RequirePKCE = false, false
+
+	a := newGrantsTestAuth(t, nil, nil, portalClient(), web)
+
+	res, err := a.Authorize(context.Background(), AuthorizeRequest{
+		ResponseType: "code", ClientID: "web", RedirectURI: "https://web.example/callback",
+		Scope: "openid", State: "xyz", SessionToken: login(t, a),
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	u, err := url.Parse(res.Redirect)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(u.Query().Get("error"), string(ErrCodeInvalidRequest)))
+	qt.Check(t, qt.Equals(u.Query().Get("error_description"), "code_challenge is required"))
+}
+
+func TestClientCredentialsTokenIsNotResolvedToAUser(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+	cfg := validConfig()
+	cfg.Keys = keySetConfig(priv, pub)
+
+	a := newGrantsTestAuth(t, cfg, nil, serviceClient(t, "s3cret"))
+
+	res, err := a.ClientCredentialsGrant(context.Background(), ClientCredentialsGrantRequest{
+		Credentials: ClientCredentials{ClientID: "svc", Secret: "s3cret"}, Scope: "items:read",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	// No user "svc" exists; the client itself is the subject.
+	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.ID, "svc"))
+	qt.Check(t, qt.Equals(info.ClientID, "svc"))
+	qt.Check(t, qt.Equals(info.Scope, "items:read"))
+}
+
+func TestPrivateKeyJWTAssertionJTIIsScopedPerClient(t *testing.T) {
+	keysPriv, keysPub := genTestRSAKeyPair(t)
+	aPriv, aPub := genTestRSAKeyPair(t)
+	bPriv, bPub := genTestRSAKeyPair(t)
+
+	cfg := validConfig()
+	cfg.Keys = keySetConfig(keysPriv, keysPub)
+
+	assertionClient := func(id, pub string) *client.Client {
+		return &client.Client{
+			ID: id, GrantTypes: []string{"client_credentials"}, Scopes: []string{"items:read"},
+			PublicKey: pub, AccessTokenType: client.AccessTokenTypeJWT,
+			TokenEndpointAuthMethod: client.TokenEndpointAuthPrivateKeyJWT,
+		}
+	}
+
+	a := newGrantsTestAuth(t, cfg, nil, assertionClient("svc-a", aPub), assertionClient("svc-b", bPub))
+
+	grant := func(id, priv string) error {
+		_, err := a.ClientCredentialsGrant(context.Background(), ClientCredentialsGrantRequest{
+			Credentials: ClientCredentials{
+				ClientID:      id,
+				AssertionType: AssertionTypeJWTBearer,
+				Assertion:     signAssertion(t, priv, id, "shared", []string{"https://issuer.example"}, time.Now().Add(time.Minute)),
+			},
+		})
+
+		return err
+	}
+
+	// One client using a jti must not burn the same jti for another.
+	qt.Assert(t, qt.IsNil(grant("svc-a", aPriv)))
+	qt.Check(t, qt.IsNil(grant("svc-b", bPriv)))
+
+	// Its own replay is still refused.
+	qt.Check(t, qt.Equals(oauthErrorCode(t, grant("svc-a", aPriv)), ErrCodeInvalidClient))
 }

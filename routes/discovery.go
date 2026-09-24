@@ -3,30 +3,11 @@ package routes
 import (
 	"strings"
 
+	"azugo.io/auth"
 	"azugo.io/auth/client"
 
 	"azugo.io/azugo"
 )
-
-// discoveryDocument is the OIDC discovery document (RFC 8414 / OpenID Connect Discovery 1.0).
-type discoveryDocument struct {
-	Issuer                                    string   `json:"issuer"`
-	AuthorizationEndpoint                     string   `json:"authorization_endpoint"`
-	TokenEndpoint                             string   `json:"token_endpoint"`
-	UserinfoEndpoint                          string   `json:"userinfo_endpoint"`
-	RevocationEndpoint                        string   `json:"revocation_endpoint"`
-	IntrospectionEndpoint                     string   `json:"introspection_endpoint"`
-	EndSessionEndpoint                        string   `json:"end_session_endpoint,omitempty"`
-	JWKSURI                                   string   `json:"jwks_uri,omitempty"`
-	ScopesSupported                           []string `json:"scopes_supported,omitempty"`
-	ResponseTypesSupported                    []string `json:"response_types_supported"`
-	GrantTypesSupported                       []string `json:"grant_types_supported"`
-	CodeChallengeMethodsSupported             []string `json:"code_challenge_methods_supported"`
-	TokenEndpointAuthMethodsSupported         []string `json:"token_endpoint_auth_methods_supported"`
-	IntrospectionEndpointAuthMethodsSupported []string `json:"introspection_endpoint_auth_methods_supported"`
-	IDTokenSigningAlgValuesSupported          []string `json:"id_token_signing_alg_values_supported,omitempty"`
-	SubjectTypesSupported                     []string `json:"subject_types_supported"`
-}
 
 // discovery implements GET /.well-known/openid-configuration.
 func (h *Handler) discovery(ctx *azugo.Context) {
@@ -52,7 +33,26 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 		grantTypes = []string{client.GrantTypeAuthorizationCode, "client_credentials", client.GrantTypePassword}
 	}
 
-	doc := discoveryDocument{
+	// OIDC discovery document (RFC 8414 / OpenID Connect Discovery 1.0).
+	doc := struct {
+		Issuer                                    string   `json:"issuer"`
+		AuthorizationEndpoint                     string   `json:"authorization_endpoint"`
+		TokenEndpoint                             string   `json:"token_endpoint"`
+		UserinfoEndpoint                          string   `json:"userinfo_endpoint"`
+		RevocationEndpoint                        string   `json:"revocation_endpoint"`
+		IntrospectionEndpoint                     string   `json:"introspection_endpoint"`
+		EndSessionEndpoint                        string   `json:"end_session_endpoint,omitempty"`
+		JWKSURI                                   string   `json:"jwks_uri,omitempty"`
+		ScopesSupported                           []string `json:"scopes_supported,omitempty"`
+		ResponseTypesSupported                    []string `json:"response_types_supported"`
+		GrantTypesSupported                       []string `json:"grant_types_supported"`
+		CodeChallengeMethodsSupported             []string `json:"code_challenge_methods_supported"`
+		TokenEndpointAuthMethodsSupported         []string `json:"token_endpoint_auth_methods_supported"`
+		IntrospectionEndpointAuthMethodsSupported []string `json:"introspection_endpoint_auth_methods_supported"`
+		IDTokenSigningAlgValuesSupported          []string `json:"id_token_signing_alg_values_supported,omitempty"`
+		SubjectTypesSupported                     []string `json:"subject_types_supported"`
+		ACRValuesSupported                        []string `json:"acr_values_supported,omitempty"`
+	}{
 		Issuer: issuer,
 		// Endpoints
 		AuthorizationEndpoint: ep.Authorize,
@@ -71,6 +71,10 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 		SubjectTypesSupported:                     []string{"public"},
 	}
 
+	for _, lvl := range h.auth.Config().ACRLevels {
+		doc.ACRValuesSupported = append(doc.ACRValuesSupported, lvl.Value)
+	}
+
 	if kp != nil {
 		set, err := kp.KeySet(ctx)
 		if err != nil {
@@ -79,7 +83,7 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 			return
 		}
 
-		doc.ScopesSupported = []string{"openid"}
+		doc.ScopesSupported = []string{auth.ScopeOpenID, auth.ScopeProfile, auth.ScopeEmail}
 		doc.IDTokenSigningAlgValuesSupported = set.SigningAlgorithms()
 	}
 

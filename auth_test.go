@@ -57,7 +57,7 @@ func TestNewMaterializesDefaultsAndAccessors(t *testing.T) {
 	// Defaults are materialised through the retained pointer, so a hand-built config validates.
 	qt.Check(t, qt.Equals(cfg.AccessTokenTTL, 20*time.Minute))
 	qt.Check(t, qt.Equals(cfg.SessionTTL, 8*time.Hour))
-	qt.Check(t, qt.Equals(cfg.CookieName, "__session"))
+	qt.Check(t, qt.Equals(cfg.CookieName, "session"))
 
 	// Accessors expose the wired dependencies; Config returns the same retained pointer.
 	qt.Check(t, qt.IsNotNil(a.Users()))

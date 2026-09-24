@@ -1,0 +1,102 @@
+package views
+
+import "azugo.io/auth"
+
+// Enrollment is an in-progress MFA enrollment shown once: the authenticator-app secret (as a
+// QR code) for TOTP, the generated recovery codes, or the fields a push method asks for.
+type Enrollment struct {
+	Method   string
+	Secret   string
+	URI      string
+	QR       string `json:"-"` // PNG data URI of the otpauth URI, rebuilt on render
+	Codes    []string
+	Required []string
+}
+
+templ Security(methods []auth.MFAMethodInfo, enrollment *Enrollment, errorMessage string) {
+	@layout("Security") {
+		<p><a href="/">Back to home</a></p>
+		<h2>Two-factor authentication</h2>
+		if enrollment == nil {
+			@fieldError(errorMessage)
+		}
+		if enrollment != nil {
+			if enrollment.QR != "" {
+				<p>Scan the QR code with your authenticator app (or enter the secret), then confirm with the current code.</p>
+				<p><img src={ enrollment.QR } alt="QR code for the authenticator app" width="200" height="200"/></p>
+				<p><code>{ enrollment.Secret }</code></p>
+				<p><a href={ templ.SafeURL(enrollment.URI) }>Open in authenticator app</a></p>
+				<form method="post" action={ templ.SafeURL("/security/mfa/" + enrollment.Method + "/finish") }>
+					<input type="hidden" name="secret" value={ enrollment.Secret }/>
+					<input type="hidden" name="uri" value={ enrollment.URI }/>
+					<label for="label">Device name</label>
+					<input id="label" name="label" placeholder="Phone"/>
+					<label for="code">Code</label>
+					<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus/>
+					@fieldError(errorMessage)
+					<button type="submit">Confirm</button>
+				</form>
+			} else if len(enrollment.Required) > 0 {
+				<p>Enter the details for <strong>{ enrollment.Method }</strong> to finish enabling it.</p>
+				<form method="post" action={ templ.SafeURL("/security/mfa/" + enrollment.Method + "/finish") }>
+					<label for="label">Device name</label>
+					<input id="label" name="label" placeholder="Phone"/>
+					for _, field := range enrollment.Required {
+						<label for={ field }>{ field }</label>
+						<input id={ field } name={ field } required/>
+					}
+					@fieldError(errorMessage)
+					<button type="submit">Enable</button>
+				</form>
+			} else {
+				<p>Save these recovery codes somewhere safe. Each works once and they are not shown again.</p>
+				<ul>
+					for _, code := range enrollment.Codes {
+						<li><code>{ code }</code></li>
+					}
+				</ul>
+				<form method="post" action={ templ.SafeURL("/security/mfa/" + enrollment.Method + "/finish") }>
+					@fieldError(errorMessage)
+					<button type="submit">I have saved them</button>
+				</form>
+			}
+		}
+		<table>
+			<tr>
+				<th>Method</th>
+				<th>Enrolled</th>
+				<th></th>
+			</tr>
+			for _, m := range methods {
+				<tr>
+					<td>{ m.Method }</td>
+					<td>
+						if !m.Enrolled {
+							None
+						}
+						for _, e := range m.Enrollments {
+							<form method="post" action={ templ.SafeURL("/security/mfa/" + m.Method + "/" + e.ID + "/revoke") }>
+								if e.Label != "" {
+									{ e.Label }
+								} else {
+									Added { e.CreatedAt.Format("2006-01-02 15:04") }
+								}
+								if e.LastUsedAt != nil {
+									<small>last used { e.LastUsedAt.Format("2006-01-02 15:04") }</small>
+								}
+								<button type="submit">Remove</button>
+							</form>
+						}
+					</td>
+					<td>
+						if !m.Enrolled || !m.Exclusive {
+							<form method="post" action={ templ.SafeURL("/security/mfa/" + m.Method + "/enroll") }>
+								<button type="submit">Add</button>
+							</form>
+						}
+					</td>
+				</tr>
+			}
+		</table>
+	}
+}

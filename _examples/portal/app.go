@@ -4,7 +4,12 @@ package portal
 import (
 	"azugo.io/auth"
 	"azugo.io/auth/client"
+	"azugo.io/auth/mfa"
+	_ "azugo.io/auth/mfa/recovery" // registers the "recovery" (backup codes) MFA driver
+	_ "azugo.io/auth/mfa/totp"     // registers the "totp" MFA driver
 	"azugo.io/auth/session"
+
+	"example/portal/push"
 
 	"azugo.io/azugo"
 	"azugo.io/azugo/server"
@@ -42,10 +47,21 @@ func New(cmd *cobra.Command, version string) (*App, error) {
 		AllowedAuthMethods:      []string{client.AuthMethodPassword},
 		ResponseMode:            client.ResponseModeRedirect,
 		TokenEndpointAuthMethod: client.TokenEndpointAuthNone,
+		// MFA is prompted once a user has enrolled an authenticator app on /security; a pending
+		// login is redirected to the /mfa page.
+		MFAPolicy:       client.MFAPolicyOptional,
+		StepRedirectURI: "/mfa",
 	})
 
+	if config.PushCallbackSecret != "" {
+		config.Auth.MFAMethods = append(config.Auth.MFAMethods, auth.MFAMethodConfig{
+			Driver: push.DriverName,
+			Config: map[string]string{"callback_secret": config.PushCallbackSecret},
+		})
+	}
+
 	au, err := auth.New(a.App, config.Auth, NewDemoUsers(), session.NewMemoryStore(), clients,
-		auth.CookieScopeToBasePath())
+		auth.CookieScopeToBasePath(), auth.MFAStore(mfa.NewMemoryStore()))
 	if err != nil {
 		return nil, err
 	}

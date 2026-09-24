@@ -1,0 +1,12 @@
+package views
+
+// Error is the generic error page for failures no form can display inline.
+templ Error(title, message, backURL string) {
+	@layout(title) {
+		<p>{ message }</p>
+		<p>
+			<a href={ templ.SafeURL(backURL) }>Go back</a>
+			· <a href="/">Go to home</a>
+		</p>
+	}
+}

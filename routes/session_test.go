@@ -49,7 +49,6 @@ func TestDeleteSessionLogout(t *testing.T) {
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 204))
-	settle()
 
 	// The revoked session's access token no longer works.
 	resp2, err := tc.Get("/auth/session", tc.WithHeader("Authorization", "Bearer "+login.AccessToken))

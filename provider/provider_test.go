@@ -221,9 +221,12 @@ func TestMapStandardClaims(t *testing.T) {
 	qt.Check(t, qt.Equals(info.ID, "s1"))
 	qt.Check(t, qt.Equals(info.Name, "Alice"))
 	qt.Check(t, qt.Equals(info.Email, "alice@example.com"))
-	qt.Check(t, qt.StringContains(info.Scope, "openid"))
-	qt.Check(t, qt.StringContains(info.Scope, "admins"))
 	qt.Check(t, qt.Equals(info.Claims["dept"], "R&D"))
+
+	// IdP scope-like claims never become local scope; they stay available as claims.
+	qt.Check(t, qt.Equals(info.Scope, ""))
+	qt.Check(t, qt.Equals(info.Claims["scp"], "openid profile"))
+	qt.Check(t, qt.DeepEquals(info.Claims["groups"].([]any), []any{"admins", "users"}))
 
 	// Protocol claims are dropped.
 	_, hasIss := info.Claims["iss"]

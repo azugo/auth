@@ -1,0 +1,49 @@
+package views
+
+import "azugo.io/auth/mfa"
+
+// MFA renders the second-factor prompt for a pending login.
+templ MFA(available []string, selected, interaction, transaction, returnTo, errorMessage string) {
+	@layout("Second factor") {
+		if interaction == mfa.InteractionPoll {
+			<p>Approve the sign-in on your <strong>{ selected }</strong> device. This page checks for the approval when reloaded.</p>
+			if transaction != "" {
+				<p>Make sure the device shows, or asks you to enter, this code:</p>
+				<p><strong><code>{ transaction }</code></strong></p>
+			}
+			<form method="get" action="/mfa">
+				if returnTo != "" {
+					<input type="hidden" name="return_to" value={ returnTo }/>
+				}
+				@fieldError(errorMessage)
+				<button type="submit">I have approved it</button>
+			</form>
+		} else {
+			<p>Enter the code for <strong>{ selected }</strong> to finish signing in.</p>
+			<form method="post" action="/mfa/verify">
+				if returnTo != "" {
+					<input type="hidden" name="return_to" value={ returnTo }/>
+				}
+				<label for="code">Code</label>
+				<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus/>
+				@fieldError(errorMessage)
+				<button type="submit">Verify</button>
+			</form>
+		}
+		if len(available) > 1 {
+			<h2>Use another method</h2>
+			for _, m := range available {
+				if m != selected {
+					<form method="post" action="/mfa/begin">
+						<input type="hidden" name="method" value={ m }/>
+						if returnTo != "" {
+							<input type="hidden" name="return_to" value={ returnTo }/>
+						}
+						<button type="submit">Use { m }</button>
+					</form>
+				}
+			}
+		}
+		<p><a href="/login">Start over</a></p>
+	}
+}

@@ -14,22 +14,11 @@ func (a *Auth) WriteCookie(ctx *azugo.Context, d *CookieDirective) {
 		return
 	}
 
-	sameSite := azugo.CookieSameSiteStrict
-
-	switch d.SameSite {
-	case "lax":
-		sameSite = azugo.CookieSameSiteLax
-	case "none":
-		sameSite = azugo.CookieSameSiteNone
-	}
-
-	opts := make([]azugo.CookieOption, 0, 6)
+	opts := make([]azugo.CookieOption, 0, 4)
 	opts = append(opts,
+		azugo.CookieDefaultSecurity(),
 		azugo.CookiePath(d.Path),
-		azugo.CookieDomain(d.Domain),
-		azugo.CookieHTTPOnly(d.HTTPOnly),
-		azugo.CookieSecure(d.Secure),
-		sameSite,
+		d.SameSite,
 	)
 
 	if d.MaxAge < 0 {

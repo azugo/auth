@@ -14,6 +14,8 @@ type DenyList interface {
 	Deny(ctx context.Context, jti string, ttl time.Duration) error
 	// Denied returns true when jti has been denied.
 	Denied(ctx context.Context, jti string) (bool, error)
+	// Claim denies jti and reports whether the caller was the first to do so.
+	Claim(ctx context.Context, jti string, ttl time.Duration) (bool, error)
 }
 
 type cacheDenyList struct {
@@ -36,10 +38,28 @@ func (s *cacheDenyList) Deny(ctx context.Context, jti string, ttl time.Duration)
 		return nil
 	}
 
-	return s.c.Set(ctx, jti, true, cache.TTL[bool](ttl))
+	if err := s.c.Set(ctx, jti, true, cache.TTL[bool](ttl)); err != nil {
+		return err
+	}
+
+	return s.c.Sync(ctx)
 }
 
 // Denied returns true when jti has been denied.
 func (s *cacheDenyList) Denied(ctx context.Context, jti string) (bool, error) {
 	return s.c.Get(ctx, jti)
+}
+
+// Claim denies jti and reports whether the caller was the first to do so.
+func (s *cacheDenyList) Claim(ctx context.Context, jti string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, nil
+	}
+
+	added, err := s.c.Add(ctx, jti, true, cache.TTL[bool](ttl))
+	if err != nil {
+		return false, err
+	}
+
+	return added, s.c.Sync(ctx)
 }

@@ -10,6 +10,21 @@ import (
 	"github.com/spf13/viper"
 )
 
+// LogoutPolicy is what GET /logout must carry before it ends a session.
+type LogoutPolicy string
+
+// LogoutPolicy values.
+const (
+	// LogoutPolicyCookie ends the session on the presented cookie alone.
+	LogoutPolicyCookie LogoutPolicy = ""
+	// LogoutPolicyConfirm requires an id_token_hint this server issued for the session, or the
+	// user confirming, which a cross-site navigation cannot do.
+	LogoutPolicyConfirm LogoutPolicy = "confirm"
+	// LogoutPolicyIDTokenHint requires an id_token_hint and offers no confirmation path, so a
+	// relying party must identify the session it is ending.
+	LogoutPolicyIDTokenHint LogoutPolicy = "id_token_hint"
+)
+
 // Configuration is the authentication configuration section.
 type Configuration struct {
 	Secret string `mapstructure:"secret" validate:"required,min=32"`
@@ -17,18 +32,19 @@ type Configuration struct {
 	// enabling zero-downtime rotation of Secret. New tokens are always sealed with Secret;
 	// decryption falls back to this.
 	FallbackSecrets []string `mapstructure:"fallback_secrets"`
-	// Secure pins the cookie Secure flag, defaults to secure.
-	Secure *bool `mapstructure:"secure"`
 	// SameSite pins the cookie SameSite mode, defaults to strict.
 	SameSite   string `mapstructure:"same_site" validate:"omitempty,oneof=strict lax none"`
-	CookieName string `mapstructure:"cookie_name"` // default: "__session"
+	CookieName string `mapstructure:"cookie_name"` // default: "session"
 	CookiePath string `mapstructure:"cookie_path"` // default: base path + auth mount prefix (see CookieCtx.PathFor)
 	// LogoutInvalidatesCookie makes logout authoritative server-side (session + JTI revoked).
 	// Default true; only disable if a shared cookie must survive a single app's logout.
-	LogoutInvalidatesCookie bool          `mapstructure:"logout_invalidates_cookie"`
-	AccessTokenTTL          time.Duration `mapstructure:"access_token_ttl" validate:"required"` // default: 20m
-	SessionTTL              time.Duration `mapstructure:"session_ttl"      validate:"required"` // default: 8h
-	CodeTTL                 time.Duration `mapstructure:"code_ttl"`                             // authorization-code lifetime; default: 60s
+	LogoutInvalidatesCookie bool `mapstructure:"logout_invalidates_cookie"`
+	// LogoutPolicy is what GET /logout must carry before it ends a session. Unset accepts the
+	// cookie alone; relax SameSite from strict only with a stricter policy than that.
+	LogoutPolicy   LogoutPolicy  `mapstructure:"logout_policy"     validate:"omitempty,oneof=confirm id_token_hint"`
+	AccessTokenTTL time.Duration `mapstructure:"access_token_ttl" validate:"required"` // default: 20m
+	SessionTTL     time.Duration `mapstructure:"session_ttl"      validate:"required"` // default: 8h
+	CodeTTL        time.Duration `mapstructure:"code_ttl"`                             // authorization-code lifetime; default: 60s
 	// ExternalStateTTL bounds one external IdP round-trip, from redirect to callback.
 	ExternalStateTTL time.Duration `mapstructure:"external_state_ttl"`
 	// ClockSkew is the leeway allowed on external id_token time claims, inherited by every
@@ -45,7 +61,10 @@ type Configuration struct {
 	Providers      []ExternalProviderConfig `mapstructure:"providers"      validate:"omitempty,dive"`
 	Authenticators []AuthenticatorConfig    `mapstructure:"authenticators" validate:"omitempty,dive"` // passwordless primary methods
 	ACRLevels      []ACRLevelConfig         `mapstructure:"acr_levels"     validate:"omitempty,dive"` // trust ladder
-	Throttle       ThrottleConfig           `mapstructure:"throttle"`                                 // brute-force / lockout tuning
+	// MFAMethods tunes MFA method driver instances. Registered drivers not listed here are
+	// available under their driver name with no configuration.
+	MFAMethods []MFAMethodConfig `mapstructure:"mfa_methods" validate:"omitempty,dive"`
+	Throttle   ThrottleConfig    `mapstructure:"throttle"` // brute-force / lockout tuning
 }
 
 // AuthenticatorConfig configures one passwordless primary-auth driver instance (passkey,
@@ -57,6 +76,13 @@ type AuthenticatorConfig struct {
 	ClaimMapper ClaimMapper       `mapstructure:"-"`      // optional per-method override; set in code
 }
 
+// MFAMethodConfig configures one MFA method driver instance.
+type MFAMethodConfig struct {
+	Name   string            `mapstructure:"name"` // method name used in URLs and Session.MFAMethod; defaults to Driver
+	Driver string            `mapstructure:"driver" validate:"required"`
+	Config map[string]string `mapstructure:"config"` // driver-specific options
+}
+
 // ThrottleConfig tunes the default cache-backed lockout guard applied to credential
 // endpoints.
 type ThrottleConfig struct {
@@ -64,10 +90,14 @@ type ThrottleConfig struct {
 	// MaxAttempts/Window/LockoutTTL are required (non-zero) only when Enabled is set.
 	MaxAttempts int           `mapstructure:"max_attempts" validate:"required_with=Enabled"` // default: 5
 	Window      time.Duration `mapstructure:"window"       validate:"required_with=Enabled"` // default: 15m
-	LockoutTTL  time.Duration `mapstructure:"lockout_ttl"  validate:"required_with=Enabled"` // default: 15m
-	// MFA code resend (POST /mfa/resend), enforced independently of the verify lockout.
+	// LockoutTTL blocks a for this long block lasts only for whatever remains of Window. Default 15m.
+	LockoutTTL time.Duration `mapstructure:"lockout_ttl" validate:"required_with=Enabled"`
+	// MFAResendCooldown and MFAMaxResends bound how often one MFA method's challenge may be
+	// re-opened within a pending login.
 	MFAResendCooldown time.Duration `mapstructure:"mfa_resend_cooldown"` // default: 60s
 	MFAMaxResends     int           `mapstructure:"mfa_max_resends"`     // default: 3
+	// ExternalStartMax caps how many external IdP round-trips one caller may start.
+	ExternalStartMax int `mapstructure:"external_start_max"`
 }
 
 // ACRLevelConfig defines one authentication context class (Level of Assurance). Levels form
@@ -142,7 +172,7 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	secret, _ := config.LoadRemoteSecret("AUTH_SECRET")
 
 	v.SetDefault(prefix+".secret", secret)
-	v.SetDefault(prefix+".cookie_name", "__session")
+	v.SetDefault(prefix+".cookie_name", "session")
 	v.SetDefault(prefix+".logout_invalidates_cookie", true)
 	v.SetDefault(prefix+".access_token_ttl", 20*time.Minute)
 	v.SetDefault(prefix+".session_ttl", 8*time.Hour)
@@ -155,13 +185,14 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	v.SetDefault(prefix+".throttle.lockout_ttl", 15*time.Minute)
 	v.SetDefault(prefix+".throttle.mfa_resend_cooldown", 60*time.Second)
 	v.SetDefault(prefix+".throttle.mfa_max_resends", 3)
+	v.SetDefault(prefix+".throttle.external_start_max", 300)
 
 	_ = v.BindEnv(prefix+".secret", "AUTH_SECRET")
-	_ = v.BindEnv(prefix+".secure", "AUTH_SECURE")
 	_ = v.BindEnv(prefix+".same_site", "AUTH_SAME_SITE")
 	_ = v.BindEnv(prefix+".cookie_name", "AUTH_COOKIE_NAME")
 	_ = v.BindEnv(prefix+".cookie_path", "AUTH_COOKIE_PATH")
 	_ = v.BindEnv(prefix+".logout_invalidates_cookie", "AUTH_LOGOUT_INVALIDATES_COOKIE")
+	_ = v.BindEnv(prefix+".logout_policy", "AUTH_LOGOUT_POLICY")
 	_ = v.BindEnv(prefix+".access_token_ttl", "AUTH_ACCESS_TOKEN_TTL")
 	_ = v.BindEnv(prefix+".session_ttl", "AUTH_SESSION_TTL")
 	_ = v.BindEnv(prefix+".code_ttl", "AUTH_CODE_TTL")
@@ -175,6 +206,7 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".throttle.lockout_ttl", "AUTH_THROTTLE_LOCKOUT_TTL")
 	_ = v.BindEnv(prefix+".throttle.mfa_resend_cooldown", "AUTH_THROTTLE_MFA_RESEND_COOLDOWN")
 	_ = v.BindEnv(prefix+".throttle.mfa_max_resends", "AUTH_THROTTLE_MFA_MAX_RESENDS")
+	_ = v.BindEnv(prefix+".throttle.external_start_max", "AUTH_THROTTLE_EXTERNAL_START_MAX")
 
 	// Load primary key from remote secret
 	if primaryKey, _ := config.LoadRemoteSecret("AUTH_KEYS_PRIMARY"); primaryKey != "" {

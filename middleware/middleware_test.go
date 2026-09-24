@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"testing"
-	"time"
 
 	"azugo.io/auth"
 	"azugo.io/auth/client"
@@ -13,10 +12,6 @@ import (
 	"azugo.io/core/config"
 	"github.com/go-quicktest/qt"
 )
-
-// settle waits for the eventually-consistent memory cache backing the default JTI store to
-// apply a write (see auth/jti/allowlist_test.go's identical helper).
-func settle() { time.Sleep(10 * time.Millisecond) }
 
 type stubUsers struct{ info auth.UserInfo }
 
@@ -59,9 +54,8 @@ func newTestAuth(t *testing.T, cl *client.Client) *auth.Auth {
 func loginFor(t *testing.T, a *auth.Auth, clientID string) auth.LoginResult {
 	t.Helper()
 
-	res, err := a.Login(context.Background(), auth.LoginRequest{ClientID: clientID, Username: "alice", Password: "irrelevant"})
+	res, err := a.Login(context.Background(), auth.LoginRequest{Credentials: auth.ClientCredentials{ClientID: clientID}, Username: "alice", Password: "irrelevant"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	return res
 }

@@ -10,9 +10,6 @@ import (
 	"github.com/go-quicktest/qt"
 )
 
-// settle waits for the eventually-consistent memory cache to apply a write.
-func settle() { time.Sleep(10 * time.Millisecond) }
-
 func newStore(t *testing.T) Store {
 	t.Helper()
 
@@ -40,13 +37,11 @@ func TestConsumeIsSingleUse(t *testing.T) {
 	ctx := context.Background()
 
 	qt.Assert(t, qt.IsNil(store.Save(ctx, testCode("c1"))))
-	settle()
 
 	rec, err := store.Consume(ctx, "c1")
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(rec.ClientID, "web"))
 	qt.Check(t, qt.Equals(rec.SessionID, "s1"))
-	settle()
 
 	// The second consume reports the replay together with the bound record.
 	rec2, err := store.Consume(ctx, "c1")

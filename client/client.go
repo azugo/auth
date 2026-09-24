@@ -63,20 +63,25 @@ const (
 
 // Client is the registered OAuth client metadata.
 type Client struct {
-	ID            string
-	Name          string
-	SecretHash    string // PHC-encoded; required when TokenEndpointAuthMethod = client_secret
-	PublicKey     string // PEM; required when TokenEndpointAuthMethod = private_key_jwt
-	GrantTypes    []string
-	Scopes        []string
-	RedirectURIs  []string
-	Public        bool // true = public client; no client secret required
-	AllowNoPrompt bool // true = portal client; silent re-auth allowed
+	ID           string
+	Name         string
+	SecretHash   string // PHC-encoded; required when TokenEndpointAuthMethod = client_secret
+	PublicKey    string // PEM; required when TokenEndpointAuthMethod = private_key_jwt
+	GrantTypes   []string
+	Scopes       []string
+	RedirectURIs []string
+	Public       bool // true = public client; no client secret required
+	// AllowNoPrompt permits prompt=none (silent re-auth).
+	// TODO: not implemented yet.
+	AllowNoPrompt bool
 	RequirePKCE   bool // true for public clients
-	// RequireDPoP, if true, makes a DPoP proof mandatory at /token; cnf.jkt is bound into
-	// issued tokens.
-	RequireDPoP             bool
-	ResponseMode            ResponseMode
+	// RequireDPoP makes a DPoP proof mandatory at /token and binds cnf.jkt into issued tokens.
+	// TODO: not implemented yet, so a token stays a bearer token.
+	RequireDPoP  bool
+	ResponseMode ResponseMode
+	// StepRedirectURI is the local path a ResponseModeRedirect client is sent to while a login
+	// step (MFA, password change, app gate) is pending.
+	StepRedirectURI         string
 	AccessTokenType         AccessTokenType
 	TokenEndpointAuthMethod TokenEndpointAuthMethod // how this client authenticates at /token
 	// IDTokenSignedResponseAlg is the OIDC id_token_signed_response_alg registration
@@ -109,6 +114,29 @@ func (c *Client) AuthMethodAllowed(method string) bool {
 // GrantTypeAllowed returns true when grantType is one of this client's registered GrantTypes.
 func (c *Client) GrantTypeAllowed(grantType string) bool {
 	return slices.Contains(c.GrantTypes, grantType)
+}
+
+// AuthMethod returns the effective token endpoint authentication method.
+func (c *Client) AuthMethod() TokenEndpointAuthMethod {
+	switch {
+	case c.TokenEndpointAuthMethod != "":
+		return c.TokenEndpointAuthMethod
+	case c.SecretHash != "" && c.PublicKey != "":
+		return ""
+	case c.SecretHash != "":
+		return TokenEndpointAuthClientSecret
+	case c.PublicKey != "":
+		return TokenEndpointAuthPrivateKeyJWT
+	default:
+		return TokenEndpointAuthNone
+	}
+}
+
+// Confidential returns true when the client authenticates at the token endpoint.
+func (c *Client) Confidential() bool {
+	m := c.AuthMethod()
+
+	return !c.Public && m != TokenEndpointAuthNone && m != ""
 }
 
 // Registry provides OAuth client metadata.

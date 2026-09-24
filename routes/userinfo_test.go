@@ -37,6 +37,54 @@ func TestUserInfoReturnsClaimsForValidBearer(t *testing.T) {
 	qt.Check(t, qt.Equals(doc.Email, "alice@example.com"))
 }
 
+func TestUserInfoHonoursGrantedScope(t *testing.T) {
+	// The client narrows the session to openid alone, so no profile or email data is surfaced.
+	a := newTestAuth(t, session.NewMemoryStore(), &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+		Scopes: []string{"openid"},
+	})
+	login := loginFor(t, a, "spa")
+
+	app := newTestApp(t)
+	Bind(app, "/auth", a)
+
+	tc := app.TestClient()
+
+	resp, err := tc.Get("/auth/userinfo", tc.WithHeader("Authorization", "Bearer "+login.AccessToken))
+	defer fasthttp.ReleaseResponse(resp)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.Equals(resp.StatusCode(), 200))
+
+	doc := decodeJSON[struct {
+		Subject string `json:"sub"`
+		Name    string `json:"name"`
+		Email   string `json:"email"`
+	}](t, resp)
+	qt.Check(t, qt.Equals(doc.Subject, "u1"))
+	qt.Check(t, qt.Equals(doc.Name, ""))
+	qt.Check(t, qt.Equals(doc.Email, ""))
+}
+
+func TestUserInfoRequiresOpenIDScope(t *testing.T) {
+	a := newTestAuth(t, session.NewMemoryStore(), &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+		Scopes: []string{"profile"},
+	})
+	login := loginFor(t, a, "spa")
+
+	app := newTestApp(t)
+	Bind(app, "/auth", a)
+
+	tc := app.TestClient()
+
+	resp, err := tc.Get("/auth/userinfo", tc.WithHeader("Authorization", "Bearer "+login.AccessToken))
+	defer fasthttp.ReleaseResponse(resp)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(resp.StatusCode(), 403))
+}
+
 func TestUserInfoRejectsMissingToken(t *testing.T) {
 	a := newTestAuth(t, session.NewMemoryStore(), &client.Client{ID: "spa"})
 

@@ -9,9 +9,6 @@ import (
 	"github.com/go-quicktest/qt"
 )
 
-// settle waits for the eventually-consistent memory cache to apply a write.
-func settle() { time.Sleep(10 * time.Millisecond) }
-
 func newCacheStore(t *testing.T) Store {
 	t.Helper()
 
@@ -35,7 +32,6 @@ func TestCacheStoreCreateGet(t *testing.T) {
 		Status:    StatusActive,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})))
-	settle()
 
 	got, err := store.Get(ctx, "sid-1")
 	qt.Assert(t, qt.IsNil(err))
@@ -54,7 +50,6 @@ func TestCacheStoreCreateAssignsID(t *testing.T) {
 	qt.Assert(t, qt.IsNil(store.Create(ctx, sess)))
 	qt.Assert(t, qt.IsTrue(sess.ID != ""))
 	qt.Check(t, qt.Equals(len(sess.ID), 26)) // ULID string length
-	settle()
 
 	got, err := store.Get(ctx, sess.ID)
 	qt.Assert(t, qt.IsNil(err))
@@ -79,10 +74,8 @@ func TestCacheStoreTouch(t *testing.T) {
 	ctx := context.Background()
 
 	qt.Assert(t, qt.IsNil(store.Create(ctx, &Session{ID: "sid-1", UserID: "user-1", Status: StatusActive, ExpiresAt: time.Now().Add(time.Hour)})))
-	settle()
 
 	qt.Assert(t, qt.IsNil(store.Touch(ctx, "sid-1")))
-	settle()
 
 	got, err := store.Get(ctx, "sid-1")
 	qt.Assert(t, qt.IsNil(err))
@@ -96,10 +89,8 @@ func TestCacheStoreRevoke(t *testing.T) {
 	ctx := context.Background()
 
 	qt.Assert(t, qt.IsNil(store.Create(ctx, &Session{ID: "sid-1", UserID: "user-1", Status: StatusActive, ExpiresAt: time.Now().Add(time.Hour)})))
-	settle()
 
 	qt.Assert(t, qt.IsNil(store.Revoke(ctx, "sid-1")))
-	settle()
 
 	// A revoked session is deleted, so it reads as not found.
 	_, err := store.Get(ctx, "sid-1")

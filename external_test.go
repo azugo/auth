@@ -118,7 +118,7 @@ func newExternalTestAuth(t *testing.T, providers []contract.ExternalProviderConf
 }
 
 // beginAndExtractState starts an external login and returns the state handed to the IdP.
-func beginAndExtractState(t *testing.T, a *Auth, providerName, clientID, returnTo string) string {
+func beginAndExtractState(t *testing.T, a *Auth, providerName, clientID, returnTo string) (state, binding string) {
 	t.Helper()
 
 	res, err := a.BeginExternalLogin(context.Background(), ExternalLoginRequest{Provider: providerName, ClientID: clientID, ReturnTo: returnTo})
@@ -129,13 +129,11 @@ func beginAndExtractState(t *testing.T, a *Auth, providerName, clientID, returnT
 	qt.Check(t, qt.IsTrue(u.Query().Get("code_challenge") != ""))
 	qt.Check(t, qt.IsTrue(u.Query().Get("nonce") != ""))
 
-	state := u.Query().Get("state")
+	state = u.Query().Get("state")
 	qt.Assert(t, qt.IsTrue(state != ""))
+	qt.Assert(t, qt.IsNotNil(res.Cookie))
 
-	// The eventually-consistent memory cache must apply the state write before the callback.
-	settle()
-
-	return state
+	return state, res.Cookie.Value
 }
 
 func extPortalClient() *client.Client {
@@ -152,10 +150,10 @@ func extProviderEntry(name, driver string) contract.ExternalProviderConfig {
 func TestExternalLoginFlow(t *testing.T) {
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, extPortalClient())
 
-	state := beginAndExtractState(t, a, "corp", "portal", "/dashboard")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "/dashboard")
 
 	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{
-		Provider: "corp", State: state, Code: "code-1", RequestTLS: true, BaseURL: "https://app.example",
+		Provider: "corp", State: state, Binding: binding, Code: "code-1", BaseURL: "https://app.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsNotNil(res.Login))
@@ -163,8 +161,6 @@ func TestExternalLoginFlow(t *testing.T) {
 	qt.Check(t, qt.Equals(res.Login.Status, session.StatusActive))
 	qt.Check(t, qt.Equals(res.Login.ReturnTo, "/dashboard"))
 	qt.Assert(t, qt.IsNotNil(res.Login.Cookie))
-
-	settle()
 
 	// The session carries the resolved local user and the originating provider.
 	info, sess, err := a.IntrospectToken(context.Background(), res.Login.Cookie.Value)
@@ -193,26 +189,26 @@ func TestExternalCallbackStateValidation(t *testing.T) {
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
 
 	// Provider mismatch consumes nothing usable.
-	state := beginAndExtractState(t, a, "corp", "portal", "")
-	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "other", State: state, Code: "c"})
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "other", State: state, Binding: binding, Code: "c"})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
 
 	// Replay: a consumed state cannot be used again.
-	state = beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding = beginAndExtractState(t, a, "corp", "portal", "")
 
-	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c"})
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c"})
 	qt.Assert(t, qt.IsNil(err))
 
-	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c"})
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c"})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
 }
 
 func TestExternalCallbackUpstreamError(t *testing.T) {
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, extPortalClient())
 
-	state := beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
 
-	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Error: "access_denied"})
+	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Error: "access_denied"})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeAccessDenied))
 }
 
@@ -220,9 +216,9 @@ func TestExternalLoginAutoLinksAndResolvesViaIdentityStore(t *testing.T) {
 	store := provider.NewMemoryIdentityStore()
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, extPortalClient(), IdentityStore(store))
 
-	state := beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
 
-	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c1"})
+	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsNotNil(res.Login))
 
@@ -232,9 +228,9 @@ func TestExternalLoginAutoLinksAndResolvesViaIdentityStore(t *testing.T) {
 	qt.Check(t, qt.Equals(link.UserID, "local-ext-1"))
 
 	// Second login resolves through the link (and touches LastUsedAt).
-	state = beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding = beginAndExtractState(t, a, "corp", "portal", "")
 
-	res, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c2"})
+	res, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c2"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsNotNil(res.Login))
 
@@ -253,35 +249,31 @@ func TestExternalLinkCeremonyAndConflict(t *testing.T) {
 	cl.GrantTypes = []string{client.GrantTypePassword}
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, cl, IdentityStore(store))
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "portal", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	res, err := a.BeginExternalLink(context.Background(), ExternalLinkRequest{Provider: "corp", Token: login.Cookie.Value, ReturnTo: "/profile"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	u, _ := url.Parse(res.Redirect)
 	state := u.Query().Get("state")
 
-	cres, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c1"})
+	cres, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: res.Cookie.Value, Code: "c1"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsNotNil(cres.Link))
 	qt.Check(t, qt.Equals(cres.Link.UserID, "u1"))
 	qt.Check(t, qt.Equals(cres.ReturnTo, "/profile"))
 
 	// Linking the same identity to another user is refused by default.
-	login2, err := a.Login(context.Background(), LoginRequest{ClientID: "portal", Username: "carol", Password: "secret123"})
+	login2, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "carol", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	res, err = a.BeginExternalLink(context.Background(), ExternalLinkRequest{Provider: "corp", Token: login2.Cookie.Value})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	u, _ = url.Parse(res.Redirect)
 
-	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: u.Query().Get("state"), Code: "c2"})
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: u.Query().Get("state"), Binding: res.Cookie.Value, Code: "c2"})
 	qt.Check(t, qt.IsTrue(errors.Is(err, provider.ErrIdentityLinked)))
 
 	var oe *OAuthError
@@ -301,17 +293,15 @@ func TestExternalRelinkPolicyAllowsMove(t *testing.T) {
 
 	qt.Assert(t, qt.IsNil(store.Link(context.Background(), &provider.IdentityLink{UserID: "u2", Provider: "corp", Subject: "ext-1"})))
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "portal", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	res, err := a.BeginExternalLink(context.Background(), ExternalLinkRequest{Provider: "corp", Token: login.Cookie.Value})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	u, _ := url.Parse(res.Redirect)
 
-	cres, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: u.Query().Get("state"), Code: "c1"})
+	cres, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: u.Query().Get("state"), Binding: res.Cookie.Value, Code: "c1"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(cres.Link.UserID, "u1"))
 
@@ -333,9 +323,9 @@ func TestExternalPerProviderClaimMapperOverride(t *testing.T) {
 
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{entry}, nil, extPortalClient())
 
-	state := beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
 
-	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c"})
+	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c"})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
 }
 
@@ -348,11 +338,10 @@ func TestExternalAppWideClaimMapping(t *testing.T) {
 			return info, err
 		})))
 
-	state := beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
 
-	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c"})
+	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	_, sess, err := a.IntrospectToken(context.Background(), res.Login.Cookie.Value)
 	qt.Assert(t, qt.IsNil(err))
@@ -365,10 +354,10 @@ func TestExternalLoginDeferredByLogoutAfterAuth(t *testing.T) {
 
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{entry}, nil, extPortalClient())
 
-	state := beginAndExtractState(t, a, "nosso", "portal", "/home")
+	state, binding := beginAndExtractState(t, a, "nosso", "portal", "/home")
 
 	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{
-		Provider: "nosso", State: state, Code: "c1", BaseURL: "https://app.example",
+		Provider: "nosso", State: state, Binding: binding, Code: "c1", BaseURL: "https://app.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
 
@@ -383,21 +372,17 @@ func TestExternalLoginDeferredByLogoutAfterAuth(t *testing.T) {
 	pending := u.Query().Get("state")
 	qt.Assert(t, qt.IsTrue(pending != ""))
 
-	settle()
-
-	lres, err := a.ExternalLogoutCallback(context.Background(), ExternalLogoutCallbackRequest{Provider: "nosso", State: pending})
+	lres, err := a.ExternalLogoutCallback(context.Background(), ExternalLogoutCallbackRequest{Provider: "nosso", State: pending, Binding: binding})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsNotNil(lres.Login))
 	qt.Check(t, qt.Equals(lres.Login.ReturnTo, "/home"))
-
-	settle()
 
 	_, sess, err := a.IntrospectToken(context.Background(), lres.Login.Cookie.Value)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(sess.AuthProvider, "nosso"))
 
 	// The pending-auth entry is single-use: a replay must not mint a second session.
-	_, err = a.ExternalLogoutCallback(context.Background(), ExternalLogoutCallbackRequest{Provider: "nosso", State: pending})
+	_, err = a.ExternalLogoutCallback(context.Background(), ExternalLogoutCallbackRequest{Provider: "nosso", State: pending, Binding: binding})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
 }
 
@@ -408,9 +393,8 @@ func TestBrowserLogoutLocal(t *testing.T) {
 
 	a := newExternalTestAuth(t, nil, nil, cl)
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "portal", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	res, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{
 		Token: login.Cookie.Value, PostLogoutRedirectURI: "https://app.example/bye",
@@ -420,16 +404,13 @@ func TestBrowserLogoutLocal(t *testing.T) {
 	qt.Assert(t, qt.IsNotNil(res.ClearCookie))
 	qt.Check(t, qt.Equals(res.ClearCookie.MaxAge, -1))
 
-	settle()
-
 	// The logout is authoritative: the cookie no longer introspects.
 	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
 
 	// An unregistered target falls back to "/".
-	login, err = a.Login(context.Background(), LoginRequest{ClientID: "portal", Username: "alice", Password: "secret123"})
+	login, err = a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	res, err = a.BrowserLogout(context.Background(), BrowserLogoutRequest{
 		Token: login.Cookie.Value, PostLogoutRedirectURI: "https://evil.example/",
@@ -445,11 +426,10 @@ func TestBrowserLogoutFederated(t *testing.T) {
 
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fakelogout")}, nil, cl)
 
-	state := beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
 
-	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c1"})
+	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	lres, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{
 		Token: res.Login.Cookie.Value, PostLogoutRedirectURI: "https://app.example/bye", BaseURL: "https://app.example",
@@ -465,14 +445,10 @@ func TestBrowserLogoutFederated(t *testing.T) {
 	logoutState := u.Query().Get("state")
 	qt.Assert(t, qt.IsTrue(logoutState != ""))
 
-	settle()
-
 	cres, err := a.ExternalLogoutCallback(context.Background(), ExternalLogoutCallbackRequest{Provider: "corp", State: logoutState})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.IsNil(cres.Login))
 	qt.Check(t, qt.Equals(cres.Redirect, "https://app.example/bye"))
-
-	settle()
 
 	_, _, err = a.IntrospectToken(context.Background(), res.Login.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
@@ -482,11 +458,10 @@ func TestBrowserLogoutWithoutFederationStaysLocal(t *testing.T) {
 	// FederatedLogout unset: external session logs out locally only.
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fakelogout")}, nil, extPortalClient())
 
-	state := beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
 
-	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c1"})
+	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	lres, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: res.Login.Cookie.Value})
 	qt.Assert(t, qt.IsNil(err))
@@ -497,9 +472,9 @@ func TestUnlinkIdentity(t *testing.T) {
 	store := provider.NewMemoryIdentityStore()
 	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, extPortalClient(), IdentityStore(store))
 
-	state := beginAndExtractState(t, a, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
 
-	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c1"})
+	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
 	qt.Assert(t, qt.IsNil(err))
 
 	links, _, err := a.ListIdentities(context.Background(), "local-ext-1", "", nil)
@@ -534,11 +509,347 @@ func TestExternalStateTTL(t *testing.T) {
 	a2, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(extPortalClient()))
 	qt.Assert(t, qt.IsNil(err))
 
-	state := beginAndExtractState(t, a2, "corp", "portal", "")
+	state, binding := beginAndExtractState(t, a2, "corp", "portal", "")
 
 	// The stashed round-trip expires with the configured TTL.
 	time.Sleep(50 * time.Millisecond)
 
-	_, err = a2.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c1"})
+	_, err = a2.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+}
+
+func TestBeginExternalLinkRejectsThirdPartyAccessToken(t *testing.T) {
+	cl := extPortalClient()
+	cl.GrantTypes = []string{client.GrantTypePassword}
+	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, cl, IdentityStore(provider.NewMemoryIdentityStore()))
+
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = a.BeginExternalLink(context.Background(), ExternalLinkRequest{Provider: "corp", Token: thirdPartyAccessToken(t, a, login.Cookie.Value)})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInsufficientScope))
+}
+
+func TestExternalCallbackRequiresBrowserBinding(t *testing.T) {
+	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, extPortalClient())
+
+	// A callback without the starting browser's cookie is refused and burns the state.
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
+
+	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Code: "c1"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	state, _ = beginAndExtractState(t, a, "corp", "portal", "")
+
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: "not-the-cookie", Code: "c1"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+}
+
+func TestExternalLinkCallbackRequiresStartingBrowser(t *testing.T) {
+	cl := extPortalClient()
+	cl.GrantTypes = []string{client.GrantTypePassword}
+	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, cl, IdentityStore(provider.NewMemoryIdentityStore()))
+
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	res, err := a.BeginExternalLink(context.Background(), ExternalLinkRequest{Provider: "corp", Token: login.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.IsNotNil(res.Cookie))
+
+	u, _ := url.Parse(res.Redirect)
+
+	// The victim's browser, lacking the attacker's binding cookie, cannot complete the link.
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: u.Query().Get("state"), Code: "c1"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+}
+
+func TestExternalDeferredFinalizeRequiresBrowserBinding(t *testing.T) {
+	entry := extProviderEntry("nosso", "fakelogout")
+	entry.LogoutAfterAuth = true
+
+	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{entry}, nil, extPortalClient())
+
+	state, binding := beginAndExtractState(t, a, "nosso", "portal", "")
+
+	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "nosso", State: state, Binding: binding, Code: "c1"})
+	qt.Assert(t, qt.IsNil(err))
+	// The binding cookie must survive the IdP logout hop.
+	qt.Check(t, qt.IsNil(res.ClearCookie))
+
+	u, _ := url.Parse(res.Redirect)
+
+	_, err = a.ExternalLogoutCallback(context.Background(), ExternalLogoutCallbackRequest{Provider: "nosso", State: u.Query().Get("state")})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+}
+
+func TestExternalLoginRequiresExternalUserProvider(t *testing.T) {
+	plain := fakeUsers{
+		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "openid"}},
+		passwords: map[string]string{"alice": "secret123"},
+	}
+
+	cfg := validConfig()
+	cfg.Providers = []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}
+
+	// Without FindOrCreateUser and without an identity store no external login can ever succeed.
+	_, err := New(newApp(t), cfg, plain, session.NewMemoryStore(), client.NewMemoryRegistry(extPortalClient()))
+	qt.Check(t, qt.IsNotNil(err))
+
+	// With an identity store, only a pre-linked identity resolves; an unknown subject is refused
+	// rather than becoming a local user named after the IdP subject.
+	store := provider.NewMemoryIdentityStore()
+	a, err := New(newApp(t), cfg, plain, session.NewMemoryStore(), client.NewMemoryRegistry(extPortalClient()), IdentityStore(store))
+	qt.Assert(t, qt.IsNil(err))
+
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
+
+	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeServerError))
+
+	qt.Assert(t, qt.IsNil(store.Link(context.Background(), &provider.IdentityLink{UserID: "u1", Provider: "corp", Subject: "ext-1"})))
+
+	state, binding = beginAndExtractState(t, a, "corp", "portal", "")
+
+	res, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c1"})
+	qt.Assert(t, qt.IsNil(err))
+
+	info, _, err := a.IntrospectToken(context.Background(), res.Login.Cookie.Value)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.ID, "u1"))
+}
+
+func TestBrowserLogoutIgnoresStaleToken(t *testing.T) {
+	cl := extPortalClient()
+	cl.GrantTypes = []string{client.GrantTypePassword}
+	cl.PostLogoutRedirectURIs = []string{"https://app.example/bye"}
+
+	a := newExternalTestAuth(t, nil, nil, cl)
+
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	rotated, err := a.Refresh(context.Background(), RefreshRequest{Token: login.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+
+	res, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{
+		Token: login.Cookie.Value, PostLogoutRedirectURI: "https://app.example/bye",
+	})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.IsNotNil(res.ClearCookie))
+
+	// The browser still gets its cookie cleared and its registered post-logout hop...
+	qt.Check(t, qt.Equals(res.Redirect, "https://app.example/bye"))
+
+	// ...but the live session is untouched.
+	_, _, err = a.IntrospectToken(context.Background(), rotated.Cookie.Value)
+	qt.Check(t, qt.IsNil(err))
+}
+
+func TestExternalStartIsRateLimitedPerCaller(t *testing.T) {
+	cfg := validConfig()
+	cfg.Providers = []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}
+	cfg.Throttle = contract.ThrottleConfig{
+		Enabled: true, MaxAttempts: 5, Window: time.Minute, LockoutTTL: time.Minute,
+		ExternalStartMax: 2,
+	}
+
+	users := extTestUsers{fakeUsers{
+		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "openid"}},
+		passwords: map[string]string{"alice": "secret123"},
+	}}
+
+	cl := extPortalClient()
+	cl.GrantTypes = []string{client.GrantTypePassword}
+	cl.AllowedAuthMethods = []string{client.AuthMethodPassword, "corp"}
+
+	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	qt.Assert(t, qt.IsNil(err))
+
+	begin := func(ip string) error {
+		_, err := a.BeginExternalLogin(context.Background(), ExternalLoginRequest{Provider: "corp", ClientID: "portal", IP: ip})
+
+		return err
+	}
+
+	qt.Assert(t, qt.IsNil(begin("10.0.0.1")))
+	qt.Assert(t, qt.IsNil(begin("10.0.0.1")))
+
+	// The budget is spent, so no further round-trip state is written for this caller.
+	qt.Check(t, qt.Equals(oauthErrorCode(t, begin("10.0.0.1")), ErrCodeSlowDown))
+
+	// It is per caller, and separate from the credential lockout.
+	qt.Check(t, qt.IsNil(begin("10.0.0.2")))
+
+	_, err = a.Login(context.Background(), LoginRequest{
+		Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123", IP: "10.0.0.1",
+	})
+	qt.Check(t, qt.IsNil(err))
+}
+
+func TestExternalStartWithoutIPIsNotThrottled(t *testing.T) {
+	cfg := validConfig()
+	cfg.Providers = []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}
+	cfg.Throttle = contract.ThrottleConfig{
+		Enabled: true, MaxAttempts: 5, Window: time.Minute, LockoutTTL: time.Minute,
+		ExternalStartMax: 2,
+	}
+
+	cl := extPortalClient()
+	cl.AllowedAuthMethods = []string{client.AuthMethodPassword, "corp"}
+
+	a, err := New(newApp(t), cfg, extTestUsers{fakeUsers{}}, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	qt.Assert(t, qt.IsNil(err))
+
+	// Callers with no known IP never share one bucket that would lock everyone out.
+	for range 3 {
+		_, err := a.BeginExternalLogin(context.Background(), ExternalLoginRequest{Provider: "corp", ClientID: "portal"})
+		qt.Check(t, qt.IsNil(err))
+	}
+}
+
+func TestBrowserLogoutConfirmation(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+
+	cfg := validConfig()
+	cfg.LogoutInvalidatesCookie = true
+	cfg.LogoutPolicy = LogoutPolicyConfirm
+	cfg.Keys = keySetConfig(priv, pub)
+
+	cl := extPortalClient()
+	cl.GrantTypes = []string{client.GrantTypePassword}
+	cl.ResponseMode = client.ResponseModeJSON
+	cl.Scopes = []string{ScopeOpenID}
+
+	users := extTestUsers{fakeUsers{
+		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "openid"}},
+		passwords: map[string]string{"alice": "secret123"},
+	}}
+
+	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	qt.Assert(t, qt.IsNil(err))
+
+	login := func() LoginResult {
+		res, err := a.Login(context.Background(), LoginRequest{
+			Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123",
+			BaseURL: "https://issuer.example",
+		})
+		qt.Assert(t, qt.IsNil(err))
+
+		return res
+	}
+
+	// A bare navigation ends nothing and does not even clear the cookie.
+	first := login()
+
+	res, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: first.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(res.ConfirmationRequired))
+	qt.Check(t, qt.IsNil(res.ClearCookie))
+
+	_, _, err = a.IntrospectToken(context.Background(), first.Cookie.Value)
+	qt.Check(t, qt.IsNil(err))
+
+	// Confirming it does.
+	res, err = a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: first.Cookie.Value, Confirmed: true})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsFalse(res.ConfirmationRequired))
+
+	_, _, err = a.IntrospectToken(context.Background(), first.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
+
+	// So does an id_token this server issued for the session.
+	second := login()
+	qt.Assert(t, qt.IsTrue(second.IDToken != ""))
+
+	res, err = a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: second.Cookie.Value, IDTokenHint: second.IDToken})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsFalse(res.ConfirmationRequired))
+
+	_, _, err = a.IntrospectToken(context.Background(), second.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
+
+	// A hint for somebody else's session does not.
+	third := login()
+
+	res, err = a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: third.Cookie.Value, IDTokenHint: "not-a-token"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(res.ConfirmationRequired))
+
+	_, _, err = a.IntrospectToken(context.Background(), third.Cookie.Value)
+	qt.Check(t, qt.IsNil(err))
+}
+
+func TestBrowserLogoutWithoutConfirmationSettingIsUnchanged(t *testing.T) {
+	cl := extPortalClient()
+	cl.GrantTypes = []string{client.GrantTypePassword}
+
+	a := newExternalTestAuth(t, nil, nil, cl)
+
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	res, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: login.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsFalse(res.ConfirmationRequired))
+	qt.Assert(t, qt.IsNotNil(res.ClearCookie))
+
+	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestBrowserLogoutRequiresIDTokenHint(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+
+	cfg := validConfig()
+	cfg.LogoutInvalidatesCookie = true
+	cfg.LogoutPolicy = LogoutPolicyIDTokenHint
+	cfg.Keys = keySetConfig(priv, pub)
+
+	cl := extPortalClient()
+	cl.GrantTypes = []string{client.GrantTypePassword}
+	cl.ResponseMode = client.ResponseModeJSON
+	cl.Scopes = []string{ScopeOpenID}
+
+	users := extTestUsers{fakeUsers{
+		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "openid"}},
+		passwords: map[string]string{"alice": "secret123"},
+	}}
+
+	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	qt.Assert(t, qt.IsNil(err))
+
+	login := func() LoginResult {
+		res, err := a.Login(context.Background(), LoginRequest{
+			Credentials: ClientCredentials{ClientID: "portal"}, Username: "alice", Password: "secret123",
+			BaseURL: "https://issuer.example",
+		})
+		qt.Assert(t, qt.IsNil(err))
+
+		return res
+	}
+
+	// Without a hint the request is refused outright; there is no confirmation path.
+	first := login()
+
+	_, err = a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: first.Cookie.Value})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	// Claiming confirmation does not substitute for the hint either.
+	_, err = a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: first.Cookie.Value, Confirmed: true})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	_, _, err = a.IntrospectToken(context.Background(), first.Cookie.Value)
+	qt.Check(t, qt.IsNil(err))
+
+	// The hint this server issued for the session ends it.
+	res, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{Token: first.Cookie.Value, IDTokenHint: first.IDToken})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsFalse(res.ConfirmationRequired))
+
+	_, _, err = a.IntrospectToken(context.Background(), first.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
 }

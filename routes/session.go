@@ -22,9 +22,9 @@ func (h *Handler) getSession(ctx *azugo.Context) {
 // SPA/API clients.
 func (h *Handler) deleteSession(ctx *azugo.Context) {
 	res, err := h.auth.Logout(ctx, auth.LogoutRequest{
-		Token:      h.auth.ReadSessionToken(ctx),
-		RequestTLS: ctx.IsTLS(),
-		BasePath:   ctx.BasePath(),
+		Token:     h.auth.ReadSessionToken(ctx),
+		BasePath:  ctx.BasePath(),
+		MountPath: h.mountPrefix,
 	})
 	if err != nil {
 		ctx.Error(err)

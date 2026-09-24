@@ -20,12 +20,23 @@ func (h *Handler) externalLogin(ctx *azugo.Context) {
 	}
 
 	req := auth.ExternalLoginRequest{
-		Provider: ctx.Params.String("provider"),
-		ClientID: clientID,
+		Provider:  ctx.Params.String("provider"),
+		ClientID:  clientID,
+		BaseURL:   ctx.BaseURL(),
+		MountPath: h.mountPrefix,
+		IP:        ctx.IP().String(),
 	}
 
 	if v := ctx.Query.StringOptional("return_to"); v != nil {
 		req.ReturnTo = *v
+	}
+
+	if v := ctx.Query.StringOptional("acr_values"); v != nil {
+		req.ACRValues = *v
+	}
+
+	if v := ctx.Query.StringOptional("claims"); v != nil {
+		req.Claims = *v
 	}
 
 	res, err := h.auth.BeginExternalLogin(ctx, req)
@@ -35,6 +46,7 @@ func (h *Handler) externalLogin(ctx *azugo.Context) {
 		return
 	}
 
+	h.auth.WriteCookie(ctx, res.Cookie)
 	// Provider URLs are off-origin by nature
 	ctx.RedirectUnsafe(res.Redirect)
 }
@@ -43,20 +55,27 @@ func (h *Handler) externalLogin(ctx *azugo.Context) {
 // and finalizes (or defers) the login, or completes the linking ceremony.
 func (h *Handler) externalCallback(ctx *azugo.Context) {
 	req := auth.ExternalCallbackRequest{
-		Provider:   ctx.Params.String("provider"),
-		RequestTLS: ctx.IsTLS(),
-		BaseURL:    ctx.BaseURL(),
-		MountPath:  h.mountPrefix,
-		IP:         ctx.IP().String(),
+		Provider:  ctx.Params.String("provider"),
+		Binding:   ctx.Cookie.Get(h.auth.ExternalBindingCookieName()),
+		BaseURL:   ctx.BaseURL(),
+		MountPath: h.mountPrefix,
+		IP:        ctx.IP().String(),
 	}
 
-	for key, dst := range map[string]*string{
-		"state": &req.State, "code": &req.Code,
-		"error": &req.Error, "error_description": &req.ErrorDescription,
-	} {
-		if v := ctx.Query.StringOptional(key); v != nil {
-			*dst = *v
-		}
+	if v := ctx.Query.StringOptional("state"); v != nil {
+		req.State = *v
+	}
+
+	if v := ctx.Query.StringOptional("code"); v != nil {
+		req.Code = *v
+	}
+
+	if v := ctx.Query.StringOptional("error"); v != nil {
+		req.Error = *v
+	}
+
+	if v := ctx.Query.StringOptional("error_description"); v != nil {
+		req.ErrorDescription = *v
 	}
 
 	res, err := h.auth.ExternalCallback(ctx, req)
@@ -65,6 +84,8 @@ func (h *Handler) externalCallback(ctx *azugo.Context) {
 
 		return
 	}
+
+	h.auth.WriteCookie(ctx, res.ClearCookie)
 
 	switch {
 	case res.Login != nil:
@@ -85,11 +106,11 @@ func (h *Handler) externalCallback(ctx *azugo.Context) {
 // target after RP-initiated logout.
 func (h *Handler) externalLogoutCallback(ctx *azugo.Context) {
 	req := auth.ExternalLogoutCallbackRequest{
-		Provider:   ctx.Params.String("provider"),
-		RequestTLS: ctx.IsTLS(),
-		BaseURL:    ctx.BaseURL(),
-		MountPath:  h.mountPrefix,
-		IP:         ctx.IP().String(),
+		Provider:  ctx.Params.String("provider"),
+		Binding:   ctx.Cookie.Get(h.auth.ExternalBindingCookieName()),
+		BaseURL:   ctx.BaseURL(),
+		MountPath: h.mountPrefix,
+		IP:        ctx.IP().String(),
 	}
 
 	if v := ctx.Query.StringOptional("state"); v != nil {
@@ -102,6 +123,8 @@ func (h *Handler) externalLogoutCallback(ctx *azugo.Context) {
 
 		return
 	}
+
+	h.auth.WriteCookie(ctx, res.ClearCookie)
 
 	if res.Login != nil {
 		h.writeLoginResult(ctx, *res.Login)
@@ -117,8 +140,11 @@ func (h *Handler) externalLogoutCallback(ctx *azugo.Context) {
 // authenticated caller.
 func (h *Handler) externalLink(ctx *azugo.Context) {
 	req := auth.ExternalLinkRequest{
-		Provider: ctx.Params.String("provider"),
-		Token:    h.auth.ReadSessionToken(ctx),
+		Provider:  ctx.Params.String("provider"),
+		Token:     h.auth.ReadSessionToken(ctx),
+		BaseURL:   ctx.BaseURL(),
+		MountPath: h.mountPrefix,
+		IP:        ctx.IP().String(),
 	}
 
 	if v := ctx.Query.StringOptional("return_to"); v != nil {
@@ -132,6 +158,7 @@ func (h *Handler) externalLink(ctx *azugo.Context) {
 		return
 	}
 
+	h.auth.WriteCookie(ctx, res.Cookie)
 	// Provider URLs are off-origin by nature
 	ctx.RedirectUnsafe(res.Redirect)
 }
@@ -158,7 +185,7 @@ func newIdentityResponse(l *provider.IdentityLink) identityResponse {
 
 // listIdentities implements GET /external/identities: the caller's linked external identities.
 func (h *Handler) listIdentities(ctx *azugo.Context) {
-	info, _, err := h.auth.IntrospectToken(ctx, h.auth.ReadSessionToken(ctx))
+	info, _, err := h.auth.IntrospectFirstParty(ctx, h.auth.ReadSessionToken(ctx))
 	if err != nil {
 		ctx.Error(err)
 
@@ -188,7 +215,7 @@ func (h *Handler) listIdentities(ctx *azugo.Context) {
 
 // unlinkIdentity implements DELETE /external/{provider}/identities/{id}: caller-owned unlink.
 func (h *Handler) unlinkIdentity(ctx *azugo.Context) {
-	info, _, err := h.auth.IntrospectToken(ctx, h.auth.ReadSessionToken(ctx))
+	info, _, err := h.auth.IntrospectFirstParty(ctx, h.auth.ReadSessionToken(ctx))
 	if err != nil {
 		ctx.Error(err)
 

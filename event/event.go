@@ -16,6 +16,10 @@ const (
 	TypeSessionRevoked   = "session.revoked"
 	TypeIdentityLinked   = "identity.linked"
 	TypeIdentityUnlinked = "identity.unlinked"
+	TypeMFASuccess       = "mfa.success"
+	TypeMFAFailure       = "mfa.failure"
+	TypeMFAEnrolled      = "mfa.enrolled"
+	TypeMFARevoked       = "mfa.revoked"
 )
 
 // Event is one security-relevant occurrence for audit/SIEM.

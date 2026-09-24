@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"azugo.io/auth/client"
 	"azugo.io/auth/event"
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
@@ -22,18 +21,16 @@ const pasetoPrefix = "v4.local."
 // RevokeTokenRequest carries an RFC 7009 revocation request. The token_type_hint parameter
 // is ignored.
 type RevokeTokenRequest struct {
-	Credentials   ClientCredentials
-	Token         string
-	BaseURL       string
-	MountPath     string
-	TokenEndpoint string
-	IP            string
+	Credentials ClientCredentials
+	Token       string
+	BaseURL     string
+	MountPath   string
+	IP          string
 }
 
-// RevokeToken implements RFC 7009: an opaque token revokes its session and JTI when it
-// belongs to the calling client.
+// RevokeToken implements RFC 7009: a valid token belonging to the calling client is revoked.
 func (a *Auth) RevokeToken(ctx context.Context, in RevokeTokenRequest) error {
-	cl, err := a.AuthenticateClient(ctx, in.Credentials, in.BaseURL, in.MountPath, in.TokenEndpoint)
+	cl, err := a.AuthenticateClient(ctx, in.Credentials, in.BaseURL, in.MountPath)
 	if err != nil {
 		return err
 	}
@@ -49,6 +46,15 @@ func (a *Auth) RevokeToken(ctx context.Context, in RevokeTokenRequest) error {
 			return nil //nolint:nilerr
 		}
 
+		live, err := a.live(ctx, claims)
+		if err != nil {
+			return NewOAuthErrorFrom(err)
+		}
+
+		if !live {
+			return nil
+		}
+
 		sess, err := a.sessions.Get(ctx, claims.SessionID)
 
 		switch {
@@ -57,6 +63,17 @@ func (a *Auth) RevokeToken(ctx context.Context, in RevokeTokenRequest) error {
 			return nil
 		case err != nil:
 			return NewOAuthErrorFrom(err)
+		}
+
+		// An access token revokes only itself
+		if claims.Type != token.TypeSessionCookie {
+			if err := a.jti.Revoke(ctx, claims.TokenID); err != nil {
+				return NewOAuthErrorFrom(err)
+			}
+
+			a.emit(ctx, event.Event{Type: event.TypeTokenRevoked, UserID: sess.UserID, ClientID: cl.ID, IP: in.IP})
+
+			return nil
 		}
 
 		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
@@ -69,7 +86,7 @@ func (a *Auth) RevokeToken(ctx context.Context, in RevokeTokenRequest) error {
 			return NewOAuthErrorFrom(err)
 		}
 
-		a.emit(ctx, event.Event{Type: event.TypeTokenRevoked, UserID: sess.UserID, ClientID: cl.ID, IP: in.IP})
+		a.emit(ctx, event.Event{Type: event.TypeSessionRevoked, UserID: sess.UserID, ClientID: cl.ID, IP: in.IP})
 
 		return nil
 	}
@@ -101,11 +118,10 @@ func (a *Auth) RevokeToken(ctx context.Context, in RevokeTokenRequest) error {
 // IntrospectRequest carries an RFC 7662 introspection request. The token_type_hint parameter
 // is ignored.
 type IntrospectRequest struct {
-	Credentials   ClientCredentials
-	Token         string
-	BaseURL       string
-	MountPath     string
-	TokenEndpoint string
+	Credentials ClientCredentials
+	Token       string
+	BaseURL     string
+	MountPath   string
 }
 
 // IntrospectionResponse is the RFC 7662 introspection response.
@@ -126,12 +142,12 @@ type IntrospectionResponse struct {
 // Introspect implements RFC 7662 for confidential clients: opaque PASETO tokens are validated
 // through the in-process issuer path, JWT access tokens by signature + deny-list.
 func (a *Auth) Introspect(ctx context.Context, in IntrospectRequest) (IntrospectionResponse, error) {
-	cl, err := a.AuthenticateClient(ctx, in.Credentials, in.BaseURL, in.MountPath, in.TokenEndpoint)
+	cl, err := a.AuthenticateClient(ctx, in.Credentials, in.BaseURL, in.MountPath)
 	if err != nil {
 		return IntrospectionResponse{}, err
 	}
 
-	if cl.Public || cl.TokenEndpointAuthMethod == client.TokenEndpointAuthNone || cl.TokenEndpointAuthMethod == "" {
+	if !cl.Confidential() {
 		return IntrospectionResponse{}, NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "introspection requires a confidential client")
 	}
 
@@ -205,7 +221,8 @@ func (a *Auth) Introspect(ctx context.Context, in IntrospectRequest) (Introspect
 }
 
 // ValidateJWTAccessToken verifies a signed JWT bearer token (signature, expiry, deny-list)
-// and resolves its subject through the UserProvider.
+// and resolves its subject through the UserProvider. A client_credentials token, whose subject
+// is the client itself (RFC 9068 §2.2), is not resolved to a user.
 func (a *Auth) ValidateJWTAccessToken(ctx context.Context, tok string) (UserInfo, error) {
 	if a.keys == nil {
 		return UserInfo{}, NewOAuthErrorFrom(token.ErrInvalidToken)
@@ -225,12 +242,18 @@ func (a *Auth) ValidateJWTAccessToken(ctx context.Context, tok string) (UserInfo
 		return UserInfo{}, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
-	info, err := a.users.GetUser(ctx, claims.Subject)
-	if err != nil {
-		return UserInfo{}, NewOAuthErrorFrom(err)
+	info := UserInfo{ID: claims.Subject}
+
+	if claims.Subject != claims.ClientID {
+		if info, err = a.users.GetUser(ctx, claims.Subject); err != nil {
+			return UserInfo{}, NewOAuthErrorFrom(err)
+		}
 	}
 
 	info.Scope = claims.Scope
+	info.ACR = claims.ACR
+	info.AMR = claims.AMR
+	info.ClientID = claims.ClientID
 
 	return info, nil
 }

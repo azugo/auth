@@ -40,10 +40,6 @@ func genTestRSAKeyPair(t *testing.T) (priv, pub string) {
 		string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
 }
 
-// settle waits for the eventually-consistent memory cache backing the default JTI store to
-// apply a write (see jti/allowlist_test.go's identical helper).
-func settle() { time.Sleep(10 * time.Millisecond) }
-
 type fakeUsers struct {
 	users     map[string]UserInfo
 	passwords map[string]string
@@ -106,14 +102,13 @@ func TestLoginJSONResponseMode(t *testing.T) {
 	})
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", RequestTLS: true, BaseURL: "/",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "/",
 	})
 	qt.Assert(t, qt.IsNil(err))
 
 	qt.Check(t, qt.Equals(res.Status, session.StatusActive))
 	qt.Assert(t, qt.IsNotNil(res.Cookie))
 	qt.Check(t, qt.IsTrue(res.Cookie.Value != ""))
-	qt.Check(t, qt.Equals(res.Cookie.Secure, true))
 	qt.Check(t, qt.IsTrue(res.AccessToken != ""))
 	qt.Check(t, qt.Equals(res.ExpiresIn, int(20*time.Minute/time.Second)))
 	qt.Check(t, qt.Equals(res.ReturnTo, ""))
@@ -126,7 +121,7 @@ func TestLoginRedirectResponseMode(t *testing.T) {
 	})
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "ssr", Username: "alice", Password: "secret123", ReturnTo: "/dashboard",
+		Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123", ReturnTo: "/dashboard",
 	})
 	qt.Assert(t, qt.IsNil(err))
 
@@ -134,7 +129,7 @@ func TestLoginRedirectResponseMode(t *testing.T) {
 	qt.Check(t, qt.Equals(res.ReturnTo, "/dashboard"))
 
 	// No ReturnTo defaults to "/".
-	res2, err := a.Login(context.Background(), LoginRequest{ClientID: "ssr", Username: "alice", Password: "secret123"})
+	res2, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(res2.ReturnTo, "/"))
 }
@@ -145,7 +140,7 @@ func TestLoginCookieResponseMode(t *testing.T) {
 		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeCookie,
 	})
 
-	res, err := a.Login(context.Background(), LoginRequest{ClientID: "cookie-app", Username: "alice", Password: "secret123"})
+	res, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "cookie-app"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
 
 	qt.Check(t, qt.Equals(res.AccessToken, ""))
@@ -159,7 +154,7 @@ func TestLoginInvalidCredentials(t *testing.T) {
 		ID: "spa", GrantTypes: []string{client.GrantTypePassword}, ResponseMode: client.ResponseModeJSON,
 	})
 
-	_, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "alice", Password: "wrong"})
+	_, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "wrong"})
 	qt.Assert(t, qt.IsNotNil(err))
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
 }
@@ -167,7 +162,7 @@ func TestLoginInvalidCredentials(t *testing.T) {
 func TestLoginUnknownClient(t *testing.T) {
 	a := newServiceTestAuth(t, &client.Client{ID: "spa"})
 
-	_, err := a.Login(context.Background(), LoginRequest{ClientID: "does-not-exist", Username: "alice", Password: "secret123"})
+	_, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "does-not-exist"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNotNil(err))
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidClient))
 }
@@ -175,7 +170,7 @@ func TestLoginUnknownClient(t *testing.T) {
 func TestLoginUnauthorizedClient(t *testing.T) {
 	// GrantTypes does not include "password".
 	noGrant := newServiceTestAuth(t, &client.Client{ID: "m2m", GrantTypes: []string{"client_credentials"}})
-	_, err := noGrant.Login(context.Background(), LoginRequest{ClientID: "m2m", Username: "alice", Password: "secret123"})
+	_, err := noGrant.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "m2m"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNotNil(err))
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeUnauthorizedClient))
 
@@ -183,7 +178,7 @@ func TestLoginUnauthorizedClient(t *testing.T) {
 	noMethod := newServiceTestAuth(t, &client.Client{
 		ID: "external-only", GrantTypes: []string{client.GrantTypePassword}, AllowedAuthMethods: []string{"azure"},
 	})
-	_, err = noMethod.Login(context.Background(), LoginRequest{ClientID: "external-only", Username: "alice", Password: "secret123"})
+	_, err = noMethod.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "external-only"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNotNil(err))
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeUnauthorizedClient))
 }
@@ -194,14 +189,12 @@ func TestRefreshRotatesCookie(t *testing.T) {
 		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeCookie,
 	})
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "ssr", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	refresh, err := a.Refresh(context.Background(), RefreshRequest{Token: login.Cookie.Value})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Not(qt.Equals(refresh.Cookie.Value, login.Cookie.Value)))
-	settle()
 
 	// The rotated cookie introspects fine.
 	info, _, err := a.IntrospectToken(context.Background(), refresh.Cookie.Value)
@@ -215,13 +208,11 @@ func TestRefreshReplayOfRotatedCookieFailsClosed(t *testing.T) {
 		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeCookie,
 	})
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "ssr", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	refresh, err := a.Refresh(context.Background(), RefreshRequest{Token: login.Cookie.Value})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	// Replaying the now-superseded original cookie fails closed (forced re-login) rather than
 	// being silently accepted - the underlying jti cache can't distinguish this from ordinary
@@ -253,15 +244,13 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeCookie,
 	})
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "ssr", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	out, err := a.Logout(context.Background(), LogoutRequest{Token: login.Cookie.Value})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsNotNil(out.ClearCookie))
 	qt.Check(t, qt.IsTrue(out.ClearCookie.MaxAge < 0))
-	settle()
 
 	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
@@ -288,13 +277,11 @@ func TestIntrospectTokenFailureCases(t *testing.T) {
 	_, _, err = a.IntrospectToken(context.Background(), "not-a-real-token")
 	qt.Check(t, qt.IsNotNil(err))
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	_, err = a.Logout(context.Background(), LogoutRequest{Token: login.AccessToken})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	// Revoked session - the access token no longer introspects.
 	_, _, err = a.IntrospectToken(context.Background(), login.AccessToken)
@@ -307,9 +294,8 @@ func TestListAndRevokeSession(t *testing.T) {
 		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
 	})
 
-	login, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "alice", Password: "secret123"})
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	info, sess, err := a.IntrospectToken(context.Background(), login.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
@@ -324,7 +310,6 @@ func TestListAndRevokeSession(t *testing.T) {
 
 	err = a.RevokeSession(context.Background(), info.ID, sess.ID)
 	qt.Assert(t, qt.IsNil(err))
-	settle()
 
 	_, _, err = a.IntrospectToken(context.Background(), login.AccessToken)
 	qt.Check(t, qt.IsNotNil(err))
@@ -345,7 +330,7 @@ func TestLoginIssuesIDTokenForOpenIDScopeWithKeyProvider(t *testing.T) {
 	})
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.IsTrue(res.IDToken != ""))
@@ -403,7 +388,7 @@ func TestLoginSignsIDTokenWithClientRegisteredAlgorithm(t *testing.T) {
 	})
 
 	res, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
 	})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsTrue(res.IDToken != ""))
@@ -435,7 +420,7 @@ func TestLoginFailsWhenClientAlgorithmHasNoSigningKey(t *testing.T) {
 	})
 
 	_, err := a.Login(context.Background(), LoginRequest{
-		ClientID: "spa", Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
 	})
 	qt.Assert(t, qt.ErrorMatches(err, "server_error: internal error"))
 	qt.Check(t, qt.ErrorMatches(errors.Unwrap(err), `.*no signing key for id_token algorithm "ES256".*`))
@@ -447,7 +432,7 @@ func TestLoginOmitsIDTokenWithoutKeyProvider(t *testing.T) {
 		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
 	})
 
-	res, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "alice", Password: "secret123"})
+	res, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(res.IDToken, ""))
 }
@@ -467,7 +452,7 @@ func TestLoginOmitsIDTokenWithoutOpenIDScope(t *testing.T) {
 	})
 
 	// carol's granted scope is "profile" only - no openid.
-	res, err := a.Login(context.Background(), LoginRequest{ClientID: "spa", Username: "carol", Password: "secret123"})
+	res, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "carol", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(res.IDToken, ""))
 }
@@ -486,7 +471,81 @@ func TestLoginOmitsIDTokenForNonJSONResponseMode(t *testing.T) {
 		a.keys = kp
 	})
 
-	res, err := a.Login(context.Background(), LoginRequest{ClientID: "ssr", Username: "alice", Password: "secret123"})
+	res, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(res.IDToken, ""))
+}
+
+// thirdPartyAccessToken mints an access token for cookie's session issued to another client.
+func thirdPartyAccessToken(t *testing.T, a *Auth, cookie string) string {
+	t.Helper()
+
+	claims, err := a.codec.DecodeSessionCookie(cookie)
+	qt.Assert(t, qt.IsNil(err))
+
+	sess, err := a.sessions.Get(context.Background(), claims.SessionID)
+	qt.Assert(t, qt.IsNil(err))
+
+	at, _, err := a.issueAccessToken(context.Background(), sess, &client.Client{ID: "other"}, "openid", "", "")
+	qt.Assert(t, qt.IsNil(err))
+
+	return at
+}
+
+func TestFirstPartyAccessTokenManagesOwnSession(t *testing.T) {
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	})
+
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	for _, tok := range []string{login.AccessToken, login.Cookie.Value} {
+		info, _, err := a.IntrospectFirstParty(context.Background(), tok)
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.Equals(info.ID, "u1"))
+	}
+
+	_, _, err = a.IntrospectFirstParty(context.Background(), thirdPartyAccessToken(t, a, login.Cookie.Value))
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInsufficientScope))
+
+	// The portal's own access token ends the session it belongs to.
+	_, err = a.Logout(context.Background(), LogoutRequest{Token: login.AccessToken})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestLogoutIgnoresStaleTokenButStillClearsCookie(t *testing.T) {
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "ssr", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeCookie,
+	})
+
+	login, err := a.Login(context.Background(), LoginRequest{
+		Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	// Refreshing retires the presented cookie.
+	rotated, err := a.Refresh(context.Background(), RefreshRequest{Token: login.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+
+	// Replaying the stale value, e.g. from a log, must not end the live session.
+	res, err := a.Logout(context.Background(), LogoutRequest{Token: login.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.IsNotNil(res.ClearCookie))
+	qt.Check(t, qt.Equals(res.ClearCookie.MaxAge, -1))
+
+	_, _, err = a.IntrospectToken(context.Background(), rotated.Cookie.Value)
+	qt.Check(t, qt.IsNil(err))
+
+	// The current cookie still logs out.
+	_, err = a.Logout(context.Background(), LogoutRequest{Token: rotated.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, _, err = a.IntrospectToken(context.Background(), rotated.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
 }

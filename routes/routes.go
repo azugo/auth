@@ -47,15 +47,34 @@ type SessionRoutes struct {
 	Revoke azugo.RequestHandler // DELETE /sessions/{id}
 }
 
+// MFARoutes holds the MFA adapters, set only when an MFA store is configured and mounted under
+// MFAGroup.
+type MFARoutes struct {
+	Verify       azugo.RequestHandler // POST /mfa/verify
+	Begin        azugo.RequestHandler // POST /mfa/begin
+	Resend       azugo.RequestHandler // POST /mfa/resend
+	Status       azugo.RequestHandler // GET /mfa/status
+	Callback     azugo.RequestHandler // POST /mfa/{method}/callback
+	Methods      azugo.RequestHandler // GET /mfa/methods
+	Enroll       azugo.RequestHandler // POST /mfa/enroll/{method}
+	EnrollFinish azugo.RequestHandler // POST /mfa/enroll/{method}/finish
+	EnrollRevoke azugo.RequestHandler // DELETE /mfa/enroll/{method}
+	// EnrollmentRevoke removes one enrollment.
+	EnrollmentRevoke azugo.RequestHandler // DELETE /mfa/enroll/{method}/{id}
+}
+
 // Handler exposes the HTTP adapters over a constructed *auth.Auth as grouped fields.
 type Handler struct {
 	OIDC     OIDCRoutes
 	External ExternalRoutes
 	Session  SessionRoutes
+	MFA      MFARoutes
 
 	auth *auth.Auth
 	// mountPrefix is the prefix Bind mounted this Handler under.
 	mountPrefix string
+	// logoutConfirmation renders the page asking the user to confirm a logout.
+	logoutConfirmation azugo.RequestHandler
 	// endpoints holds the path or absolute URL discovery reports for each endpoint - the
 	// default mountPrefix-relative path, or an Option override applied in New.
 	endpoints discoveryEndpoints
@@ -81,6 +100,8 @@ const (
 	// LinkingGroup mounts the account-linking routes (/external/{provider}/link and
 	// /external/identities), distinct from the always-on external login redirects.
 	LinkingGroup
+	// MFAGroup mounts the /mfa/* routes.
+	MFAGroup
 )
 
 func (g Group) apply(o *bindOptions) {
@@ -98,6 +119,7 @@ type bindOptions struct {
 	groupsSet bool
 
 	mountPrefix        *string
+	logoutConfirmation azugo.RequestHandler
 	authorizeEndpoint  string
 	tokenEndpoint      string
 	userinfoEndpoint   string
@@ -170,6 +192,20 @@ func (o IntrospectEndpoint) apply(b *bindOptions) {
 	b.introspectEndpoint = string(o)
 }
 
+// LogoutConfirmation supplies the page rendered under Configuration.LogoutPolicy "confirm" when
+// a logout arrives without an id_token_hint. The page must post back to the same path.
+func LogoutConfirmation(h azugo.RequestHandler) Option {
+	return logoutConfirmationOption{h: h}
+}
+
+type logoutConfirmationOption struct {
+	h azugo.RequestHandler
+}
+
+func (o logoutConfirmationOption) apply(b *bindOptions) {
+	b.logoutConfirmation = o.h
+}
+
 // EndSessionEndpoint overrides the end_session_endpoint URL reported by the discovery
 // document.
 type EndSessionEndpoint string
@@ -184,6 +220,10 @@ func supportedGroups(a *auth.Auth) []Group {
 
 	if a.Identities() != nil {
 		groups = append(groups, LinkingGroup)
+	}
+
+	if a.MFA() != nil {
+		groups = append(groups, MFAGroup)
 	}
 
 	return groups
@@ -213,6 +253,8 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 		h.mountPrefix = *o.mountPrefix
 	}
 
+	h.logoutConfirmation = o.logoutConfirmation
+
 	h.OIDC.Authorize = h.authorize
 	h.OIDC.AuthorizeCode = h.authorizeCode
 	h.OIDC.Token = h.token
@@ -238,6 +280,19 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 		h.OIDC.JWKS = h.jwks
 	} else {
 		h.endpoints.JWKS = ""
+	}
+
+	if a.MFA() != nil {
+		h.MFA.Verify = h.mfaVerify
+		h.MFA.Begin = h.mfaBegin
+		h.MFA.Resend = h.mfaResend
+		h.MFA.Status = h.mfaStatus
+		h.MFA.Callback = h.mfaCallback
+		h.MFA.Methods = h.mfaMethods
+		h.MFA.Enroll = h.mfaEnroll
+		h.MFA.EnrollFinish = h.mfaEnrollFinish
+		h.MFA.EnrollRevoke = h.mfaEnrollRevoke
+		h.MFA.EnrollmentRevoke = h.mfaEnrollmentRevoke
 	}
 
 	h.Session.Get = h.getSession
@@ -294,6 +349,7 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 	g.Post("/introspect", h.OIDC.Introspect)
 	g.Get("/userinfo", h.OIDC.UserInfo)
 	g.Get("/logout", h.OIDC.Logout)
+	g.Post("/logout", h.OIDC.Logout)
 
 	g.Get("/external/{provider}/login", h.External.Login)
 	g.Get("/external/{provider}/callback", h.External.Callback)
@@ -320,6 +376,21 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 			g.Get("/external/{provider}/link", h.External.Link)
 			g.Get("/external/identities", h.External.Identities)
 			g.Delete("/external/{provider}/identities/{id}", h.External.Unlink)
+		case MFAGroup:
+			if h.MFA.Verify == nil {
+				continue
+			}
+
+			g.Post("/mfa/verify", h.MFA.Verify)
+			g.Post("/mfa/begin", h.MFA.Begin)
+			g.Post("/mfa/resend", h.MFA.Resend)
+			g.Get("/mfa/status", h.MFA.Status)
+			g.Get("/mfa/methods", h.MFA.Methods)
+			g.Post("/mfa/enroll/{method}", h.MFA.Enroll)
+			g.Post("/mfa/enroll/{method}/finish", h.MFA.EnrollFinish)
+			g.Delete("/mfa/enroll/{method}", h.MFA.EnrollRevoke)
+			g.Delete("/mfa/enroll/{method}/{id}", h.MFA.EnrollmentRevoke)
+			g.Post("/mfa/{method}/callback", h.MFA.Callback)
 		}
 	}
 
@@ -330,6 +401,33 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 // implied by client.ResponseMode.
 func (h *Handler) writeLoginResult(ctx *azugo.Context, res auth.LoginResult) {
 	h.auth.WriteCookie(ctx, res.Cookie)
+
+	if res.Status != session.StatusActive {
+		if res.ReturnTo != "" {
+			ctx.Redirect(res.ReturnTo)
+
+			return
+		}
+
+		ctx.StatusCode(http.StatusAccepted)
+		ctx.JSON(&struct {
+			Status      session.Status `json:"status"`
+			StepToken   string         `json:"step_token,omitempty"`
+			Available   []string       `json:"available,omitempty"`
+			Selected    string         `json:"selected,omitempty"`
+			Interaction string         `json:"interaction,omitempty"`
+			Data        map[string]any `json:"data,omitempty"`
+		}{
+			Status:      res.Status,
+			StepToken:   res.StepToken,
+			Available:   res.Available,
+			Selected:    res.Selected,
+			Interaction: res.Interaction,
+			Data:        res.Data,
+		})
+
+		return
+	}
 
 	switch {
 	case res.AccessToken != "":

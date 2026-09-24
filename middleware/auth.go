@@ -2,9 +2,11 @@
 package middleware
 
 import (
+	"slices"
 	"strings"
 
 	"azugo.io/auth"
+	"azugo.io/auth/token"
 
 	"azugo.io/azugo"
 	"azugo.io/core/http"
@@ -17,6 +19,7 @@ type AuthOption interface {
 
 type authOptions struct {
 	useCookie bool
+	audiences []string
 }
 
 // Cookie enables the session cookie as a credential source.
@@ -28,6 +31,17 @@ type cookieOption struct{}
 
 func (cookieOption) apply(o *authOptions) {
 	o.useCookie = true
+}
+
+// Audience restricts Auth to credentials issued to one of the given client IDs.
+func Audience(clientIDs ...string) AuthOption {
+	return audience(clientIDs)
+}
+
+type audience []string
+
+func (o audience) apply(opts *authOptions) {
+	opts.audiences = o
 }
 
 // Auth resolves the current user from the Authorization if present.
@@ -50,14 +64,22 @@ func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 
 			// Opaque PASETO tokens validate through the session-store introspection, JWT
 			// bearer tokens by signature + revocation deny-list.
-			if strings.HasPrefix(tok, "v4.local.") {
-				if info, _, err := a.IntrospectToken(ctx, tok); err == nil {
-					ctx.SetUser(info.ToUser())
-				}
-			} else if tok != "" {
-				if info, err := a.ValidateJWTAccessToken(ctx, tok); err == nil {
-					ctx.SetUser(info.ToUser())
-				}
+			var (
+				info auth.UserInfo
+				err  error
+			)
+
+			switch {
+			case strings.HasPrefix(tok, "v4.local."):
+				info, _, err = a.IntrospectToken(ctx, tok)
+			case tok != "":
+				info, err = a.ValidateJWTAccessToken(ctx, tok)
+			default:
+				err = token.ErrInvalidToken
+			}
+
+			if err == nil && (len(o.audiences) == 0 || slices.Contains(o.audiences, info.ClientID)) {
+				ctx.SetUser(info.ToUser())
 			}
 
 			next(ctx)

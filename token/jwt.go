@@ -32,6 +32,9 @@ type IDTokenClaims struct {
 	Nonce string
 	// AuthTime is when the user originally authenticated; omitted when zero.
 	AuthTime int64
+	// ACR and AMR are the satisfied authentication context and methods.
+	ACR string
+	AMR []string
 }
 
 // accessTokenType is the RFC 9068 typ header value marking a JWT as an access token.
@@ -55,6 +58,14 @@ func SignIDToken(signingKey SigningKey, claims IDTokenClaims) (string, error) {
 		m["auth_time"] = claims.AuthTime
 	}
 
+	if claims.ACR != "" {
+		m["acr"] = claims.ACR
+	}
+
+	if len(claims.AMR) > 0 {
+		m["amr"] = claims.AMR
+	}
+
 	return sign(signingKey, "", m)
 }
 
@@ -67,11 +78,14 @@ type AccessTokenClaims struct {
 	TokenID   string // jti, checked against the revocation deny-list
 	IssuedAt  int64
 	ExpiresAt int64
+	// ACR and AMR are the session's authentication context (RFC 9068 §2.2.1).
+	ACR string
+	AMR []string
 }
 
 // SignAccessToken mints a signed JWT access token using signingKey.
 func SignAccessToken(signingKey SigningKey, claims AccessTokenClaims) (string, error) {
-	return sign(signingKey, accessTokenType, jwt.MapClaims{
+	m := jwt.MapClaims{
 		"iss":   claims.Issuer,
 		"sub":   claims.Subject,
 		"aud":   claims.ClientID,
@@ -79,7 +93,17 @@ func SignAccessToken(signingKey SigningKey, claims AccessTokenClaims) (string, e
 		"jti":   claims.TokenID,
 		"iat":   claims.IssuedAt,
 		"exp":   claims.ExpiresAt,
-	})
+	}
+
+	if claims.ACR != "" {
+		m["acr"] = claims.ACR
+	}
+
+	if len(claims.AMR) > 0 {
+		m["amr"] = claims.AMR
+	}
+
+	return sign(signingKey, accessTokenType, m)
 }
 
 // allAlgorithms are the JWS algorithms accepted when verifying inbound JWTs.
@@ -89,6 +113,101 @@ var allAlgorithms = []string{AlgRS256, AlgRS384, AlgRS512, AlgES256, AlgES384, A
 // kid header when the header names a known key, otherwise primary, signing and secondary
 // keys in order.
 func VerifyAccessToken(set *KeySet, tok string) (AccessTokenClaims, error) {
+	claims := jwt.MapClaims{}
+	err := ErrInvalidToken
+
+	for _, pub := range verificationKeys(set, tok) {
+		if _, err = jwt.ParseWithClaims(tok, claims,
+			func(t *jwt.Token) (any, error) {
+				// Only RFC 9068 access tokens are accepted
+				if typ, _ := t.Header["typ"].(string); !strings.EqualFold(typ, accessTokenType) &&
+					!strings.EqualFold(typ, "application/"+accessTokenType) {
+					return nil, ErrInvalidToken
+				}
+
+				return pub, nil
+			},
+			jwt.WithValidMethods(allAlgorithms),
+			jwt.WithExpirationRequired(),
+		); err == nil {
+			break
+		}
+	}
+
+	if err != nil {
+		return AccessTokenClaims{}, err
+	}
+
+	out := AccessTokenClaims{}
+	out.Issuer, _ = claims["iss"].(string)
+	out.Subject, _ = claims["sub"].(string)
+	out.ClientID, _ = claims["aud"].(string)
+	out.Scope, _ = claims["scope"].(string)
+	out.ACR, _ = claims["acr"].(string)
+
+	if amr, ok := claims["amr"].([]any); ok {
+		for _, v := range amr {
+			if s, ok := v.(string); ok {
+				out.AMR = append(out.AMR, s)
+			}
+		}
+	}
+
+	out.TokenID, _ = claims["jti"].(string)
+	if out.TokenID == "" {
+		return AccessTokenClaims{}, ErrInvalidToken
+	}
+
+	if v, err := claims.GetIssuedAt(); err == nil && v != nil {
+		out.IssuedAt = v.Unix()
+	}
+
+	exp, err := claims.GetExpirationTime()
+	if err != nil || exp == nil {
+		return AccessTokenClaims{}, ErrInvalidToken
+	}
+
+	out.ExpiresAt = exp.Unix()
+
+	return out, nil
+}
+
+// VerifyIDToken verifies an id_token this server issued and returns its claims. Expiry is
+// deliberately not enforced: an id_token_hint identifies a past session rather than authorizing
+// a request (OpenID Connect RP-Initiated Logout).
+func VerifyIDToken(set *KeySet, tok string) (IDTokenClaims, error) {
+	claims := jwt.MapClaims{}
+	err := ErrInvalidToken
+
+	for _, pub := range verificationKeys(set, tok) {
+		if _, err = jwt.ParseWithClaims(tok, claims,
+			func(*jwt.Token) (any, error) { return pub, nil },
+			jwt.WithValidMethods(allAlgorithms),
+			jwt.WithoutClaimsValidation(),
+		); err == nil {
+			break
+		}
+	}
+
+	if err != nil {
+		return IDTokenClaims{}, err
+	}
+
+	out := IDTokenClaims{}
+	out.Issuer, _ = claims["iss"].(string)
+	out.Subject, _ = claims["sub"].(string)
+	out.Audience, _ = claims["aud"].(string)
+
+	if out.Subject == "" {
+		return IDTokenClaims{}, ErrInvalidToken
+	}
+
+	return out, nil
+}
+
+// verificationKeys returns the public keys to try for tok, narrowed to the single key a known
+// kid names.
+func verificationKeys(set *KeySet, tok string) []crypto.PublicKey {
 	type candidate struct {
 		id  string
 		pub crypto.PublicKey
@@ -111,59 +230,16 @@ func VerifyAccessToken(set *KeySet, tok string) (AccessTokenClaims, error) {
 				return c.id == kid
 			},
 		); i >= 0 {
-			// kid names a known key - only that key is tried.
 			candidates = candidates[i : i+1]
 		}
 	}
 
-	claims := jwt.MapClaims{}
-	err := ErrInvalidToken
-
+	out := make([]crypto.PublicKey, 0, len(candidates))
 	for _, c := range candidates {
-		if _, err = jwt.ParseWithClaims(tok, claims,
-			func(t *jwt.Token) (any, error) {
-				// Only RFC 9068 access tokens are accepted
-				if typ, _ := t.Header["typ"].(string); !strings.EqualFold(typ, accessTokenType) &&
-					!strings.EqualFold(typ, "application/"+accessTokenType) {
-					return nil, ErrInvalidToken
-				}
-
-				return c.pub, nil
-			},
-			jwt.WithValidMethods(allAlgorithms),
-			jwt.WithExpirationRequired(),
-		); err == nil {
-			break
-		}
+		out = append(out, c.pub)
 	}
 
-	if err != nil {
-		return AccessTokenClaims{}, err
-	}
-
-	out := AccessTokenClaims{}
-	out.Issuer, _ = claims["iss"].(string)
-	out.Subject, _ = claims["sub"].(string)
-	out.ClientID, _ = claims["aud"].(string)
-	out.Scope, _ = claims["scope"].(string)
-
-	out.TokenID, _ = claims["jti"].(string)
-	if out.TokenID == "" {
-		return AccessTokenClaims{}, ErrInvalidToken
-	}
-
-	if v, err := claims.GetIssuedAt(); err == nil && v != nil {
-		out.IssuedAt = v.Unix()
-	}
-
-	exp, err := claims.GetExpirationTime()
-	if err != nil || exp == nil {
-		return AccessTokenClaims{}, ErrInvalidToken
-	}
-
-	out.ExpiresAt = exp.Unix()
-
-	return out, nil
+	return out
 }
 
 // jwtKID extracts the kid header from a serialized JWT without verifying it.

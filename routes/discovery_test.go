@@ -101,7 +101,7 @@ func TestDiscoveryWithKeyProviderIncludesJWKSAndAlgorithms(t *testing.T) {
 
 	doc := decodeJSON[discoveryDoc](t, resp)
 	qt.Check(t, qt.Equals(doc.JWKSURI, "https://issuer.example/.well-known/jwks.json"))
-	qt.Check(t, qt.DeepEquals(doc.ScopesSupported, []string{"openid"}))
+	qt.Check(t, qt.DeepEquals(doc.ScopesSupported, []string{"openid", "profile", "email"}))
 	qt.Check(t, qt.DeepEquals(doc.IDTokenSigningAlgValuesSupported, []string{"RS256"}))
 	qt.Check(t, qt.DeepEquals(doc.GrantTypesSupported, []string{"authorization_code", "client_credentials", client.GrantTypePassword}))
 }

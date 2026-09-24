@@ -28,14 +28,18 @@ type UserInfo struct {
 	Scope                  string
 	Claims                 map[string]any
 	RequiresPasswordChange bool
-	// AMR lets a claim mapper / external login / authenticator ASSERT the authentication
-	// methods of this login - RFC 8176 values, e.g. ["mfa","hwk"].
+	// AMR lets a claim mapper / external login / authenticator ASSERT the authentication.
+	// On introspection it carries the session's recorded methods.
 	AMR []string
+	// ACR is the satisfied authentication context class of the current login.
+	ACR string
+	// ClientID is the client the introspected credential was issued to.
+	ClientID string
 }
 
 // ToUser returns user identity.
 func (info UserInfo) ToUser() *user.Basic {
-	claims := make(map[string]token.ClaimStrings, 2)
+	claims := make(map[string]token.ClaimStrings, 4)
 
 	if info.Name != "" {
 		claims["name"] = token.ClaimStrings{info.Name}
@@ -43,6 +47,14 @@ func (info UserInfo) ToUser() *user.Basic {
 
 	if info.Email != "" {
 		claims["email"] = token.ClaimStrings{info.Email}
+	}
+
+	if info.ACR != "" {
+		claims["acr"] = token.ClaimStrings{info.ACR}
+	}
+
+	if len(info.AMR) > 0 {
+		claims["amr"] = token.ClaimStrings(info.AMR)
 	}
 
 	return user.NewIdentity(info.ID, info.Scope, claims)

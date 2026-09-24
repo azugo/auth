@@ -83,7 +83,8 @@ func New(config Config) *Provider {
 
 	httpc := config.HTTPClient
 	if httpc == nil {
-		httpc = http.NewClient()
+		// 10 second limit and 1MB body size
+		httpc = http.NewClient(http.Timeout(10*time.Second), http.MaxResponseBody(1<<20))
 	}
 
 	return &Provider{config: config, httpc: httpc}
@@ -93,13 +94,14 @@ func New(config Config) *Provider {
 // unless every used endpoint is overridden.
 func (p *Provider) endpoints(ctx context.Context) (*providerMetadata, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	md := p.metadata
+	p.mu.Unlock()
 
-	if p.metadata != nil {
-		return p.metadata, nil
+	if md != nil {
+		return md, nil
 	}
 
-	md := &providerMetadata{
+	md = &providerMetadata{
 		Issuer:                p.config.Issuer,
 		AuthorizationEndpoint: p.config.AuthorizationEndpoint,
 		TokenEndpoint:         p.config.TokenEndpoint,
@@ -136,7 +138,13 @@ func (p *Provider) endpoints(ctx context.Context) (*providerMetadata, error) {
 		return nil, errors.New("oidc: discovery document is missing required endpoints")
 	}
 
-	p.metadata = md
+	p.mu.Lock()
+	if p.metadata == nil {
+		p.metadata = md
+	}
+
+	md = p.metadata
+	p.mu.Unlock()
 
 	return md, nil
 }
@@ -269,20 +277,26 @@ func (p *Provider) verifyIDToken(ctx context.Context, md *providerMetadata, idTo
 // verificationKey returns the JWKS keys an id_token may be verified with.
 func (p *Provider) verificationKey(ctx context.Context, md *providerMetadata, kid string) (any, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	candidates := p.candidateKeys(kid)
+	stale := len(candidates) == 0 && time.Since(p.keysAt) >= time.Minute
 
-	// An unknown kid may trigger a JWKS refetch at most once a minute
-	if len(candidates) == 0 && time.Since(p.keysAt) >= time.Minute {
+	if stale {
+		p.keysAt = time.Now()
+	}
+
+	p.mu.Unlock()
+
+	// An unknown kid may trigger a JWKS refetch at most once a minute.
+	if stale {
 		keys, err := fetchJWKS(ctx, p.httpc, md.JWKSURI)
 		if err != nil {
 			return nil, err
 		}
 
+		p.mu.Lock()
 		p.keys = keys
-		p.keysAt = time.Now()
 		candidates = p.candidateKeys(kid)
+		p.mu.Unlock()
 	}
 
 	switch {

@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"cmp"
 	"context"
 	"slices"
 	"time"
@@ -28,9 +27,9 @@ type ClientCredentials struct {
 	Assertion     string
 }
 
-// AuthenticateClient resolves client credentials and enforces the client's registered
-// TokenEndpointAuthMethod.
-func (a *Auth) AuthenticateClient(ctx context.Context, creds ClientCredentials, baseURL, mountPath, tokenEndpoint string) (*client.Client, error) {
+// AuthenticateClient resolves client credentials and enforces the client's effective
+// authentication method.
+func (a *Auth) AuthenticateClient(ctx context.Context, creds ClientCredentials, baseURL, mountPath string) (*client.Client, error) {
 	cl, err := a.clients.GetClient(ctx, creds.ClientID)
 	if err != nil {
 		// Equivalent dummy work so an unknown client_id costs the same as a bad secret.
@@ -39,7 +38,7 @@ func (a *Auth) AuthenticateClient(ctx context.Context, creds ClientCredentials, 
 		return nil, NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client")
 	}
 
-	switch cl.TokenEndpointAuthMethod {
+	switch cl.AuthMethod() {
 	case client.TokenEndpointAuthClientSecret:
 		if cl.SecretHash == "" || creds.Secret == "" {
 			password.VerifyEmpty(creds.Secret)
@@ -51,12 +50,10 @@ func (a *Auth) AuthenticateClient(ctx context.Context, creds ClientCredentials, 
 			return nil, NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client")
 		}
 	case client.TokenEndpointAuthPrivateKeyJWT:
-		issuer := a.Issuer.URL(baseURL, mountPath)
-
-		if err := a.verifyClientAssertion(ctx, cl, creds, []string{issuer, cmp.Or(tokenEndpoint, issuer+"/token")}); err != nil {
+		if err := a.verifyClientAssertion(ctx, cl, creds, a.Issuer.URL(baseURL, mountPath)); err != nil {
 			return nil, err
 		}
-	case client.TokenEndpointAuthNone, "":
+	case client.TokenEndpointAuthNone:
 		if creds.Secret != "" || creds.Assertion != "" {
 			return nil, NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "public client must not send credentials")
 		}
@@ -68,8 +65,9 @@ func (a *Auth) AuthenticateClient(ctx context.Context, creds ClientCredentials, 
 	return cl, nil
 }
 
-// verifyClientAssertion verifies an RFC 7523 private_key_jwt client_assertion.
-func (a *Auth) verifyClientAssertion(ctx context.Context, cl *client.Client, creds ClientCredentials, audiences []string) error {
+// verifyClientAssertion verifies an RFC 7523 private_key_jwt client_assertion addressed to
+// issuer.
+func (a *Auth) verifyClientAssertion(ctx context.Context, cl *client.Client, creds ClientCredentials, issuer string) error {
 	if creds.AssertionType != AssertionTypeJWTBearer || creds.Assertion == "" {
 		return NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "client assertion required")
 	}
@@ -107,26 +105,13 @@ func (a *Auth) verifyClientAssertion(ctx context.Context, cl *client.Client, cre
 	}
 
 	aud, err := claims.GetAudience()
-	if err != nil || !slices.ContainsFunc(aud,
-		func(got string) bool {
-			return slices.Contains(audiences, got)
-		},
-	) {
+	if err != nil || !slices.Contains(aud, issuer) {
 		return NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client assertion audience")
 	}
 
 	jti, _ := claims["jti"].(string)
 	if jti == "" {
 		return NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "client assertion jti required")
-	}
-
-	seen, err := a.assertions.Denied(ctx, jti)
-	if err != nil {
-		return NewOAuthErrorFrom(err)
-	}
-
-	if seen {
-		return NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "client assertion replayed")
 	}
 
 	exp, err := claims.GetExpirationTime()
@@ -143,8 +128,13 @@ func (a *Auth) verifyClientAssertion(ctx context.Context, cl *client.Client, cre
 		return NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "client assertion lifetime too long")
 	}
 
-	if err := a.assertions.Deny(ctx, jti, time.Until(exp.Time)); err != nil {
+	claimed, err := a.assertions.Claim(ctx, cl.ID+":"+jti, time.Until(exp.Time))
+	if err != nil {
 		return NewOAuthErrorFrom(err)
+	}
+
+	if !claimed {
+		return NewOAuthError(http.StatusUnauthorized, ErrCodeInvalidClient, "client assertion replayed")
 	}
 
 	return nil

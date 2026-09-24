@@ -9,8 +9,6 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-const cacheInstanceName = "auth.session"
-
 type cacheStore struct {
 	c       cache.Instance[Session]
 	entropy ulid.MonotonicReader
@@ -18,7 +16,7 @@ type cacheStore struct {
 
 // NewCacheStore creates a cache-backed session Store over the app's cache.
 func NewCacheStore(c *cache.Cache) (Store, error) {
-	inst, err := cache.Create[Session](c, cacheInstanceName)
+	inst, err := cache.Create[Session](c, "auth.session")
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +40,11 @@ func (s *cacheStore) Create(ctx context.Context, sess *Session) error {
 		return errors.New("session already expired")
 	}
 
-	return s.c.Set(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt)))
+	if err := s.c.Set(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt))); err != nil {
+		return err
+	}
+
+	return s.c.Sync(ctx)
 }
 
 // Get session by ID.
@@ -64,6 +66,19 @@ func (s *cacheStore) Get(ctx context.Context, id string) (*Session, error) {
 	return &sess, nil
 }
 
+// Update replaces the stored session with sess.
+func (s *cacheStore) Update(ctx context.Context, sess *Session) error {
+	if _, err := s.Get(ctx, sess.ID); err != nil {
+		return err
+	}
+
+	if err := s.c.Set(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt))); err != nil {
+		return err
+	}
+
+	return s.c.Sync(ctx)
+}
+
 // Touch updates session activity by updating LastSeen.
 func (s *cacheStore) Touch(ctx context.Context, id string) error {
 	sess, err := s.Get(ctx, id)
@@ -77,7 +92,11 @@ func (s *cacheStore) Touch(ctx context.Context, id string) error {
 
 	sess.LastSeen = time.Now()
 
-	return s.c.Set(ctx, id, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt)))
+	if err := s.c.Set(ctx, id, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt))); err != nil {
+		return err
+	}
+
+	return s.c.Sync(ctx)
 }
 
 // Revoke session by deleting it.
@@ -91,5 +110,5 @@ func (s *cacheStore) Revoke(ctx context.Context, id string) error {
 		return err
 	}
 
-	return nil
+	return s.c.Sync(ctx)
 }

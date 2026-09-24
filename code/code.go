@@ -10,13 +10,6 @@ import (
 	"azugo.io/core/cache"
 )
 
-// Cache instance names for live codes, redeemed codes and issued-token bindings.
-const (
-	cacheInstanceName  = "auth:code"
-	usedInstanceName   = "auth:code:used"
-	issuedInstanceName = "auth:code:token"
-)
-
 var (
 	// ErrNotFound is returned by Consume when no code matches.
 	ErrNotFound = errors.New("authorization code not found")
@@ -40,6 +33,8 @@ type AuthorizationCode struct {
 	Nonce string
 	// ACRValues are the requested acr_values, enforced again at redemption.
 	ACRValues []string
+	// ACREssential marks ACRValues as an essential claims request.
+	ACREssential bool
 	// CodeChallenge is the PKCE S256 challenge; "" when the client did not use PKCE.
 	CodeChallenge       string
 	CodeChallengeMethod string
@@ -79,17 +74,17 @@ type cacheStore struct {
 
 // NewCacheStore creates the default cache-backed code Store using the app's cache.
 func NewCacheStore(c *cache.Cache, codeTTL time.Duration) (Store, error) {
-	codes, err := cache.Create[AuthorizationCode](c, cacheInstanceName)
+	codes, err := cache.Create[AuthorizationCode](c, "auth:code")
 	if err != nil {
 		return nil, err
 	}
 
-	used, err := cache.Create[AuthorizationCode](c, usedInstanceName)
+	used, err := cache.Create[AuthorizationCode](c, "auth:code:used")
 	if err != nil {
 		return nil, err
 	}
 
-	issued, err := cache.Create[issuedToken](c, issuedInstanceName)
+	issued, err := cache.Create[issuedToken](c, "auth:code:token")
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +94,11 @@ func NewCacheStore(c *cache.Cache, codeTTL time.Duration) (Store, error) {
 
 // Save persists a freshly minted code with a TTL equal to its remaining lifetime.
 func (s *cacheStore) Save(ctx context.Context, c *AuthorizationCode) error {
-	return s.codes.Set(ctx, c.Code, *c, cache.TTL[AuthorizationCode](time.Until(c.ExpiresAt)))
+	if err := s.codes.Set(ctx, c.Code, *c, cache.TTL[AuthorizationCode](time.Until(c.ExpiresAt))); err != nil {
+		return err
+	}
+
+	return s.codes.Sync(ctx)
 }
 
 // Consume atomically fetches and deletes the code, leaving a replay tombstone.
@@ -123,10 +122,12 @@ func (s *cacheStore) Consume(ctx context.Context, code string) (*AuthorizationCo
 		return nil, ErrNotFound
 	}
 
-	_ = s.used.Set(ctx, code, rec, cache.TTL[AuthorizationCode](s.tombstoneTTL))
-
 	if time.Now().After(rec.ExpiresAt) {
 		return nil, ErrNotFound
+	}
+
+	if s.used.Set(ctx, code, rec, cache.TTL[AuthorizationCode](s.tombstoneTTL)) == nil {
+		_ = s.used.Sync(ctx)
 	}
 
 	return &rec, nil
@@ -134,5 +135,9 @@ func (s *cacheStore) Consume(ctx context.Context, code string) (*AuthorizationCo
 
 // BindIssuedToken records the access token issued for a redeemed code.
 func (s *cacheStore) BindIssuedToken(ctx context.Context, code, tokenID string, expiresAt time.Time) error {
-	return s.issued.Set(ctx, code, issuedToken{ID: tokenID, ExpiresAt: expiresAt}, cache.TTL[issuedToken](s.tombstoneTTL))
+	if err := s.issued.Set(ctx, code, issuedToken{ID: tokenID, ExpiresAt: expiresAt}, cache.TTL[issuedToken](s.tombstoneTTL)); err != nil {
+		return err
+	}
+
+	return s.issued.Sync(ctx)
 }

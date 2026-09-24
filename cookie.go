@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 
+	"azugo.io/azugo"
 	"azugo.io/core"
 )
 
@@ -17,26 +18,22 @@ type CookieCtx struct {
 	scopeToBasePath bool
 }
 
-// Secure returns the effective cookie Secure flag for a request based on configuration.
-func (c *CookieCtx) Secure(requestTLS bool) bool {
-	if c.config.Secure != nil {
-		return *c.config.Secure
-	}
-
-	return requestTLS || !c.app.Env().IsDevelopment()
-}
-
 // SameSite returns the effective cookie SameSite mode based on configuration.
-func (c *CookieCtx) SameSite() string {
-	if c.config.SameSite != "" {
-		return c.config.SameSite
+func (c *CookieCtx) SameSite() azugo.CookieSameSite {
+	switch c.config.SameSite {
+	case "strict":
+		return azugo.CookieSameSiteStrict
+	case "lax":
+		return azugo.CookieSameSiteLax
+	case "none":
+		return azugo.CookieSameSiteNone
 	}
 
 	if c.app.Env().IsDevelopment() {
-		return "lax"
+		return azugo.CookieSameSiteLax
 	}
 
-	return "strict"
+	return azugo.CookieSameSiteStrict
 }
 
 // Path returns the effective session cookie path based on configuration.

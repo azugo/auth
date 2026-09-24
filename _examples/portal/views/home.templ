@@ -4,7 +4,7 @@ templ Home(name string) {
 	@layout("Auth Portal Example") {
 		if name != "" {
 			<p>Signed in as <strong>{ name }</strong>.</p>
-			<p><a href="/sessions">Your sessions</a></p>
+			<p><a href="/sessions">Your sessions</a> | <a href="/security">Security</a></p>
 			<form method="post" action="/logout">
 				<button type="submit">Sign out</button>
 			</form>

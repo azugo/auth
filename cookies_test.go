@@ -16,8 +16,8 @@ func TestWriteCookieSet(t *testing.T) {
 
 	app.Get("/", func(ctx *azugo.Context) {
 		(&Auth{}).WriteCookie(ctx, &CookieDirective{
-			Name: "__session", Value: "tok", Path: "/", MaxAge: 3600,
-			Secure: true, HTTPOnly: true, SameSite: "lax",
+			Name: "session", Value: "tok", Path: "/", MaxAge: 3600,
+			SameSite: azugo.CookieSameSiteLax,
 		})
 		ctx.StatusCode(http.StatusNoContent)
 	})
@@ -27,7 +27,7 @@ func TestWriteCookieSet(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	var cookie fasthttp.Cookie
-	cookie.SetKey("__session")
+	cookie.SetKey("__Host-session")
 	qt.Assert(t, qt.IsTrue(resp.Header.Cookie(&cookie)))
 	qt.Check(t, qt.Equals(string(cookie.Value()), "tok"))
 	qt.Check(t, qt.Equals(string(cookie.Path()), "/"))
@@ -43,7 +43,7 @@ func TestWriteCookieClear(t *testing.T) {
 	defer app.Stop()
 
 	app.Get("/", func(ctx *azugo.Context) {
-		(&Auth{}).WriteCookie(ctx, &CookieDirective{Name: "__session", Path: "/", MaxAge: -1})
+		(&Auth{}).WriteCookie(ctx, &CookieDirective{Name: "session", Path: "/", MaxAge: -1})
 		ctx.StatusCode(http.StatusNoContent)
 	})
 
@@ -52,7 +52,7 @@ func TestWriteCookieClear(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	var cookie fasthttp.Cookie
-	cookie.SetKey("__session")
+	cookie.SetKey("__Host-session")
 	qt.Assert(t, qt.IsTrue(resp.Header.Cookie(&cookie)))
 	qt.Check(t, qt.IsTrue(cookie.Expire().Equal(fasthttp.CookieExpireDelete)))
 }
@@ -72,12 +72,12 @@ func TestWriteCookieNilIsNoop(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	var cookie fasthttp.Cookie
-	cookie.SetKey("__session")
+	cookie.SetKey("session")
 	qt.Check(t, qt.IsFalse(resp.Header.Cookie(&cookie)))
 }
 
 func TestReadSessionTokenPrefersBearer(t *testing.T) {
-	a := &Auth{config: &Configuration{CookieName: "__session"}}
+	a := &Auth{config: &Configuration{CookieName: "session"}}
 
 	app := azugo.NewTestApp()
 	app.Start(t)
@@ -88,7 +88,7 @@ func TestReadSessionTokenPrefersBearer(t *testing.T) {
 	})
 
 	tc := app.TestClient()
-	resp, err := tc.Get("/", tc.WithHeader("Authorization", "Bearer from-header"), tc.WithCookie("__session", "from-cookie"))
+	resp, err := tc.Get("/", tc.WithHeader("Authorization", "Bearer from-header"), tc.WithCookie("session", "from-cookie"))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -98,7 +98,7 @@ func TestReadSessionTokenPrefersBearer(t *testing.T) {
 }
 
 func TestReadSessionTokenFallsBackToCookie(t *testing.T) {
-	a := &Auth{config: &Configuration{CookieName: "__session"}}
+	a := &Auth{config: &Configuration{CookieName: "session"}}
 
 	app := azugo.NewTestApp()
 	app.Start(t)
@@ -109,7 +109,7 @@ func TestReadSessionTokenFallsBackToCookie(t *testing.T) {
 	})
 
 	tc := app.TestClient()
-	resp, err := tc.Get("/", tc.WithCookie("__session", "from-cookie"))
+	resp, err := tc.Get("/", tc.WithCookie("session", "from-cookie"))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -119,7 +119,7 @@ func TestReadSessionTokenFallsBackToCookie(t *testing.T) {
 }
 
 func TestReadSessionTokenEmpty(t *testing.T) {
-	a := &Auth{config: &Configuration{CookieName: "__session"}}
+	a := &Auth{config: &Configuration{CookieName: "session"}}
 
 	app := azugo.NewTestApp()
 	app.Start(t)

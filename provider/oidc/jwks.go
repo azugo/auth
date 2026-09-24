@@ -19,11 +19,6 @@ type jwksKey struct {
 	public crypto.PublicKey
 }
 
-// jwksDocument is the RFC 7517 key set document.
-type jwksDocument struct {
-	Keys []jwkEntry `json:"keys"`
-}
-
 // jwkEntry is one RFC 7517 JWK.
 type jwkEntry struct {
 	Kty string `json:"kty"`
@@ -39,7 +34,11 @@ type jwkEntry struct {
 // fetchJWKS downloads and parses the provider JWKS, skipping non-signature and unsupported
 // keys.
 func fetchJWKS(ctx context.Context, client http.Client, uri string) ([]jwksKey, error) {
-	doc := jwksDocument{}
+	// RFC 7517 key set document.
+	var doc struct {
+		Keys []jwkEntry `json:"keys"`
+	}
+
 	if err := client.WithContext(ctx).GetJSON(uri, &doc); err != nil {
 		return nil, fmt.Errorf("oidc: JWKS fetch failed: %w", err)
 	}

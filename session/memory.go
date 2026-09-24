@@ -70,6 +70,21 @@ func (m *memoryStore) Get(_ context.Context, id string) (*Session, error) {
 	return &cp, nil
 }
 
+// Update replaces the stored session.
+func (m *memoryStore) Update(_ context.Context, s *Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.sessions[s.ID]; !ok {
+		return ErrNotFound
+	}
+
+	cp := *s
+	m.sessions[s.ID] = &cp
+
+	return nil
+}
+
 // Touch updates session activity by updating LastSeen time.
 func (m *memoryStore) Touch(_ context.Context, id string) error {
 	m.mu.Lock()

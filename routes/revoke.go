@@ -17,11 +17,10 @@ func (h *Handler) revoke(ctx *azugo.Context) {
 	}
 
 	req := auth.RevokeTokenRequest{
-		Credentials:   creds,
-		BaseURL:       ctx.BaseURL(),
-		MountPath:     h.mountPrefix,
-		TokenEndpoint: h.tokenEndpointURL(ctx),
-		IP:            ctx.IP().String(),
+		Credentials: creds,
+		BaseURL:     ctx.BaseURL(),
+		MountPath:   h.mountPrefix,
+		IP:          ctx.IP().String(),
 	}
 
 	if v := ctx.Form.StringOptional("token"); v != nil {
@@ -47,10 +46,9 @@ func (h *Handler) introspect(ctx *azugo.Context) {
 	}
 
 	req := auth.IntrospectRequest{
-		Credentials:   creds,
-		BaseURL:       ctx.BaseURL(),
-		MountPath:     h.mountPrefix,
-		TokenEndpoint: h.tokenEndpointURL(ctx),
+		Credentials: creds,
+		BaseURL:     ctx.BaseURL(),
+		MountPath:   h.mountPrefix,
 	}
 
 	if v := ctx.Form.StringOptional("token"); v != nil {

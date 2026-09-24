@@ -5,7 +5,7 @@
 > [!WARNING]
 > This library is currently **EXPERIMENTAL** and breaking changes are expected!
 
-Azugo framework authentication toolkit — OAuth 2.0 / OpenID Connect building blocks with PASETO
+Azugo framework authentication toolkit - OAuth 2.0 / OpenID Connect building blocks with PASETO
 v4.local tokens.
 
 ## Features
@@ -24,7 +24,8 @@ v4.local tokens.
 ```
 
 Where `app` is a `*core.App`, `cfg` is an `*auth.Configuration`, `users` implements `auth.UserProvider`, `sessions` a `session.Store` and
-`clients` a `client.Registry`.
+`clients` a `client.Registry`. A `private_key_jwt` client must address its assertion to the
+issuer identifier (`aud`).
 
 `auth.Auth` is a transport-free service that takes a request struct and return a result
 + directive struct, with no HTTP dependency. Two optional layers sit on top:
@@ -35,7 +36,9 @@ Where `app` is a `*core.App`, `cfg` is an `*auth.Configuration`, `users` impleme
   `routes.MountPrefix` and/or `routes.TokenEndpoint`/`UserinfoEndpoint`/`JWKSEndpoint` so the
   discovery document still reports correct URLs.
 * `azugo.io/auth/middleware` - `middleware.Auth(a, ...)` resolves `ctx.User()` from the
-  `Authorization` header (and, with `middleware.Cookie()`, the session cookie);
+  `Authorization` header (and, with `middleware.Cookie()`, the session cookie); a resource
+  server serving specific clients should pass `middleware.Audience(...)` so tokens issued to
+  other clients are not accepted (`middleware.IntrospectionAudience(...)` for `Introspection`);
   `middleware.RequireAuth(...)` halts the chain for an anonymous request, optionally redirecting
   (`middleware.RedirectTo`, `middleware.ReturnTo`) instead of returning a JSON 401.
 
@@ -44,11 +47,18 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 ## Environment variables
 
 * `AUTH_SECRET` - PASETO local secret used to seal tokens (min. 32 bytes).
-* `AUTH_SECURE` - Mark session cookies as `Secure`. Default `true`.
 * `AUTH_SAME_SITE` - Session cookie `SameSite` policy: `strict`, `lax` or `none`. Default `strict`.
-* `AUTH_COOKIE_NAME` - Session cookie name. Default `__session`.
+* `AUTH_COOKIE_NAME` - Session cookie name. Default `session`.
 * `AUTH_COOKIE_PATH` - Session cookie path. Default: the auth mount prefix.
 * `AUTH_LOGOUT_INVALIDATES_COOKIE` - Make logout authoritative server-side. Default `true`.
+* `AUTH_LOGOUT_POLICY` - What `GET /logout` must carry before it ends a session (OpenID Connect
+  RP-Initiated Logout). Set one whenever `AUTH_SAME_SITE` is relaxed from `strict`, since a `lax`
+  cookie rides a cross-site navigation and a bare link would otherwise log the user out.
+  * unset - the session cookie alone is enough. Default.
+  * `confirm` - an `id_token_hint` this server issued for the session, or the user confirming by
+    posting back. Supply the confirmation page with `routes.LogoutConfirmation(handler)`.
+  * `id_token_hint` - the hint is required and there is no confirmation path, so a relying party
+    must identify the session it is ending.
 * `AUTH_ACCESS_TOKEN_TTL` - Access token lifetime. Default `20m`.
 * `AUTH_SESSION_TTL` - Session lifetime. Default `8h`.
 * `AUTH_CODE_TTL` - Authorization-code lifetime. Default `60s`.
@@ -63,9 +73,11 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 * `AUTH_THROTTLE_ENABLED` - Enable the brute-force lockout guard. Default `true`.
 * `AUTH_THROTTLE_MAX_ATTEMPTS` - Attempts before lockout. Default `5`.
 * `AUTH_THROTTLE_WINDOW` - Attempt-counting window. Default `15m`.
-* `AUTH_THROTTLE_LOCKOUT_TTL` - Lockout duration. Default `15m`.
+* `AUTH_THROTTLE_LOCKOUT_TTL` - How long a key stays blocked once it hits the limit. Default `15m`.
 * `AUTH_THROTTLE_MFA_RESEND_COOLDOWN` - MFA code resend cooldown. Default `60s`.
 * `AUTH_THROTTLE_MFA_MAX_RESENDS` - Maximum MFA code resends. Default `3`.
+* `AUTH_THROTTLE_EXTERNAL_START_MAX` - External IdP round-trips one caller may start per
+  `AUTH_THROTTLE_WINDOW`, bounding unauthenticated growth of the round-trip state cache. Default `300`; `0` disables the cap.
 * `AUTH_KEYS_PRIMARY` (or `AUTH_KEYS_PRIMARY_FILE`) - PEM-encoded primary signing key (RSA or
   ECDSA private key). Enables JWT/JWKS signing; unset means introspect-only mode.
 * `AUTH_KEYS_PRIMARY_ALGORITHM` - Primary key algorithm: `RS256`, `RS384`, `RS512`, `ES256`,
