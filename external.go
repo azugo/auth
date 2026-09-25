@@ -198,10 +198,6 @@ func (a *Auth) beginExternal(ctx context.Context, p provider.Provider, st extern
 		return RedirectResult{}, NewOAuthErrorFrom(err)
 	}
 
-	if ip != "" {
-		_ = a.extstart.Fail(ctx, ip)
-	}
-
 	uri, err := p.AuthURL(ctx, state, nonce, s256(verifier))
 	if err != nil {
 		return RedirectResult{}, NewOAuthErrorFrom(err)

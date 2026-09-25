@@ -152,6 +152,8 @@ func (a *Auth) VerifyMFA(ctx context.Context, in MFAStepRequest) (LoginResult, e
 
 	v, err := m.Verify(ctx, sc.sess.UserID, sc.state.ChallengeID, in.Response)
 	if err != nil {
+		a.refundThrottle(ctx, keys)
+
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
@@ -167,6 +169,8 @@ func (a *Auth) settleMFA(ctx context.Context, sc *stepContext, m mfa.Method, v m
 
 	switch v.Result {
 	case mfa.VerifyPending:
+		a.refundThrottle(ctx, keys)
+
 		return a.pendingMFAResult(ctx, sc, in)
 	case mfa.VerifyDenied:
 		a.failThrottle(ctx, keys)
@@ -184,7 +188,8 @@ func (a *Auth) settleMFA(ctx context.Context, sc *stepContext, m mfa.Method, v m
 		}
 	}
 
-	a.resetThrottle(ctx, []string{"mfa:" + sc.sess.UserID, "mfa-open:" + sc.sess.UserID})
+	a.passThrottle(ctx, keys)
+	a.resetThrottle(ctx, []string{"mfa-open:" + sc.sess.UserID})
 	a.emit(ctx, event.Event{Type: event.TypeMFASuccess, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
 
 	sc.sess.MFAMethod = sc.state.Method
@@ -407,6 +412,8 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 
 	pending, err := a.enrollments.Get(ctx, key)
 	if err != nil {
+		a.refundThrottle(ctx, keys)
+
 		var knf cache.KeyNotFoundError
 		if errors.As(err, &knf) {
 			return MFAEnrollResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "no mfa enrollment in progress")
@@ -422,10 +429,14 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 		if errors.Is(err, mfa.ErrInvalidResponse) {
 			a.failThrottle(ctx, keys)
 			a.emit(ctx, event.Event{Type: event.TypeMFAFailure, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
+		} else {
+			a.refundThrottle(ctx, keys)
 		}
 
 		return MFAEnrollResult{}, NewOAuthErrorFrom(err)
 	}
+
+	a.passThrottle(ctx, keys)
 
 	id, err := newJTI()
 	if err != nil {
@@ -446,7 +457,6 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 
 	detail["enrollment_id"] = id
 
-	a.resetThrottle(ctx, keys[:1])
 	_ = deleteSynced(ctx, a.enrollments, key)
 	a.emit(ctx, event.Event{Type: event.TypeMFAEnrolled, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
 

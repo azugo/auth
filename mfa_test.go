@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -861,6 +862,45 @@ func TestMFASwitchingBackReopensUnderResendLimits(t *testing.T) {
 	// ...but switching back to push re-issues it, which is a resend under the cooldown.
 	_, err = a.BeginMFA(context.Background(), MFAStepRequest{Token: res.StepToken, Method: "push"})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeSlowDown))
+}
+
+func TestMFAVerifyBudgetHoldsAcrossConcurrentGuesses(t *testing.T) {
+	cfg := validConfig()
+	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 3, Window: time.Minute, LockoutTTL: time.Minute}
+
+	a := newGrantsTestAuth(t, cfg, []Option{MFAStore(mfa.NewMemoryStore())}, mfaClient(client.MFAPolicyOptional))
+	enrollTOTP(t, a, loginAs(t, a, alice("")).AccessToken)
+
+	pending := loginAs(t, a, alice(""))
+	qt.Assert(t, qt.Equals(pending.Status, session.StatusPendingMFA))
+
+	codes := make(chan ErrorCode, 20)
+
+	var wg sync.WaitGroup
+
+	for range 20 {
+		wg.Go(func() {
+			_, err := a.VerifyMFA(context.Background(), MFAStepRequest{Token: pending.StepToken, Response: map[string]any{"code": "000000"}})
+			codes <- oauthErrorCode(t, err)
+		})
+	}
+
+	wg.Wait()
+	close(codes)
+
+	evaluated := 0
+
+	for code := range codes {
+		if code == ErrCodeInvalidGrant {
+			evaluated++
+		} else {
+			qt.Check(t, qt.Equals(code, ErrCodeSlowDown))
+		}
+	}
+
+	// Every guess claims its attempt before the code is checked, so the budget holds even
+	// when all of them arrive at once.
+	qt.Check(t, qt.Equals(evaluated, cfg.Throttle.MaxAttempts))
 }
 
 func TestMFAChallengeOpensAreBoundedPerUserAcrossLogins(t *testing.T) {

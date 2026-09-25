@@ -284,10 +284,14 @@ func (a *Auth) limitChallenge(ctx context.Context, sess *session.Session, cl *cl
 
 	fresh, err := a.challenges.Add(ctx, key, 1, cache.TTL[int64](cooldown))
 	if err != nil {
+		a.refundThrottle(ctx, []string{"mfa-open:" + sess.UserID})
+
 		return "", NewOAuthErrorFrom(err)
 	}
 
 	if !fresh {
+		a.refundThrottle(ctx, []string{"mfa-open:" + sess.UserID})
+
 		remaining, _, err := a.challenges.TTL(ctx, key)
 		if err != nil {
 			return "", NewOAuthErrorFrom(err)
@@ -341,8 +345,12 @@ func (a *Auth) selectMFA(ctx context.Context, sess *session.Session, cl *client.
 
 		// A self-contained method issues nothing and a failed one delivered nothing, so
 		// neither counts against the limits and neither holds the cooldown.
-		if challengeID == "" && cooldownKey != "" {
-			_ = a.challenges.Delete(ctx, cooldownKey)
+		if challengeID == "" {
+			a.refundThrottle(ctx, []string{"mfa-open:" + sess.UserID})
+
+			if cooldownKey != "" {
+				_ = a.challenges.Delete(ctx, cooldownKey)
+			}
 		}
 
 		if err != nil {
@@ -555,15 +563,19 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 	return a.buildLoginResult(ctx, sess, sc.client, returnTo, cookie, baseURL, mountPath)
 }
 
-// checkThrottle refuses the attempt when any key is locked out.
+// checkThrottle claims an attempt on every key, refusing (and refunding the claims made so
+// far) when any key is exhausted or locked out.
 func (a *Auth) checkThrottle(ctx context.Context, keys []string, clientID, ip string) error {
-	for _, key := range keys {
+	for i, key := range keys {
 		ok, retryAfter, err := a.throttle.Allow(ctx, key)
 		if err != nil {
+			a.refundThrottle(ctx, keys[:i])
+
 			return NewOAuthErrorFrom(err)
 		}
 
 		if !ok {
+			a.refundThrottle(ctx, keys[:i])
 			a.emit(ctx, event.Event{Type: event.TypeLockout, ClientID: clientID, IP: ip, Detail: map[string]any{"key": key}})
 
 			return NewThrottledError(retryAfter)
@@ -571,6 +583,24 @@ func (a *Auth) checkThrottle(ctx context.Context, keys []string, clientID, ip st
 	}
 
 	return nil
+}
+
+// refundThrottle returns the claims on every key when the attempt was not a guess.
+func (a *Auth) refundThrottle(ctx context.Context, keys []string) {
+	for _, key := range keys {
+		_ = a.throttle.Refund(ctx, key)
+	}
+}
+
+// passThrottle settles a successful attempt: the identity key is cleared and the source keys
+// are refunded, so successes never count against a shared source.
+func (a *Auth) passThrottle(ctx context.Context, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+
+	a.resetThrottle(ctx, keys[:1])
+	a.refundThrottle(ctx, keys[1:])
 }
 
 // failThrottle records a failed attempt on every key.

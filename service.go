@@ -121,6 +121,8 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
 			a.failThrottle(ctx, keys)
+		} else {
+			a.refundThrottle(ctx, keys)
 		}
 
 		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
@@ -129,7 +131,9 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 	}
 
 	if in.Username != "" {
-		a.resetThrottle(ctx, keys[:1])
+		a.passThrottle(ctx, keys)
+	} else {
+		a.refundThrottle(ctx, keys)
 	}
 
 	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
