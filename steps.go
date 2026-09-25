@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"slices"
 	"time"
@@ -31,6 +32,9 @@ type pendingState struct {
 	Method        string
 	ChallengeID   string
 	ChallengeData map[string]any
+	// TokenIDs are the pending-phase credentials (cookie and step tokens), all retired once
+	// the session activates.
+	TokenIDs []string
 }
 
 // mfaEnrollment is the driver state of an in-progress enrollment.
@@ -65,6 +69,24 @@ func filterMethods(names []string, cl *client.Client, lvl *contract.ACRLevelConf
 	return out
 }
 
+// primaryMethods drops the backup methods from names.
+func (a *Auth) primaryMethods(ctx context.Context, names []string) ([]string, error) {
+	out := make([]string, 0, len(names))
+
+	for _, name := range names {
+		m, err := a.mfaMethods.Get(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+
+		if !mfa.MethodBackup(m) {
+			out = append(out, name)
+		}
+	}
+
+	return out, nil
+}
+
 // mfaMethodSets returns the methods the client and target level permit.
 func (a *Auth) mfaMethodSets(ctx context.Context, userID string, cl *client.Client, target *contract.ACRLevelConfig) ([]string, []string, error) {
 	if a.mfaStore == nil {
@@ -96,12 +118,17 @@ func (a *Auth) mfaMethodSets(ctx context.Context, userID string, cl *client.Clie
 
 // evaluateSteps resolves the target ACR and the built-in login steps for session.
 func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *client.Client, req acrRequest) (pendingState, error) {
-	var names, enrolled []string
+	var names, primary, enrolled []string
 
 	if a.mfaStore != nil {
 		var err error
 
 		if names, err = a.mfaMethods.Names(ctx); err != nil {
+			return pendingState{}, err
+		}
+
+		// Only a primary method can be a user's first factor.
+		if primary, err = a.primaryMethods(ctx, names); err != nil {
 			return pendingState{}, err
 		}
 
@@ -125,9 +152,7 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 			return false
 		}
 
-		permitted := filterMethods(names, cl, lvl)
-
-		return intersects(enrolled, permitted) || (len(enrolled) == 0 && len(permitted) > 0)
+		return intersects(enrolled, filterMethods(names, cl, lvl)) || (len(enrolled) == 0 && len(filterMethods(primary, cl, lvl)) > 0)
 	}
 
 	target, err := a.resolveTargetACR(cl, req, reachable)
@@ -162,7 +187,7 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 		switch {
 		case available > 0:
 			sess.Status = session.StatusPendingMFA
-		case required && len(enrolled) == 0 && len(permitted) > 0:
+		case required && len(enrolled) == 0 && len(filterMethods(primary, cl, target)) > 0:
 			sess.Status = session.StatusPendingMFASetup
 		case required:
 			return pendingState{}, ErrUnmetAuthenticationRequirements
@@ -200,7 +225,7 @@ func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *clie
 		sess.ExpiresAt = now.Add(a.config.AccessTokenTTL)
 	}
 
-	var cookie string
+	var cookie, jti string
 
 	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
 		if err := a.sessions.Create(ctx, sess); err != nil {
@@ -209,7 +234,7 @@ func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *clie
 
 		var err error
 
-		cookie, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
+		cookie, jti, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
 
 		return err
 	}); err != nil {
@@ -219,6 +244,8 @@ func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *clie
 	if sess.Status == session.StatusActive {
 		return a.buildLoginResult(ctx, sess, cl, returnTo, cookie, baseURL, mountPath)
 	}
+
+	st.TokenIDs = append(st.TokenIDs, jti)
 
 	return a.pendingLoginResult(ctx, sess, cl, st, cookie, returnTo, baseURL, mountPath)
 }
@@ -238,13 +265,15 @@ func (a *Auth) pendingLoginResult(ctx context.Context, sess *session.Session, cl
 		}
 	}
 
-	if err := setSynced(ctx, a.pending, sess.ID, st, cache.TTL[pendingState](time.Until(sess.ExpiresAt))); err != nil {
-		return LoginResult{}, NewOAuthErrorFrom(err)
-	}
-
-	step, err := a.issueStepToken(ctx, sess, cl)
+	step, jti, err := a.issueStepToken(ctx, sess, cl)
 	if err != nil {
 		return LoginResult{}, err
+	}
+
+	st.TokenIDs = append(st.TokenIDs, jti)
+
+	if err := setSynced(ctx, a.pending, sess.ID, st, cache.TTL[pendingState](time.Until(sess.ExpiresAt))); err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
 	res.StepToken = step
@@ -379,15 +408,15 @@ func (a *Auth) selectMFA(ctx context.Context, sess *session.Session, cl *client.
 	return nil
 }
 
-// issueStepToken mints a step token bound to the pending sess.
-func (a *Auth) issueStepToken(ctx context.Context, sess *session.Session, cl *client.Client) (string, error) {
+// issueStepToken mints a step token bound to the pending sess, returning it with its jti.
+func (a *Auth) issueStepToken(ctx context.Context, sess *session.Session, cl *client.Client) (string, string, error) {
 	jti, err := newJTI()
 	if err != nil {
-		return "", NewOAuthErrorFrom(err)
+		return "", "", NewOAuthErrorFrom(err)
 	}
 
 	if err := a.jti.Issue(ctx, jti, sess.ID, time.Until(sess.ExpiresAt)); err != nil {
-		return "", NewOAuthErrorFrom(err)
+		return "", "", NewOAuthErrorFrom(err)
 	}
 
 	tok, err := a.codec.Encrypt(token.AccessClaims{
@@ -399,10 +428,10 @@ func (a *Auth) issueStepToken(ctx context.Context, sess *session.Session, cl *cl
 		ExpiresAt: sess.ExpiresAt.Unix(),
 	})
 	if err != nil {
-		return "", NewOAuthErrorFrom(err)
+		return "", "", NewOAuthErrorFrom(err)
 	}
 
-	return tok, nil
+	return tok, jti, nil
 }
 
 // stepRedirect builds the redirect-mode target for a pending login.
@@ -490,6 +519,11 @@ func (a *Auth) stepSession(ctx context.Context, tok string, statuses ...session.
 
 	st, err := a.pending.Get(ctx, sess.ID)
 	if err != nil {
+		var knf cache.KeyNotFoundError
+		if errors.As(err, &knf) {
+			return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+		}
+
 		return nil, NewOAuthErrorFrom(err)
 	}
 
@@ -520,36 +554,57 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 	now := time.Now()
 	sess.LastSeen = now
 
+	// Every pending-phase credential is retired, not only the presented one.
+	retired := sc.state.TokenIDs
+	if !slices.Contains(retired, sc.claims.TokenID) {
+		retired = append(retired, sc.claims.TokenID)
+	}
+
+	var cookie, jti string
+
+	// A session still pending after a step gets a fresh cookie and step token
 	if sess.Status != session.StatusActive {
 		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
 			if err := a.sessions.Update(ctx, sess); err != nil {
 				return err
 			}
 
-			return a.jti.Revoke(ctx, sc.claims.TokenID)
+			for _, id := range retired {
+				if err := a.jti.Revoke(ctx, id); err != nil {
+					return err
+				}
+			}
+
+			var err error
+
+			cookie, jti, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
+
+			return err
 		}); err != nil {
 			return LoginResult{}, NewOAuthErrorFrom(err)
 		}
 
-		return a.pendingLoginResult(ctx, sess, sc.client, st, "", returnTo, baseURL, mountPath)
+		st.TokenIDs = []string{jti}
+
+		return a.pendingLoginResult(ctx, sess, sc.client, st, cookie, returnTo, baseURL, mountPath)
 	}
 
 	sess.ExpiresAt = now.Add(a.config.SessionTTL)
-
-	var cookie string
 
 	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
 		if err := a.sessions.Update(ctx, sess); err != nil {
 			return err
 		}
 
-		if err := a.jti.Revoke(ctx, sc.claims.TokenID); err != nil {
-			return err
+		for _, id := range retired {
+			if err := a.jti.Revoke(ctx, id); err != nil {
+				return err
+			}
 		}
 
 		var err error
 
-		cookie, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
+		cookie, _, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
 
 		return err
 	}); err != nil {

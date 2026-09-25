@@ -241,7 +241,7 @@ func TestMFACallbackSettlesChallenge(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.PostJSON("/auth/mfa/push/callback", map[string]any{"challenge_id": id, "approved": true},
+	resp, err := tc.PostJSON("/auth/mfa/callback/push", map[string]any{"challenge_id": id, "approved": true},
 		tc.WithHeader(mfatest.HeaderCallbackSecret, "hook-secret"))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
@@ -260,13 +260,13 @@ func TestMFACallbackRejectsBadSecretAndUnknownMethod(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.PostJSON("/auth/mfa/push/callback", map[string]any{"challenge_id": "x", "approved": true})
+	resp, err := tc.PostJSON("/auth/mfa/callback/push", map[string]any{"challenge_id": "x", "approved": true})
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 403))
 
 	// TOTP has no webhook.
-	resp2, err := tc.PostJSON("/auth/mfa/totp/callback", map[string]any{})
+	resp2, err := tc.PostJSON("/auth/mfa/callback/totp", map[string]any{})
 	defer fasthttp.ReleaseResponse(resp2)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp2.StatusCode(), 404))

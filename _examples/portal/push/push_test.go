@@ -14,7 +14,10 @@ import (
 func TestChallengeLifecycle(t *testing.T) {
 	store := mfa.NewMemoryStore()
 
-	m, err := driver{}.Open(store, &contract.MFAMethodConfig{Name: "push", Driver: "push"})
+	_, err := driver{}.Open(store, &contract.MFAMethodConfig{Name: "push", Driver: "push"})
+	qt.Check(t, qt.IsNotNil(err))
+
+	m, err := driver{}.Open(store, &contract.MFAMethodConfig{Name: "push", Driver: "push", Config: map[string]string{"callback_secret": "s"}})
 	qt.Assert(t, qt.IsNil(err))
 
 	ctx := context.Background()

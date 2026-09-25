@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -41,9 +42,13 @@ func init() {
 
 type driver struct{}
 
-// Open creates the push method. Config keys: callback_secret (required for the webhook to be
-// accepted; without it every callback is rejected).
+// Open creates the push method. Config keys: callback_secret (required; it authenticates the
+// vendor webhook, and without it no approval could ever arrive).
 func (driver) Open(store mfa.Store, cfg *contract.MFAMethodConfig) (mfa.Method, error) {
+	if cfg.Config["callback_secret"] == "" {
+		return nil, errors.New("push: callback_secret is required")
+	}
+
 	return &method{
 		store:      store,
 		name:       cfg.Name,
@@ -196,7 +201,9 @@ func (m *method) Async() bool {
 }
 
 // HandleCallback settles a challenge from the vendor webhook body
-// {"challenge_id":"...","approved":true,"device":"..."}; device is optional.
+// {"challenge_id":"...","approved":true,"transaction":"123456","device":"..."}. An approval
+// must carry the transaction code the device showed, so a user cannot approve a sign-in they
+// did not start; device is optional.
 func (m *method) HandleCallback(ctx *azugo.Context) error {
 	if m.secret == "" || subtle.ConstantTimeCompare([]byte(ctx.Header.Get(HeaderCallbackSecret)), []byte(m.secret)) != 1 {
 		return callbackError{status: http.StatusForbidden, msg: "invalid callback secret"}
@@ -205,6 +212,8 @@ func (m *method) HandleCallback(ctx *azugo.Context) error {
 	var body struct {
 		ChallengeID string `json:"challenge_id"`
 		Approved    bool   `json:"approved"`
+		// Transaction is the code the user matched on the device; required for an approval.
+		Transaction string `json:"transaction"`
 		// Device is the identifier of the device that answered, when the vendor reports it.
 		Device string `json:"device"`
 	}
@@ -221,6 +230,10 @@ func (m *method) HandleCallback(ctx *azugo.Context) error {
 	c, ok := m.challenges[body.ChallengeID]
 	if !ok {
 		return callbackError{status: http.StatusNotFound, msg: "unknown challenge"}
+	}
+
+	if body.Approved && subtle.ConstantTimeCompare([]byte(body.Transaction), []byte(c.code)) != 1 {
+		return callbackError{status: http.StatusBadRequest, msg: "transaction code does not match"}
 	}
 
 	c.settle(body.Approved, m.enrollmentOf(ctx, c.userID, body.Device))

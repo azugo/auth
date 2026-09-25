@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"image/png"
+	"slices"
 	"strings"
 
 	"example/portal/views"
@@ -65,7 +66,10 @@ func (r *router) renderSecurity(ctx *azugo.Context, enrollment *views.Enrollment
 		return
 	}
 
-	templ.Render(ctx, views.Security(methods, enrollment, errorMessage))
+	// Backup codes only make sense once a primary factor exists.
+	hasPrimary := slices.ContainsFunc(methods, func(m auth.MFAMethodInfo) bool { return m.Enrolled && !m.Backup })
+
+	templ.Render(ctx, views.Security(methods, hasPrimary, enrollment, errorMessage))
 }
 
 // mfaEnroll begins enrolling the caller in {method} and hands what the user must save.

@@ -54,7 +54,7 @@ type MFARoutes struct {
 	Begin        azugo.RequestHandler // POST /mfa/begin
 	Resend       azugo.RequestHandler // POST /mfa/resend
 	Status       azugo.RequestHandler // GET /mfa/status
-	Callback     azugo.RequestHandler // POST /mfa/{method}/callback
+	Callback     azugo.RequestHandler // POST /mfa/callback/{method}
 	Methods      azugo.RequestHandler // GET /mfa/methods
 	Enroll       azugo.RequestHandler // POST /mfa/enroll/{method}
 	EnrollFinish azugo.RequestHandler // POST /mfa/enroll/{method}/finish
@@ -390,7 +390,7 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 			g.Post("/mfa/enroll/{method}/finish", h.MFA.EnrollFinish)
 			g.Delete("/mfa/enroll/{method}", h.MFA.EnrollRevoke)
 			g.Delete("/mfa/enroll/{method}/{id}", h.MFA.EnrollmentRevoke)
-			g.Post("/mfa/{method}/callback", h.MFA.Callback)
+			g.Post("/mfa/callback/{method}", h.MFA.Callback)
 		}
 	}
 

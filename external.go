@@ -594,7 +594,10 @@ func (a *Auth) BrowserLogout(ctx context.Context, in BrowserLogoutRequest) (Brow
 		Redirect: "/",
 	}
 
+	// A cross-site navigation carries no cookie and must not clear one.
 	if in.Token == "" {
+		result.ClearCookie = nil
+
 		return result, nil
 	}
 

@@ -112,6 +112,11 @@ func (m *method) Exclusive() bool {
 	return true
 }
 
+// Backup marks the codes as a fallback for another factor, never the first one.
+func (m *method) Backup() bool {
+	return true
+}
+
 // BeginVerify is a no-op: recovery codes are self-contained.
 func (m *method) BeginVerify(context.Context, string) (string, map[string]any, error) {
 	return "", nil, nil
@@ -180,19 +185,25 @@ func (m *method) Verify(ctx context.Context, userID, _ string, response map[stri
 
 // generate returns one random code formatted in dash-separated groups of five.
 func (m *method) generate() (string, error) {
-	buf := make([]byte, m.length)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-
 	var b strings.Builder
 
-	for i, c := range buf {
+	buf := make([]byte, 1)
+
+	for i := 0; i < m.length; {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+
+		if int(buf[0]) >= 256-256%len(alphabet) {
+			continue
+		}
+
 		if i > 0 && i%5 == 0 {
 			b.WriteByte('-')
 		}
 
-		b.WriteByte(alphabet[int(c)%len(alphabet)])
+		b.WriteByte(alphabet[int(buf[0])%len(alphabet)])
+		i++
 	}
 
 	return b.String(), nil
@@ -206,4 +217,5 @@ func normalize(code string) string {
 var _ interface {
 	mfa.Method
 	mfa.ExclusiveMethod
+	mfa.BackupMethod
 } = (*method)(nil)

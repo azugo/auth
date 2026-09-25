@@ -136,6 +136,12 @@ type ExclusiveMethod interface {
 	Exclusive() bool
 }
 
+// BackupMethod is an optional Method extension for factors that only back up another one
+// (ex. recovery codes).
+type BackupMethod interface {
+	Backup() bool
+}
+
 // AsyncMethod is an optional Method extension for factors verified out-of-band (push
 // approval): the login flow signals InteractionPoll instead of prompting for a code.
 type AsyncMethod interface {
@@ -143,7 +149,8 @@ type AsyncMethod interface {
 }
 
 // CallbackHandler is an optional Method extension for vendors that deliver approval via an
-// inbound webhook; it is dispatched from POST /mfa/{method}/callback.
+// inbound webhook, dispatched from POST /mfa/callback/{method}. That route is unauthenticated
+// and not rate limited.
 type CallbackHandler interface {
 	HandleCallback(ctx *azugo.Context) error
 }
@@ -221,6 +228,13 @@ func MethodExclusive(m Method) bool {
 	e, ok := m.(ExclusiveMethod)
 
 	return ok && e.Exclusive()
+}
+
+// MethodBackup reports whether m only backs up another factor.
+func MethodBackup(m Method) bool {
+	b, ok := m.(BackupMethod)
+
+	return ok && b.Backup()
 }
 
 // MethodInteraction returns the client interaction hint for m.

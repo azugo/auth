@@ -13,7 +13,7 @@ type Enrollment struct {
 	Required []string
 }
 
-templ Security(methods []auth.MFAMethodInfo, enrollment *Enrollment, errorMessage string) {
+templ Security(methods []auth.MFAMethodInfo, hasPrimary bool, enrollment *Enrollment, errorMessage string) {
 	@layout("Security") {
 		<p><a href="/">Back to home</a></p>
 		<h2>Two-factor authentication</h2>
@@ -89,7 +89,7 @@ templ Security(methods []auth.MFAMethodInfo, enrollment *Enrollment, errorMessag
 						}
 					</td>
 					<td>
-						if !m.Enrolled || !m.Exclusive {
+						if (!m.Enrolled || !m.Exclusive) && (!m.Backup || hasPrimary) {
 							<form method="post" action={ templ.SafeURL("/security/mfa/" + m.Method + "/enroll") }>
 								<button type="submit">Add</button>
 							</form>

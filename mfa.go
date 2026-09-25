@@ -11,6 +11,7 @@ import (
 	"azugo.io/auth/event"
 	"azugo.io/auth/mfa"
 	"azugo.io/auth/session"
+	"azugo.io/auth/token"
 
 	"azugo.io/core/cache"
 	"azugo.io/core/http"
@@ -65,14 +66,22 @@ type MFAMethodInfo struct {
 	Enrolled    bool   `json:"enrolled"`
 	Interaction string `json:"interaction"`
 	// Exclusive methods hold one enrollment per user.
-	Exclusive   bool                `json:"exclusive,omitempty"`
+	Exclusive bool `json:"exclusive,omitempty"`
+	// Backup methods only back up another factor and cannot be enrolled first.
+	Backup bool `json:"backup,omitempty"`
+	// Enrollments is listed for active sessions only.
 	Enrollments []MFAEnrollmentInfo `json:"enrollments,omitempty"`
 }
 
 // stepResult starts the response for a still-pending session: the presented token stays valid
 // and a redirect-mode client is sent back to its step page.
 func stepResult(sc *stepContext, in MFAStepRequest) LoginResult {
-	res := LoginResult{Status: sc.sess.Status, StepToken: in.Token}
+	res := LoginResult{Status: sc.sess.Status}
+
+	// The HttpOnly pending cookie is never handed to page scripts.
+	if sc.claims.Type == token.TypeStepToken {
+		res.StepToken = in.Token
+	}
 
 	if sc.client.ResponseMode == client.ResponseModeRedirect {
 		res.ReturnTo = stepRedirect(sc.client, in.ReturnTo)
@@ -287,15 +296,20 @@ func (a *Auth) ListMFAMethods(ctx context.Context, tok string) ([]MFAMethodInfo,
 			return nil, NewOAuthErrorFrom(err)
 		}
 
-		info := MFAMethodInfo{Method: name, Interaction: mfa.MethodInteraction(m), Exclusive: mfa.MethodExclusive(m)}
+		info := MFAMethodInfo{Method: name, Interaction: mfa.MethodInteraction(m), Exclusive: mfa.MethodExclusive(m), Backup: mfa.MethodBackup(m)}
 
 		for _, e := range enrollments {
-			if e.Method == name {
+			if e.Method != name {
+				continue
+			}
+
+			info.Enrolled = true
+
+			// A password-only caller learns nothing about the devices it has to get past.
+			if sc.sess.Status == session.StatusActive {
 				info.Enrollments = append(info.Enrollments, MFAEnrollmentInfo{ID: e.ID, Label: e.Label, CreatedAt: e.CreatedAt, LastUsedAt: e.LastUsedAt})
 			}
 		}
-
-		info.Enrolled = len(info.Enrollments) > 0
 
 		out = append(out, info)
 	}
@@ -366,6 +380,22 @@ func (a *Auth) BeginMFAEnroll(ctx context.Context, in MFAEnrollRequest) (map[str
 		return nil, err
 	}
 
+	if mfa.MethodBackup(m) {
+		enrolled, err := mfa.EnrolledMethods(ctx, a.mfaStore, sc.sess.UserID)
+		if err != nil {
+			return nil, NewOAuthErrorFrom(err)
+		}
+
+		primary, err := a.primaryMethods(ctx, enrolled)
+		if err != nil {
+			return nil, NewOAuthErrorFrom(err)
+		}
+
+		if len(primary) == 0 {
+			return nil, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "a backup method requires another mfa method")
+		}
+	}
+
 	if mfa.MethodExclusive(m) {
 		enrolled, err := mfa.Enrolled(ctx, a.mfaStore, sc.sess.UserID, in.Method)
 		if err != nil {
@@ -382,10 +412,20 @@ func (a *Auth) BeginMFAEnroll(ctx context.Context, in MFAEnrollRequest) (map[str
 		return nil, NewOAuthErrorFrom(err)
 	}
 
+	keys := []string{"mfa-enroll:" + sc.sess.UserID}
+
+	if err := a.checkThrottle(ctx, keys, sc.client.ID, in.IP); err != nil {
+		return nil, err
+	}
+
 	data, err := m.BeginEnroll(ctx, sc.sess.UserID, info)
 	if err != nil {
+		a.refundThrottle(ctx, keys)
+
 		return nil, NewOAuthErrorFrom(err)
 	}
+
+	a.failThrottle(ctx, keys)
 
 	if err := setSynced(ctx, a.enrollments, enrollmentKey(sc.sess.UserID, in.Method), mfaEnrollment{State: data.State}, cache.TTL[mfaEnrollment](a.config.AccessTokenTTL)); err != nil {
 		return nil, NewOAuthErrorFrom(err)
@@ -460,8 +500,9 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 	_ = deleteSynced(ctx, a.enrollments, key)
 	a.emit(ctx, event.Event{Type: event.TypeMFAEnrolled, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
 
-	// The session proved it holds the new factor, which counts as passing one.
-	if !a.mfaVerified(sc.sess) {
+	// The session proved it holds the new factor, which counts as passing one; a backup
+	// method proves nothing.
+	if !a.mfaVerified(sc.sess) && !mfa.MethodBackup(m) {
 		sc.sess.MFAMethod = in.Method
 		sc.sess.MFAEnrollmentID = id
 		sc.sess.AMR = mergeAMR(sc.sess.AMR, mfa.MethodAMR(m))

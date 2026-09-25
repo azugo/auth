@@ -297,6 +297,70 @@ func approvePush(t *testing.T, a *Auth, userID string) {
 	qt.Assert(t, qt.IsTrue(mfatest.Approve(m, userID, true)))
 }
 
+func TestMFAEnrollBeginIsBoundedPerUser(t *testing.T) {
+	cfg := validConfig()
+	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
+
+	a := newGrantsTestAuth(t, cfg, []Option{MFAStore(mfa.NewMemoryStore())}, mfaClient(client.MFAPolicyOptional))
+	active := loginAs(t, a, alice(""))
+
+	for range cfg.Throttle.MaxAttempts {
+		_, err := a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: active.AccessToken, Method: totp.DriverName})
+		qt.Assert(t, qt.IsNil(err))
+	}
+
+	_, err := a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: active.AccessToken, Method: totp.DriverName})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeSlowDown))
+}
+
+func TestBackupMethodRequiresPrimaryFactor(t *testing.T) {
+	a := newMFATestAuth(t, mfaClient(client.MFAPolicyOptional), mfa.NewMemoryStore())
+	first := loginAs(t, a, alice(""))
+
+	// Recovery codes prove nothing, so they cannot be the first factor.
+	_, err := a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: first.AccessToken, Method: "recovery"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	enrollTOTP(t, a, first.AccessToken)
+
+	_, err = a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: first.AccessToken, Method: "recovery"})
+	qt.Assert(t, qt.IsNil(err))
+
+	// A required-MFA client permitting only a backup method cannot onboard anyone.
+	cl := mfaClient(client.MFAPolicyRequired)
+	cl.AllowedMFAMethods = []string{"recovery"}
+
+	_, err = newMFATestAuth(t, cl, mfa.NewMemoryStore()).Login(context.Background(), alice(""))
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeUnmetAuthenticationRequirements))
+}
+
+func TestStepEndpointsEchoOnlyStepTokens(t *testing.T) {
+	store := mfa.NewMemoryStore()
+	a := newMFATestAuth(t, mfaClient(client.MFAPolicyOptional), store)
+	seed := enrollTOTP(t, a, loginAs(t, a, alice("")).AccessToken)
+
+	pending := loginAs(t, a, alice(""))
+	qt.Assert(t, qt.Equals(pending.Status, session.StatusPendingMFA))
+	qt.Assert(t, qt.IsNotNil(pending.Cookie))
+
+	// The pending cookie is a valid step credential but is never echoed back to a script.
+	res, err := a.MFAStatus(context.Background(), MFAStepRequest{Token: pending.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(res.StepToken, ""))
+
+	res, err = a.MFAStatus(context.Background(), MFAStepRequest{Token: pending.StepToken})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(res.StepToken, pending.StepToken))
+
+	// Passing the factor with the step token retires the pending cookie as well.
+	verifyTOTP(t, a, pending, seed)
+
+	_, err = a.MFAStatus(context.Background(), MFAStepRequest{Token: pending.Cookie.Value})
+	qt.Check(t, qt.ErrorIs(err, token.ErrInvalidToken))
+	_, err = a.MFAStatus(context.Background(), MFAStepRequest{Token: pending.StepToken})
+	qt.Check(t, qt.ErrorIs(err, token.ErrInvalidToken))
+}
+
 func TestMFAStatusRepeatsChallengeData(t *testing.T) {
 	store := mfa.NewMemoryStore()
 	a := newMFATestAuth(t, mfaClient(client.MFAPolicyOptional), store)
@@ -420,6 +484,18 @@ func TestRevokeMFAAndListMethods(t *testing.T) {
 	qt.Check(t, qt.IsFalse(byName[totp.DriverName].Exclusive))
 	qt.Check(t, qt.IsTrue(byName["recovery"].Enrolled))
 	qt.Check(t, qt.IsTrue(byName["recovery"].Exclusive))
+	qt.Check(t, qt.IsTrue(byName["recovery"].Backup))
+
+	// A login still waiting for its second factor sees what is enrolled, not the devices.
+	pendingMethods, err := a.ListMFAMethods(context.Background(), loginAs(t, a, alice("")).StepToken)
+	qt.Assert(t, qt.IsNil(err))
+
+	for _, m := range pendingMethods {
+		if m.Method == totp.DriverName {
+			qt.Check(t, qt.IsTrue(m.Enrolled))
+			qt.Check(t, qt.HasLen(m.Enrollments, 0))
+		}
+	}
 
 	// One enrollment can be removed on its own; the rest of the method stays.
 	qt.Assert(t, qt.IsNil(a.RevokeMFAEnrollment(context.Background(), verified.AccessToken, totp.DriverName, second.EnrollmentID)))
@@ -557,6 +633,7 @@ func TestRecoveryCodesAreSingleUse(t *testing.T) {
 	a := newMFATestAuth(t, mfaClient(client.MFAPolicyOptional), mfa.NewMemoryStore())
 
 	first := loginAs(t, a, alice(""))
+	enrollTOTP(t, a, first.AccessToken)
 
 	data, err := a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: first.AccessToken, Method: "recovery"})
 	qt.Assert(t, qt.IsNil(err))
@@ -570,12 +647,17 @@ func TestRecoveryCodesAreSingleUse(t *testing.T) {
 	res := loginAs(t, a, alice(""))
 	qt.Assert(t, qt.Equals(res.Status, session.StatusPendingMFA))
 
+	_, err = a.BeginMFA(context.Background(), MFAStepRequest{Token: res.StepToken, Method: "recovery"})
+	qt.Assert(t, qt.IsNil(err))
+
 	done, err := a.VerifyMFA(context.Background(), MFAStepRequest{Token: res.StepToken, Response: map[string]any{"code": codes[0]}})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(done.Status, session.StatusActive))
 
 	// The same code cannot be replayed.
 	again := loginAs(t, a, alice(""))
+	_, err = a.BeginMFA(context.Background(), MFAStepRequest{Token: again.StepToken, Method: "recovery"})
+	qt.Assert(t, qt.IsNil(err))
 	_, err = a.VerifyMFA(context.Background(), MFAStepRequest{Token: again.StepToken, Response: map[string]any{"code": codes[0]}})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
 
@@ -1007,4 +1089,14 @@ func TestLoginLockoutOutlivesTheCountingWindow(t *testing.T) {
 
 	_, err = a.Login(context.Background(), good)
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeSlowDown))
+}
+
+func TestBrowserLogoutWithoutTokenClearsNoCookie(t *testing.T) {
+	a := newMFATestAuth(t, mfaClient(client.MFAPolicyOptional), mfa.NewMemoryStore())
+
+	// A cross-site navigation carries no cookie; the response must not clear one either.
+	res, err := a.BrowserLogout(context.Background(), BrowserLogoutRequest{})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsNil(res.ClearCookie))
+	qt.Check(t, qt.Equals(res.Redirect, "/"))
 }

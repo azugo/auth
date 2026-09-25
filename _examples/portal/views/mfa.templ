@@ -18,6 +18,12 @@ templ MFA(available []string, selected, interaction, transaction, returnTo, erro
 				@fieldError(errorMessage)
 				<button type="submit">I have approved it</button>
 			</form>
+			<form method="post" action="/mfa/resend">
+				if returnTo != "" {
+					<input type="hidden" name="return_to" value={ returnTo }/>
+				}
+				<button type="submit">Send a new request</button>
+			</form>
 		} else {
 			<p>Enter the code for <strong>{ selected }</strong> to finish signing in.</p>
 			<form method="post" action="/mfa/verify">

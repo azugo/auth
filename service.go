@@ -399,15 +399,15 @@ func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) erro
 }
 
 // issueSessionCookie mints and registers a fresh session-cookie JTI for sess and returns the
-// encrypted PASETO cookie value.
-func (a *Auth) issueSessionCookie(ctx context.Context, sess *session.Session, issuedAt, expiresAt time.Time) (string, error) {
+// encrypted PASETO cookie value with its jti.
+func (a *Auth) issueSessionCookie(ctx context.Context, sess *session.Session, issuedAt, expiresAt time.Time) (string, string, error) {
 	jti, err := newJTI()
 	if err != nil {
-		return "", NewOAuthErrorFrom(err)
+		return "", "", NewOAuthErrorFrom(err)
 	}
 
 	if err := a.jti.Issue(ctx, jti, sess.ID, time.Until(expiresAt)); err != nil {
-		return "", NewOAuthErrorFrom(err)
+		return "", "", NewOAuthErrorFrom(err)
 	}
 
 	cookie, err := a.codec.Encrypt(token.AccessClaims{
@@ -418,10 +418,10 @@ func (a *Auth) issueSessionCookie(ctx context.Context, sess *session.Session, is
 		ExpiresAt: expiresAt.Unix(),
 	})
 	if err != nil {
-		return "", NewOAuthErrorFrom(err)
+		return "", "", NewOAuthErrorFrom(err)
 	}
 
-	return cookie, nil
+	return cookie, jti, nil
 }
 
 // cookieDirective builds the session-cookie directive for value.

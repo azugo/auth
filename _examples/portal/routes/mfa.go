@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"errors"
+
 	"example/portal/views"
 
 	"azugo.io/auth"
@@ -27,7 +29,22 @@ func (r *router) mfaPage(ctx *azugo.Context) {
 		returnTo = *v
 	}
 
+	message := ctx.Flash.FieldErrorFor("code")
+
 	res, err := r.Auth().MFAStatus(ctx, r.stepRequest(ctx, returnTo))
+
+	denied := false
+
+	var oe *auth.OAuthError
+	if errors.As(err, &oe) && oe.Code == auth.ErrCodeInvalidGrant {
+		denied = true
+		res, err = r.Auth().BeginMFA(ctx, r.stepRequest(ctx, returnTo))
+
+		if message == "" {
+			message = "The sign-in was denied on your device."
+		}
+	}
+
 	if err != nil {
 		if !r.fatal(ctx, err, returnTo) {
 			ctx.Error(err)
@@ -42,9 +59,30 @@ func (r *router) mfaPage(ctx *azugo.Context) {
 		return
 	}
 
-	transaction, _ := res.Data["transaction"].(string)
+	transaction := ""
+	if !denied {
+		transaction, _ = res.Data["transaction"].(string)
+	}
 
-	templ.Render(ctx, views.MFA(res.Available, res.Selected, res.Interaction, transaction, returnTo, ctx.Flash.FieldErrorFor("code")))
+	templ.Render(ctx, views.MFA(res.Available, res.Selected, res.Interaction, transaction, returnTo, message))
+}
+
+// mfaResend sends a fresh challenge for the selected method, under the resend limits.
+func (r *router) mfaResend(ctx *azugo.Context) {
+	returnTo := ""
+	if v := ctx.Form.StringOptional("return_to"); v != nil {
+		returnTo = *v
+	}
+
+	if _, err := r.Auth().ResendMFA(ctx, r.stepRequest(ctx, returnTo)); err != nil {
+		if r.fatal(ctx, err, returnTo) {
+			return
+		}
+
+		ctx.Flash.FieldError("code", errorMessage(err, "Could not send a new request."))
+	}
+
+	ctx.Redirect(pageURL("/mfa", returnTo))
 }
 
 // finishStep applies a step result.

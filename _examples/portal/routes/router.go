@@ -30,9 +30,10 @@ func Init(a *portal.App) error {
 	a.Get("/error", r.errorRedirected)
 	a.Get("/login", r.loginForm)
 	a.Post("/login", r.login)
-	a.Get("/mfa", r.mfaPage)
+	a.Get("/mfa", routes.SecurityHeaders(r.mfaPage))
 	a.Post("/mfa/verify", r.mfaVerify)
 	a.Post("/mfa/begin", r.mfaBegin)
+	a.Post("/mfa/resend", r.mfaResend)
 	a.Post("/logout", r.logout)
 
 	routes.Bind(a, "/auth", a.Auth())
@@ -44,6 +45,7 @@ func Init(a *portal.App) error {
 
 	security := a.Group("/security")
 	security.Use(middleware.RequireAuth(middleware.RedirectTo("/login"), middleware.ReturnTo()))
+	security.Use(routes.SecurityHeaders)
 	security.Get("", r.securityPage)
 	security.Post("/mfa/{method}/enroll", r.mfaEnroll)
 	security.Post("/mfa/{method}/finish", r.mfaEnrollFinish)

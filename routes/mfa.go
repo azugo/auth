@@ -132,7 +132,7 @@ func (h *Handler) mfaStatus(ctx *azugo.Context) {
 	h.writeLoginResult(ctx, res)
 }
 
-// mfaCallback implements POST /mfa/{method}/callback: the vendor webhook of a
+// mfaCallback implements POST /mfa/callback/{method}: the vendor webhook of a
 // mfa.CallbackHandler method.
 func (h *Handler) mfaCallback(ctx *azugo.Context) {
 	m, err := h.auth.MFAMethods().Get(ctx, ctx.Params.String("method"))

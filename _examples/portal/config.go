@@ -13,7 +13,7 @@ type Configuration struct {
 	*config.Configuration `mapstructure:",squash"`
 
 	Auth *auth.Configuration `mapstructure:"auth"`
-	// PushCallbackSecret authenticates the push MFA webhook; unset leaves push without approvals.
+	// PushCallbackSecret authenticates the push MFA webhook.
 	PushCallbackSecret string `mapstructure:"push_callback_secret"`
 }
 

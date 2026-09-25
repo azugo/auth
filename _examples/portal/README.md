@@ -30,12 +30,16 @@ webhook approves it. Copy the `challenge_id` from the server log and call the we
 with the secret from `.env`:
 
 ```sh
-curl -X POST http://localhost:8080/auth/mfa/push/callback \
+curl -X POST http://localhost:8080/auth/mfa/callback/push \
 	-H "Content-Type: application/json" \
 	-H "X-Callback-Secret: insecure-example-push-callback-secret" \
-	--data '{"challenge_id": "<from the log>", "approved": true, "device": "<device from the log>"}'
+	--data '{"challenge_id": "<from the log>", "approved": true, "transaction": "<code from the log>", "device": "<device from the log>"}'
 ```
 
-`device` is optional; when present the matching enrollment is marked as last used.
+An approval must carry the transaction code shown on the `/mfa` page, standing in for the
+user matching it on the device. `device` is optional; when present the matching enrollment is
+marked as last used. Without `PUSH_CALLBACK_SECRET` the push method is not offered at all.
 
-Then press "I have approved it" on the `/mfa` page to finish signing in.
+Then press "I have approved it" on the `/mfa` page to finish signing in. A denied request
+(`"approved": false`) is spent; "Send a new request" issues a fresh challenge under the
+resend cooldown and cap.
