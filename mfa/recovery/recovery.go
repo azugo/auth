@@ -203,6 +203,7 @@ func (m *method) generate() (string, error) {
 		}
 
 		b.WriteByte(alphabet[int(buf[0])%len(alphabet)])
+
 		i++
 	}
 

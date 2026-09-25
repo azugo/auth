@@ -21,9 +21,6 @@ import (
 	"azugo.io/core/paginator"
 )
 
-// detailKeyUsername is the event detail key for username/password login flows.
-const detailKeyUsername = "username"
-
 // CookieDirective describes how to set or clear a cookie.
 //
 // A negative MaxAge deletes the cookie.
@@ -125,7 +122,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 			a.refundThrottle(ctx, keys)
 		}
 
-		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
+		a.emit(ctx, event.Event{Type: event.TypeLoginFailure, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
 
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
@@ -136,7 +133,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		a.refundThrottle(ctx, keys)
 	}
 
-	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{detailKeyUsername: in.Username}})
+	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
 
 	sess := &session.Session{
 		UserID:   info.ID,

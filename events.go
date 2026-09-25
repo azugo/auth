@@ -34,7 +34,7 @@ func (s *logEventSink) Emit(ctx context.Context, e event.Event) {
 	}
 
 	for k, v := range e.Detail {
-		if k == detailKeyUsername {
+		if k == "username" {
 			fields = append(fields, zap.Any("user.name", v))
 
 			continue
