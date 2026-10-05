@@ -26,6 +26,8 @@ var (
 	ErrUserAlreadyExists = contract.ErrUserAlreadyExists
 	// ErrUserNotFound is returned when the user is unknown.
 	ErrUserNotFound = contract.ErrUserNotFound
+	// ErrWeakPassword is returned for a new password the policy does not accept.
+	ErrWeakPassword = contract.ErrWeakPassword
 	// ErrUnsupportedGrantType is returned for grant_type this library does not
 	// support.
 	ErrUnsupportedGrantType = errors.New("unsupported grant type")
@@ -38,6 +40,9 @@ var (
 	// ErrFirstPartyRequired is returned when an access token issued to another client is
 	// presented where only the session's own credential is accepted.
 	ErrFirstPartyRequired = errors.New("first-party credential required")
+	// ErrPasswordChangeRequired is returned when the account must change its password but the
+	// user provider is no PasswordChanger.
+	ErrPasswordChangeRequired = errors.New("password change required")
 )
 
 // ErrorCode is an RFC 6749 / RFC 6750 / RFC 9470 OAuth 2.0 error code.
@@ -167,6 +172,9 @@ func NewOAuthErrorFrom(err error) error {
 	case errors.Is(err, client.ErrNotFound):
 		// Unknown/invalid client or it's parameters.
 		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client", err)
+	case errors.Is(err, contract.ErrWeakPassword):
+		// The policy's own wording is the user-facing reason.
+		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), err)
 	case errors.Is(err, contract.ErrUserAlreadyExists):
 		// Account registration conflict.
 		return newOAuthErrorWrapped(http.StatusConflict, ErrCodeInvalidRequest, "account already exists", err)
@@ -182,6 +190,8 @@ func NewOAuthErrorFrom(err error) error {
 		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeLoginRequired, "login required", err)
 	case errors.Is(err, ErrUnmetAuthenticationRequirements):
 		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeUnmetAuthenticationRequirements, "authentication requirements not met", err)
+	case errors.Is(err, ErrPasswordChangeRequired):
+		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeAccessDenied, "password change required", err)
 	case errors.Is(err, ErrFirstPartyRequired):
 		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeInsufficientScope, "first-party credential required", err)
 	case errors.Is(err, mfa.ErrUnknownMethod):

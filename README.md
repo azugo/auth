@@ -13,6 +13,9 @@ v4.local tokens.
 * PASETO v4.local access tokens, session cookies and API keys with zero-downtime secret rotation.
 * Pluggable user provider, session store, client registry and JTI allowlist.
 * Cache-backed session and JTI stores out of the box.
+* Self-service account management: registration per client policy, forced and self-service
+  password change, a password policy, and password reset over pluggable methods (mailed link,
+  texted code, out-of-band approval, or your own), each offered only when the account can use it.
 
 ## Usage
 
@@ -50,13 +53,16 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 * `AUTH_SAME_SITE` - Session cookie `SameSite` policy: `strict`, `lax` or `none`. Default `strict`.
 * `AUTH_COOKIE_NAME` - Session cookie name. Default `session`.
 * `AUTH_COOKIE_PATH` - Session cookie path. Default: the auth mount prefix.
-* `AUTH_LOGOUT_INVALIDATES_COOKIE` - Make logout authoritative server-side. Default `true`.
+* `AUTH_LOGOUT_KEEPS_COOKIE` - Make logout clear the browser cookie only, leaving the session valid
+  for a cookie shared across apps. Default `false`: logout revokes the session server-side.
 * `AUTH_LOGOUT_POLICY` - What `GET /logout` must carry before it ends a session (OpenID Connect
   RP-Initiated Logout). Set one whenever `AUTH_SAME_SITE` is relaxed from `strict`, since a `lax`
   cookie rides a cross-site navigation and a bare link would otherwise log the user out.
   * unset - the session cookie alone is enough. Default.
   * `confirm` - an `id_token_hint` this server issued for the session, or the user confirming by
-    posting back. Supply the confirmation page with `routes.LogoutConfirmation(handler)`.
+    posting back from a page of this origin (checked via the browser's `Sec-Fetch-Site` or
+    `Origin` header, so a cross-site form cannot confirm even with `none`). Supply the
+    confirmation page with `routes.LogoutConfirmation(handler)`.
   * `id_token_hint` - the hint is required and there is no confirmation path, so a relying party
     must identify the session it is ending.
 * `AUTH_ACCESS_TOKEN_TTL` - Access token lifetime. Default `20m`.
@@ -64,6 +70,10 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 * `AUTH_CODE_TTL` - Authorization-code lifetime. Default `60s`.
 * `AUTH_EXTERNAL_STATE_TTL` - Time a user has to complete an external IdP round-trip, from redirect
   to callback. Default `15m`.
+* `AUTH_PASSWORD_RESET_TTL` - Lifetime of a password-reset token. Default `1h`.
+* `AUTH_PASSWORD_MIN_LENGTH` / `AUTH_PASSWORD_MAX_LENGTH` - Length bounds of the default password
+  policy, which also refuses a password containing the account's username, email or name.
+  Defaults `8` / `128`. Replace the policy with the `auth.PasswordPolicy(...)` option.
 * `AUTH_CLOCK_SKEW` - Leeway allowed on external `id_token` time claims, inherited by every
   provider that does not set `clock_skew` itself. Default `1m`; keep it under `2m`, and use `0`
   to validate strictly.
@@ -78,6 +88,8 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 * `AUTH_THROTTLE_MFA_MAX_RESENDS` - Maximum MFA code resends. Default `3`.
 * `AUTH_THROTTLE_EXTERNAL_START_MAX` - External IdP round-trips one caller may start per
   `AUTH_THROTTLE_WINDOW`, bounding unauthenticated growth of the round-trip state cache. Default `300`; `0` disables the cap.
+* `AUTH_THROTTLE_REGISTRATION_MAX` - Accounts one caller may register per `AUTH_THROTTLE_WINDOW`,
+  created or rejected alike. Default `20`; `0` disables the cap.
 * `AUTH_KEYS_PRIMARY` (or `AUTH_KEYS_PRIMARY_FILE`) - PEM-encoded primary signing key (RSA or
   ECDSA private key). Enables JWT/JWKS signing; unset means introspect-only mode.
 * `AUTH_KEYS_PRIMARY_ALGORITHM` - Primary key algorithm: `RS256`, `RS384`, `RS512`, `ES256`,

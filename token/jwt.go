@@ -79,8 +79,9 @@ type AccessTokenClaims struct {
 	IssuedAt  int64
 	ExpiresAt int64
 	// ACR and AMR are the session's authentication context (RFC 9068 §2.2.1).
-	ACR string
-	AMR []string
+	ACR       string
+	AMR       []string
+	GrantType string
 }
 
 // SignAccessToken mints a signed JWT access token using signingKey.
@@ -101,6 +102,10 @@ func SignAccessToken(signingKey SigningKey, claims AccessTokenClaims) (string, e
 
 	if len(claims.AMR) > 0 {
 		m["amr"] = claims.AMR
+	}
+
+	if claims.GrantType != "" {
+		m["gty"] = claims.GrantType
 	}
 
 	return sign(signingKey, accessTokenType, m)
@@ -144,6 +149,7 @@ func VerifyAccessToken(set *KeySet, tok string) (AccessTokenClaims, error) {
 	out.ClientID, _ = claims["aud"].(string)
 	out.Scope, _ = claims["scope"].(string)
 	out.ACR, _ = claims["acr"].(string)
+	out.GrantType, _ = claims["gty"].(string)
 
 	if amr, ok := claims["amr"].([]any); ok {
 		for _, v := range amr {

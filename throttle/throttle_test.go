@@ -32,7 +32,7 @@ func fail(t *testing.T, th Throttle, key string) {
 }
 
 func TestAllowClaimsAcrossConcurrentRequests(t *testing.T) {
-	th, err := New(newCache(t), contract.ThrottleConfig{
+	th, err := New(newCache(t), &contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 5, Window: time.Minute, LockoutTTL: time.Minute,
 	})
 	qt.Assert(t, qt.IsNil(err))
@@ -65,7 +65,7 @@ func TestAllowClaimsAcrossConcurrentRequests(t *testing.T) {
 }
 
 func TestRefundReturnsTheClaim(t *testing.T) {
-	th, err := New(newCache(t), contract.ThrottleConfig{
+	th, err := New(newCache(t), &contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 1, Window: time.Minute, LockoutTTL: time.Minute,
 	})
 	qt.Assert(t, qt.IsNil(err))
@@ -90,7 +90,7 @@ func TestRefundReturnsTheClaim(t *testing.T) {
 }
 
 func TestDisabledPermitsEverything(t *testing.T) {
-	th, err := New(newCache(t), contract.ThrottleConfig{})
+	th, err := New(newCache(t), &contract.ThrottleConfig{})
 	qt.Assert(t, qt.IsNil(err))
 
 	for range 10 {
@@ -105,7 +105,7 @@ func TestDisabledPermitsEverything(t *testing.T) {
 }
 
 func TestWindowBlocksAfterMaxAttempts(t *testing.T) {
-	th, err := New(newCache(t), contract.ThrottleConfig{
+	th, err := New(newCache(t), &contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute,
 	})
 	qt.Assert(t, qt.IsNil(err))
@@ -132,7 +132,7 @@ func TestWindowBlocksAfterMaxAttempts(t *testing.T) {
 }
 
 func TestLockoutOutlivesTheWindow(t *testing.T) {
-	th, err := New(newCache(t), contract.ThrottleConfig{
+	th, err := New(newCache(t), &contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 2, Window: 50 * time.Millisecond, LockoutTTL: time.Hour,
 	})
 	qt.Assert(t, qt.IsNil(err))
@@ -169,7 +169,7 @@ func TestLockoutBlocksTheWindowBoundaryBurst(t *testing.T) {
 	// A lockout equal to the window is not redundant: the window blocks only for whatever
 	// remains of it, so a key spent near the boundary would otherwise get a fresh budget at
 	// once. The lockout blocks for a fixed period measured from the trip instead.
-	th, err := New(newCache(t), contract.ThrottleConfig{
+	th, err := New(newCache(t), &contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 2, Window: 200 * time.Millisecond, LockoutTTL: 200 * time.Millisecond,
 	})
 	qt.Assert(t, qt.IsNil(err))
@@ -197,7 +197,7 @@ func TestLockoutBlocksTheWindowBoundaryBurst(t *testing.T) {
 }
 
 func TestWithoutLockoutOnlyTheWindowBlocks(t *testing.T) {
-	th, err := New(newCache(t), contract.ThrottleConfig{
+	th, err := New(newCache(t), &contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 2, Window: 50 * time.Millisecond,
 	})
 	qt.Assert(t, qt.IsNil(err))
@@ -216,7 +216,7 @@ func TestWithoutLockoutOnlyTheWindowBlocks(t *testing.T) {
 }
 
 func TestLockoutReportsRemainingTime(t *testing.T) {
-	th, err := New(newCache(t), contract.ThrottleConfig{
+	th, err := New(newCache(t), &contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 1, Window: time.Minute, LockoutTTL: time.Minute,
 	})
 	qt.Assert(t, qt.IsNil(err))
@@ -236,4 +236,35 @@ func TestLockoutReportsRemainingTime(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsFalse(ok))
 	qt.Check(t, qt.IsTrue(second < first), qt.Commentf("first %s, second %s", first, second))
+}
+
+func TestLimitsAreReadLive(t *testing.T) {
+	cfg := &contract.ThrottleConfig{Enabled: true, MaxAttempts: 1, Window: time.Minute}
+
+	th, err := New(newCache(t), cfg)
+	qt.Assert(t, qt.IsNil(err))
+
+	ctx := context.Background()
+
+	ok, _, err := th.Allow(ctx, "k")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(ok))
+
+	ok, _, err = th.Allow(ctx, "k")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsFalse(ok))
+
+	// Raising the limit takes effect on the next call; disabling permits everything.
+	cfg.MaxAttempts = 3
+
+	ok, _, err = th.Allow(ctx, "k")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(ok))
+
+	cfg.MaxAttempts = 1
+	cfg.Enabled = false
+
+	ok, _, err = th.Allow(ctx, "k")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(ok))
 }

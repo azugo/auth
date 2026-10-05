@@ -26,20 +26,11 @@ type Throttle interface {
 	Reset(ctx context.Context, key string) error
 }
 
-// New creates the default Throttle from configuration.
-func New(c *cache.Cache, cfg contract.ThrottleConfig) (Throttle, error) {
-	if !cfg.Enabled {
-		return Noop(), nil
-	}
-
-	t, err := NewLimit(c, "auth:throttle", cfg.MaxAttempts, cfg.Window)
-	if err != nil || cfg.LockoutTTL <= 0 {
-		return t, err
-	}
-
-	ct, ok := t.(*counterThrottle)
-	if !ok {
-		return t, nil
+// New creates the default Throttle over cfg, read live on every call.
+func New(c *cache.Cache, cfg *contract.ThrottleConfig) (Throttle, error) {
+	attempts, err := cache.CreateCounter(c, "auth:throttle")
+	if err != nil {
+		return nil, err
 	}
 
 	locks, err := cache.Create[bool](c, "auth:lockout")
@@ -47,13 +38,16 @@ func New(c *cache.Cache, cfg contract.ThrottleConfig) (Throttle, error) {
 		return nil, err
 	}
 
-	ct.locks = locks
-	ct.lockout = cfg.LockoutTTL
+	return &counterThrottle{attempts: attempts, locks: locks, limits: func() (int64, time.Duration, time.Duration) {
+		if !cfg.Enabled {
+			return 0, 0, 0
+		}
 
-	return ct, nil
+		return int64(cfg.MaxAttempts), cfg.Window, cfg.LockoutTTL
+	}}, nil
 }
 
-// NewLimit creates a Throttle with its own cache namespace and limit.
+// NewLimit creates a Throttle with its own cache namespace and a fixed limit.
 func NewLimit(c *cache.Cache, name string, limit int, window time.Duration) (Throttle, error) {
 	if limit <= 0 {
 		return Noop(), nil
@@ -64,22 +58,26 @@ func NewLimit(c *cache.Cache, name string, limit int, window time.Duration) (Thr
 		return nil, err
 	}
 
-	return &counterThrottle{attempts: attempts, limit: int64(limit), window: window}, nil
+	return &counterThrottle{attempts: attempts, limits: func() (int64, time.Duration, time.Duration) { return int64(limit), window, 0 }}, nil
 }
 
 // counterThrottle counts claimed attempts per key in a fixed window that starts with the
 // first claim.
 type counterThrottle struct {
 	attempts cache.Counter
-	limit    int64
-	window   time.Duration
 	locks    cache.Instance[bool]
-	lockout  time.Duration
+	// limits reports the current limit, window and lockout; a zero limit permits everything.
+	limits func() (limit int64, window, lockout time.Duration)
 }
 
 // Allow claims an attempt for key.
 func (t *counterThrottle) Allow(ctx context.Context, key string) (bool, time.Duration, error) {
-	if t.locks != nil {
+	limit, window, lockout := t.limits()
+	if limit <= 0 {
+		return true, 0, nil
+	}
+
+	if t.locks != nil && lockout > 0 {
 		// The entry's own expiry ends the lockout, so its remaining lifetime is the wait.
 		remaining, locked, err := t.locks.TTL(ctx, key)
 		if err != nil {
@@ -91,12 +89,12 @@ func (t *counterThrottle) Allow(ctx context.Context, key string) (bool, time.Dur
 		}
 	}
 
-	count, err := t.attempts.Increment(ctx, key, 1, cache.TTL[int64](t.window))
+	count, err := t.attempts.Increment(ctx, key, 1, cache.TTL[int64](window))
 	if err != nil {
 		return false, 0, err
 	}
 
-	if count <= t.limit {
+	if count <= limit {
 		return true, 0, nil
 	}
 
@@ -110,7 +108,7 @@ func (t *counterThrottle) Allow(ctx context.Context, key string) (bool, time.Dur
 	}
 
 	if remaining <= 0 {
-		remaining = t.window
+		remaining = window
 	}
 
 	return false, remaining, nil
@@ -118,16 +116,17 @@ func (t *counterThrottle) Allow(ctx context.Context, key string) (bool, time.Dur
 
 // Fail keeps the claimed attempt, starting a lockout when it exhausted the window.
 func (t *counterThrottle) Fail(ctx context.Context, key string) error {
-	if t.locks == nil {
+	limit, _, lockout := t.limits()
+	if t.locks == nil || limit <= 0 || lockout <= 0 {
 		return nil
 	}
 
 	count, err := t.attempts.Get(ctx, key)
-	if err != nil || count < t.limit {
+	if err != nil || count < limit {
 		return err
 	}
 
-	if err := t.locks.Set(ctx, key, true, cache.TTL[bool](t.lockout)); err != nil {
+	if err := t.locks.Set(ctx, key, true, cache.TTL[bool](lockout)); err != nil {
 		return err
 	}
 

@@ -107,7 +107,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 	// a single source can be brute-forced.
 	keys := throttleKeys("", in.IP)
 	if in.Username != "" {
-		keys = throttleKeys("pwd:"+in.Username, in.IP)
+		keys = throttleKeys(throttleIdentity("pwd:", in.Username), in.IP)
 	}
 
 	if err := a.checkThrottle(ctx, keys, cl.ID, in.IP); err != nil {
@@ -214,7 +214,7 @@ func (a *Auth) Logout(ctx context.Context, in LogoutRequest) (LogoutResult, erro
 		SameSite: a.Cookie.SameSite(),
 	}
 
-	if !a.config.LogoutInvalidatesCookie || in.Token == "" {
+	if a.config.LogoutKeepsCookie || in.Token == "" {
 		return LogoutResult{ClearCookie: clearCookie}, nil
 	}
 
@@ -443,7 +443,7 @@ func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *
 
 	switch cl.ResponseMode {
 	case client.ResponseModeJSON:
-		at, _, err := a.issueAccessToken(ctx, sess, cl, sess.Scope, baseURL, mountPath)
+		at, _, err := a.issueAccessToken(ctx, sess, cl, sess.Scope, "", baseURL, mountPath)
 		if err != nil {
 			return LoginResult{}, err
 		}

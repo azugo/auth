@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"azugo.io/auth/client"
@@ -171,6 +172,11 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 	optional := cl.MFAPolicy == client.MFAPolicyOptional
 	satisfied := sess.MFAMethod != "" || (target != nil && intersects(sess.AMR, target.MFASatisfiedByAMR))
 
+	// A requirement nothing can satisfy fails closed rather than silently.
+	if a.mfaStore == nil && required && !satisfied {
+		return pendingState{}, ErrUnmetAuthenticationRequirements
+	}
+
 	if a.mfaStore != nil && !satisfied && (required || optional) {
 		permitted := filterMethods(names, cl, target)
 
@@ -202,6 +208,21 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 
 	if target != nil && !levelSatisfied(target, sess) {
 		return pendingState{}, ErrUnmetAuthenticationRequirements
+	}
+
+	// A forced password change is the last step, so only a login that passed every factor
+	// may replace the credential
+	info, err := a.users.GetUser(ctx, sess.UserID)
+	if err != nil {
+		return pendingState{}, err
+	}
+
+	if info.RequiresPasswordChange {
+		if _, ok := a.users.(PasswordChanger); !ok {
+			return pendingState{}, ErrPasswordChangeRequired
+		}
+
+		sess.Status = session.StatusPendingPasswordChange
 	}
 
 	return st, nil
@@ -285,20 +306,21 @@ func (a *Auth) pendingLoginResult(ctx context.Context, sess *session.Session, cl
 	return res, nil
 }
 
-// limitChallenge claims the right to issue another challenge for method. Re-issuing one is a
-// resend whichever way it is reached, so it is capped and rate limited per session, and every
-// issue is bounded per user across sessions so repeated logins cannot flood a device.
-func (a *Auth) limitChallenge(ctx context.Context, sess *session.Session, cl *client.Client, method string) (string, error) {
-	issued, err := a.challenges.Get(ctx, sess.ID+":"+method)
+// limitChallenge claims the right to issue another challenge for method within the pending
+// flow id (a session or a reset request). Re-issuing one is a resend whichever way it is
+// reached, so it is capped and rate limited per flow, and every issue is bounded by the
+// per-user budget key across flows so repeated attempts cannot flood a device.
+func (a *Auth) limitChallenge(ctx context.Context, id, budget string, expiresAt time.Time, clientID, method string) (string, error) {
+	issued, err := a.challenges.Get(ctx, id+":"+method)
 	if err != nil {
 		return "", NewOAuthErrorFrom(err)
 	}
 
 	if issued > int64(a.config.Throttle.MFAMaxResends) {
-		return "", NewThrottledError(time.Until(sess.ExpiresAt))
+		return "", NewThrottledError(time.Until(expiresAt))
 	}
 
-	if err := a.checkThrottle(ctx, []string{"mfa-open:" + sess.UserID}, cl.ID, ""); err != nil {
+	if err := a.checkThrottle(ctx, []string{budget}, clientID, ""); err != nil {
 		return "", err
 	}
 
@@ -309,17 +331,17 @@ func (a *Auth) limitChallenge(ctx context.Context, sess *session.Session, cl *cl
 
 	// Claiming is atomic and the marker's own lifetime is the cooldown, so its presence is
 	// the answer and concurrent callers cannot both pass.
-	key := "cooldown:" + sess.ID + ":" + method
+	key := "cooldown:" + id + ":" + method
 
 	fresh, err := a.challenges.Add(ctx, key, 1, cache.TTL[int64](cooldown))
 	if err != nil {
-		a.refundThrottle(ctx, []string{"mfa-open:" + sess.UserID})
+		a.refundThrottle(ctx, []string{budget})
 
 		return "", NewOAuthErrorFrom(err)
 	}
 
 	if !fresh {
-		a.refundThrottle(ctx, []string{"mfa-open:" + sess.UserID})
+		a.refundThrottle(ctx, []string{budget})
 
 		remaining, _, err := a.challenges.TTL(ctx, key)
 		if err != nil {
@@ -365,7 +387,7 @@ func (a *Auth) selectMFA(ctx context.Context, sess *session.Session, cl *client.
 	}
 
 	if force || method != st.Method {
-		cooldownKey, err := a.limitChallenge(ctx, sess, cl, method)
+		cooldownKey, err := a.limitChallenge(ctx, sess.ID, "mfa-open:"+sess.UserID, sess.ExpiresAt, cl.ID, method)
 		if err != nil {
 			return err
 		}
@@ -670,6 +692,10 @@ func (a *Auth) resetThrottle(ctx context.Context, keys []string) {
 	for _, key := range keys {
 		_ = a.throttle.Reset(ctx, key)
 	}
+}
+
+func throttleIdentity(prefix, identifier string) string {
+	return prefix + strings.ToLower(strings.TrimSpace(identifier))
 }
 
 // throttleKeys combines a stable identity key with the caller's IP.

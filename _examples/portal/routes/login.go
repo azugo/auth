@@ -62,8 +62,7 @@ func (r *router) login(ctx *azugo.Context) {
 		return
 	}
 
-	r.Auth().WriteCookie(ctx, res.Cookie)
-	ctx.Redirect(res.ReturnTo)
+	r.finishStep(ctx, res, req.ReturnTo)
 }
 
 // pageURL appends return_to to a local page path when set.

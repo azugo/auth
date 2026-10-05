@@ -126,9 +126,8 @@ func TestDiscoveryDerivesIssuerFromBindMountPrefix(t *testing.T) {
 	t.Cleanup(app.Stop)
 
 	cfg := &auth.Configuration{
-		Secret:                  "0123456789abcdef0123456789abcdef",
-		SameSite:                "strict",
-		LogoutInvalidatesCookie: true,
+		Secret:   "0123456789abcdef0123456789abcdef",
+		SameSite: "strict",
 		// Issuer/BaseURL deliberately unset - the issuer must come from Bind's own prefix.
 	}
 
@@ -159,9 +158,8 @@ func TestDiscoveryManualMountUsesMountPrefixOption(t *testing.T) {
 	t.Cleanup(app.Stop)
 
 	cfg := &auth.Configuration{
-		Secret:                  "0123456789abcdef0123456789abcdef",
-		SameSite:                "strict",
-		LogoutInvalidatesCookie: true,
+		Secret:   "0123456789abcdef0123456789abcdef",
+		SameSite: "strict",
 		// Issuer/BaseURL deliberately unset - MountPrefix must supply the prefix instead.
 	}
 
@@ -221,9 +219,8 @@ func TestDiscoveryRelativeEndpointOverrideTracksPerRequestBaseURL(t *testing.T) 
 	t.Cleanup(app.Stop)
 
 	cfg := &auth.Configuration{
-		Secret:                  "0123456789abcdef0123456789abcdef",
-		SameSite:                "strict",
-		LogoutInvalidatesCookie: true,
+		Secret:   "0123456789abcdef0123456789abcdef",
+		SameSite: "strict",
 		// Issuer/BaseURL deliberately unset - the issuer, and so the relative override, must
 		// track whatever base URL each request resolves to.
 	}

@@ -83,6 +83,22 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 		return AuthorizeResult{}, NewOAuthErrorFrom(ErrLoginRequired)
 	}
 
+	// The session must meet this client's own policies
+	if !cl.AuthMethodAllowed(primaryMethod(sess)) {
+		return authorizeErrorRedirect(in, ErrCodeUnmetAuthenticationRequirements, "session was not established with an authentication method the client allows"), nil
+	}
+
+	if (cl.MFAPolicy == client.MFAPolicyRequired || cl.MFAPolicy == client.MFAPolicyOptional) && !a.mfaVerified(sess) {
+		_, available, err := a.mfaMethodSets(ctx, sess.UserID, cl, nil)
+		if err != nil {
+			return AuthorizeResult{}, NewOAuthErrorFrom(err)
+		}
+
+		if cl.MFAPolicy == client.MFAPolicyRequired || len(available) > 0 {
+			return authorizeErrorRedirect(in, ErrCodeUnmetAuthenticationRequirements, "session did not pass the second factor the client requires"), nil
+		}
+	}
+
 	// The session is already established, so a level is reachable only if it is satisfied.
 	acr := parseACRRequest(in.ACRValues, in.Claims)
 	if _, err := a.resolveTargetACR(cl, acr, func(lvl *contract.ACRLevelConfig) bool { return levelSatisfied(lvl, sess) }); err != nil {
@@ -216,7 +232,7 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "session does not meet the required authentication context")
 	}
 
-	at, atID, err := a.issueAccessToken(ctx, sess, cl, rec.Scope, in.BaseURL, in.MountPath)
+	at, atID, err := a.issueAccessToken(ctx, sess, cl, rec.Scope, client.GrantTypeAuthorizationCode, in.BaseURL, in.MountPath)
 	if err != nil {
 		return TokenResult{}, err
 	}
@@ -284,12 +300,12 @@ func (a *Auth) ClientCredentialsGrant(ctx context.Context, in ClientCredentialsG
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidScope, "requested scope exceeds the registered scope")
 	}
 
-	at, _, err := a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: cl.ID, Scope: scope}, in.BaseURL, in.MountPath)
+	at, _, err := a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: cl.ID, Scope: scope, GrantType: client.GrantTypeClientCredentials}, in.BaseURL, in.MountPath)
 	if err != nil {
 		return TokenResult{}, err
 	}
 
-	a.emit(ctx, event.Event{Type: event.TypeTokenIssued, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"grant_type": "client_credentials"}})
+	a.emit(ctx, event.Event{Type: event.TypeTokenIssued, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"grant_type": client.GrantTypeClientCredentials}})
 
 	return TokenResult{
 		AccessToken: at,
@@ -300,13 +316,13 @@ func (a *Auth) ClientCredentialsGrant(ctx context.Context, in ClientCredentialsG
 }
 
 // issueAccessToken mints the access token for session, returning the token and its JTI.
-func (a *Auth) issueAccessToken(ctx context.Context, sess *session.Session, cl *client.Client, scope, baseURL, mountPath string) (string, string, error) {
+func (a *Auth) issueAccessToken(ctx context.Context, sess *session.Session, cl *client.Client, scope, grantType, baseURL, mountPath string) (string, string, error) {
 	if cl.AccessTokenType == client.AccessTokenTypeJWT {
 		if a.keys == nil {
 			return "", "", NewOAuthError(http.StatusInternalServerError, ErrCodeServerError, "no key provider configured")
 		}
 
-		return a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: sess.UserID, Scope: scope, ACR: sess.ACR, AMR: sess.AMR}, baseURL, mountPath)
+		return a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: sess.UserID, Scope: scope, ACR: sess.ACR, AMR: sess.AMR, GrantType: grantType}, baseURL, mountPath)
 	}
 
 	now := time.Now()

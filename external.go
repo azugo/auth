@@ -630,7 +630,7 @@ func (a *Auth) BrowserLogout(ctx context.Context, in BrowserLogoutRequest) (Brow
 		return BrowserLogoutResult{}, NewOAuthErrorFrom(err)
 	}
 
-	if a.config.LogoutInvalidatesCookie && live {
+	if !a.config.LogoutKeepsCookie && live {
 		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
 			if err := a.sessions.Revoke(ctx, sess.ID); err != nil && !errors.Is(err, session.ErrNotFound) {
 				return err

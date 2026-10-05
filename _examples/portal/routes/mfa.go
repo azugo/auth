@@ -54,7 +54,7 @@ func (r *router) mfaPage(ctx *azugo.Context) {
 	}
 
 	if res.Status == session.StatusActive {
-		r.finishStep(ctx, res)
+		r.finishStep(ctx, res, returnTo)
 
 		return
 	}
@@ -86,8 +86,15 @@ func (r *router) mfaResend(ctx *azugo.Context) {
 }
 
 // finishStep applies a step result.
-func (r *router) finishStep(ctx *azugo.Context, res auth.LoginResult) {
+func (r *router) finishStep(ctx *azugo.Context, res auth.LoginResult, returnTo string) {
 	r.Auth().WriteCookie(ctx, res.Cookie)
+
+	if res.Status == session.StatusPendingPasswordChange {
+		ctx.Redirect(pageURL("/password", returnTo))
+
+		return
+	}
+
 	ctx.Redirect(res.ReturnTo)
 }
 
@@ -115,7 +122,7 @@ func (r *router) mfaVerify(ctx *azugo.Context) {
 		return
 	}
 
-	r.finishStep(ctx, res)
+	r.finishStep(ctx, res, returnTo)
 }
 
 // mfaBegin switches the pending login to another enrolled method.
@@ -142,5 +149,5 @@ func (r *router) mfaBegin(ctx *azugo.Context) {
 		return
 	}
 
-	r.finishStep(ctx, res)
+	r.finishStep(ctx, res, returnTo)
 }

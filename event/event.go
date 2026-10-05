@@ -20,6 +20,12 @@ const (
 	TypeMFAFailure       = "mfa.failure"
 	TypeMFAEnrolled      = "mfa.enrolled"
 	TypeMFARevoked       = "mfa.revoked"
+	TypeUserRegistered   = "user.registered"
+	TypePasswordChanged  = "password.changed"
+	// TypePasswordResetRequested is emitted for every reset request, found or not.
+	TypePasswordResetRequested = "password.reset_requested"
+	TypePasswordResetFailure   = "password.reset_failure"
+	TypePasswordReset          = "password.reset"
 )
 
 // Event is one security-relevant occurrence for audit/SIEM.

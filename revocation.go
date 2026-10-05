@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"azugo.io/auth/client"
 	"azugo.io/auth/event"
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
@@ -244,7 +245,7 @@ func (a *Auth) ValidateJWTAccessToken(ctx context.Context, tok string) (UserInfo
 
 	info := UserInfo{ID: claims.Subject}
 
-	if claims.Subject != claims.ClientID {
+	if claims.GrantType != client.GrantTypeClientCredentials {
 		if info, err = a.users.GetUser(ctx, claims.Subject); err != nil {
 			return UserInfo{}, NewOAuthErrorFrom(err)
 		}

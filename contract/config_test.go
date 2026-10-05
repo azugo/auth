@@ -21,9 +21,9 @@ func TestBindDefaults(t *testing.T) {
 	(&Configuration{}).Bind("auth", v)
 
 	qt.Check(t, qt.Equals(v.GetString("auth.cookie_name"), "session"))
-	qt.Check(t, qt.IsNil(v.Get("auth.secure")))    // no default: unset = runtime resolution
-	qt.Check(t, qt.IsNil(v.Get("auth.same_site"))) // no default: unset = runtime resolution
-	qt.Check(t, qt.IsTrue(v.GetBool("auth.logout_invalidates_cookie")))
+	qt.Check(t, qt.IsNil(v.Get("auth.secure")))                    // no default: unset = runtime resolution
+	qt.Check(t, qt.IsNil(v.Get("auth.same_site")))                 // no default: unset = runtime resolution
+	qt.Check(t, qt.IsFalse(v.GetBool("auth.logout_keeps_cookie"))) // zero value = server-side logout
 	qt.Check(t, qt.Equals(v.GetDuration("auth.access_token_ttl"), 20*time.Minute))
 	qt.Check(t, qt.Equals(v.GetDuration("auth.session_ttl"), 8*time.Hour))
 	qt.Check(t, qt.Equals(v.GetDuration("auth.code_ttl"), 60*time.Second))

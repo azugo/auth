@@ -16,6 +16,8 @@ type Enrollment struct {
 templ Security(methods []auth.MFAMethodInfo, hasPrimary bool, enrollment *Enrollment, errorMessage string) {
 	@layout("Security") {
 		<p><a href="/">Back to home</a></p>
+		<h2>Password</h2>
+		<p><a href="/password?return_to=/security">Change password</a></p>
 		<h2>Two-factor authentication</h2>
 		if enrollment == nil {
 			@fieldError(errorMessage)

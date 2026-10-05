@@ -101,7 +101,6 @@ func newExternalTestAuth(t *testing.T, providers []contract.ExternalProviderConf
 	t.Helper()
 
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.Providers = providers
 
 	if users == nil {
@@ -715,7 +714,6 @@ func TestBrowserLogoutConfirmation(t *testing.T) {
 	priv, pub := genTestRSAKeyPair(t)
 
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.LogoutPolicy = LogoutPolicyConfirm
 	cfg.Keys = keySetConfig(priv, pub)
 
@@ -805,7 +803,6 @@ func TestBrowserLogoutRequiresIDTokenHint(t *testing.T) {
 	priv, pub := genTestRSAKeyPair(t)
 
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.LogoutPolicy = LogoutPolicyIDTokenHint
 	cfg.Keys = keySetConfig(priv, pub)
 

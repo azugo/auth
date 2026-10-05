@@ -11,6 +11,7 @@ import (
 	"azugo.io/auth/code"
 	"azugo.io/auth/contract"
 	"azugo.io/auth/event"
+	"azugo.io/auth/mfa"
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
@@ -34,8 +35,6 @@ func newGrantsTestAuth(t *testing.T, cfg *Configuration, opts []Option, cls ...*
 	if cfg == nil {
 		cfg = validConfig()
 	}
-
-	cfg.LogoutInvalidatesCookie = true
 
 	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cls...), opts...)
 	qt.Assert(t, qt.IsNil(err))
@@ -155,6 +154,36 @@ func decodeIDToken(t *testing.T, idToken, pubPEM string) jwt.MapClaims {
 	qt.Assert(t, qt.IsNil(err))
 
 	return claims
+}
+
+func TestAuthorizeEnforcesClientPolicies(t *testing.T) {
+	store := mfa.NewMemoryStore()
+
+	strict := codeClient()
+	strict.MFAPolicy = client.MFAPolicyRequired
+
+	picky := codeClient()
+	picky.ID = "picky"
+	picky.AllowedAuthMethods = []string{"azure"}
+
+	a := newGrantsTestAuth(t, nil, []Option{MFAStore(store)}, portalClient(), strict, picky)
+	cookie := login(t, a)
+
+	// A password-only session from a lax client cannot be reused by an MFA-required client.
+	res, err := a.Authorize(context.Background(), AuthorizeRequest{
+		ResponseType: "code", ClientID: "web", RedirectURI: "https://web.example/callback", State: "xyz",
+		CodeChallenge: pkceChallenge, CodeChallengeMethod: "S256", SessionToken: cookie,
+	})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=unmet_authentication_requirements"))
+
+	// Nor by a client that does not allow the method the session was established with.
+	res, err = a.Authorize(context.Background(), AuthorizeRequest{
+		ResponseType: "code", ClientID: "picky", RedirectURI: "https://web.example/callback", State: "xyz",
+		CodeChallenge: pkceChallenge, CodeChallengeMethod: "S256", SessionToken: cookie,
+	})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=unmet_authentication_requirements"))
 }
 
 func TestAuthorizeRejectsUnregisteredRedirectURI(t *testing.T) {
@@ -592,6 +621,58 @@ func TestClientCredentialsGrantIssuesJWT(t *testing.T) {
 	qt.Check(t, qt.IsTrue(claims.TokenID != ""))
 }
 
+func TestClientCredentialsTokenIsRecognisedByGrantClaim(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+	cfg := validConfig()
+	cfg.Keys = keySetConfig(priv, pub)
+
+	// The client deliberately shares its ID with alice's user ID.
+	svc := serviceClient(t, "s3cret")
+	svc.ID = "u1"
+
+	web := codeClient()
+	web.AccessTokenType = client.AccessTokenTypeJWT
+
+	a := newGrantsTestAuth(t, cfg, nil, portalClient(), web, svc)
+
+	res, err := a.ClientCredentialsGrant(context.Background(), ClientCredentialsGrantRequest{
+		Credentials: ClientCredentials{ClientID: "u1", Secret: "s3cret"}, Scope: "items:read", BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := a.Keys().KeySet(context.Background())
+	qt.Assert(t, qt.IsNil(err))
+
+	claims, err := token.VerifyAccessToken(set, res.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(claims.GrantType, client.GrantTypeClientCredentials))
+
+	// The client token is the client, not the user that happens to share the ID.
+	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.ID, "u1"))
+	qt.Check(t, qt.Equals(info.Name, ""))
+
+	// A user token with the same sub and aud is still the user, looked up fresh.
+	cookie := login(t, a)
+	codeVal := authorizeCode(t, a, cookie, "profile", "")
+
+	tokens, err := a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
+		Credentials: ClientCredentials{ClientID: "web"}, Code: codeVal, RedirectURI: "https://web.example/callback",
+		CodeVerifier: pkceVerifier, BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	claims, err = token.VerifyAccessToken(set, tokens.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(claims.GrantType, client.GrantTypeAuthorizationCode))
+
+	info, err = a.ValidateJWTAccessToken(context.Background(), tokens.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.ID, "u1"))
+	qt.Check(t, qt.Equals(info.Name, "Alice"))
+}
+
 func TestClientCredentialsGrantRejectsWrongSecret(t *testing.T) {
 	priv, pub := genTestRSAKeyPair(t)
 	cfg := validConfig()
@@ -942,7 +1023,6 @@ func TestIntrospectRejectsPublicClient(t *testing.T) {
 
 func TestLoginThrottleLocksOutAfterMaxAttempts(t *testing.T) {
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
 
 	a := newGrantsTestAuth(t, cfg, nil, portalClient())
@@ -1015,7 +1095,6 @@ func TestDefaultEventSinkLogsViaAppLogger(t *testing.T) {
 	observed := test.ObservedLogs(app)
 
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 
 	users := fakeUsers{
 		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "profile"}},

@@ -69,10 +69,9 @@ func (extUsers) FindOrCreateUser(_ context.Context, _ string, info auth.UserInfo
 
 func externalTestConfig() *auth.Configuration {
 	return &auth.Configuration{
-		Secret:                  "0123456789abcdef0123456789abcdef",
-		SameSite:                "strict",
-		Issuer:                  "https://issuer.example/auth",
-		LogoutInvalidatesCookie: true,
+		Secret:   "0123456789abcdef0123456789abcdef",
+		SameSite: "strict",
+		Issuer:   "https://issuer.example/auth",
 		Providers: []auth.ExternalProviderConfig{
 			{Name: "corp", Driver: "fake", ClientID: "app-client", RedirectURL: "https://issuer.example/auth/external/corp/callback"},
 		},

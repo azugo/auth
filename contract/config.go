@@ -18,7 +18,7 @@ const (
 	// LogoutPolicyCookie ends the session on the presented cookie alone.
 	LogoutPolicyCookie LogoutPolicy = ""
 	// LogoutPolicyConfirm requires an id_token_hint this server issued for the session, or the
-	// user confirming, which a cross-site navigation cannot do.
+	// user confirming from a page of this origin, which a cross-site form cannot do.
 	LogoutPolicyConfirm LogoutPolicy = "confirm"
 	// LogoutPolicyIDTokenHint requires an id_token_hint and offers no confirmation path, so a
 	// relying party must identify the session it is ending.
@@ -36,9 +36,9 @@ type Configuration struct {
 	SameSite   string `mapstructure:"same_site" validate:"omitempty,oneof=strict lax none"`
 	CookieName string `mapstructure:"cookie_name"` // default: "session"
 	CookiePath string `mapstructure:"cookie_path"` // default: base path + auth mount prefix (see CookieCtx.PathFor)
-	// LogoutInvalidatesCookie makes logout authoritative server-side (session + JTI revoked).
-	// Default true; only disable if a shared cookie must survive a single app's logout.
-	LogoutInvalidatesCookie bool `mapstructure:"logout_invalidates_cookie"`
+	// LogoutKeepsCookie makes logout clear the browser cookie only, leaving the session and its
+	// JTI valid; set it only when a cookie shared across apps must survive one app's logout.
+	LogoutKeepsCookie bool `mapstructure:"logout_keeps_cookie"`
 	// LogoutPolicy is what GET /logout must carry before it ends a session. Unset accepts the
 	// cookie alone; relax SameSite from strict only with a stricter policy than that.
 	LogoutPolicy   LogoutPolicy  `mapstructure:"logout_policy"     validate:"omitempty,oneof=confirm id_token_hint"`
@@ -47,6 +47,8 @@ type Configuration struct {
 	CodeTTL        time.Duration `mapstructure:"code_ttl"`                             // authorization-code lifetime; default: 60s
 	// ExternalStateTTL bounds one external IdP round-trip, from redirect to callback.
 	ExternalStateTTL time.Duration `mapstructure:"external_state_ttl"`
+	// PasswordResetTTL is the lifetime of a password-reset token. Default 1h.
+	PasswordResetTTL time.Duration `mapstructure:"password_reset_ttl"`
 	// ClockSkew is the leeway allowed on external id_token time claims, inherited by every
 	// provider that does not set its own. Default 1m; keep it under 2m.
 	ClockSkew time.Duration `mapstructure:"clock_skew"`
@@ -65,6 +67,23 @@ type Configuration struct {
 	// available under their driver name with no configuration.
 	MFAMethods []MFAMethodConfig `mapstructure:"mfa_methods" validate:"omitempty,dive"`
 	Throttle   ThrottleConfig    `mapstructure:"throttle"` // brute-force / lockout tuning
+	Password   PasswordConfig    `mapstructure:"password"` // default password policy tuning
+	// PasswordResetMethods tunes password-reset method driver instances. Registered drivers
+	// not listed here are available under their driver name with no configuration.
+	PasswordResetMethods []ResetMethodConfig `mapstructure:"password_reset_methods" validate:"omitempty,dive"`
+}
+
+// ResetMethodConfig configures one password-reset method driver instance.
+type ResetMethodConfig struct {
+	Name   string            `mapstructure:"name"` // method name used in requests; defaults to Driver
+	Driver string            `mapstructure:"driver" validate:"required"`
+	Config map[string]string `mapstructure:"config"` // driver-specific options
+}
+
+// PasswordConfig tunes the default password policy.
+type PasswordConfig struct {
+	MinLength int `mapstructure:"min_length" validate:"omitempty,min=1"`              // default: 8
+	MaxLength int `mapstructure:"max_length" validate:"omitempty,gtefield=MinLength"` // default: 128
 }
 
 // AuthenticatorConfig configures one passwordless primary-auth driver instance (passkey,
@@ -98,6 +117,9 @@ type ThrottleConfig struct {
 	MFAMaxResends     int           `mapstructure:"mfa_max_resends"`     // default: 3
 	// ExternalStartMax caps how many external IdP round-trips one caller may start.
 	ExternalStartMax int `mapstructure:"external_start_max"`
+	// RegistrationMax caps how many accounts one caller may register per Window. Default 20;
+	// 0 disables the cap.
+	RegistrationMax int `mapstructure:"registration_max"`
 }
 
 // ACRLevelConfig defines one authentication context class (Level of Assurance). Levels form
@@ -173,11 +195,11 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 
 	v.SetDefault(prefix+".secret", secret)
 	v.SetDefault(prefix+".cookie_name", "session")
-	v.SetDefault(prefix+".logout_invalidates_cookie", true)
 	v.SetDefault(prefix+".access_token_ttl", 20*time.Minute)
 	v.SetDefault(prefix+".session_ttl", 8*time.Hour)
 	v.SetDefault(prefix+".code_ttl", 60*time.Second)
 	v.SetDefault(prefix+".external_state_ttl", 15*time.Minute)
+	v.SetDefault(prefix+".password_reset_ttl", time.Hour)
 	v.SetDefault(prefix+".clock_skew", time.Minute)
 	v.SetDefault(prefix+".throttle.enabled", true)
 	v.SetDefault(prefix+".throttle.max_attempts", 5)
@@ -186,17 +208,21 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	v.SetDefault(prefix+".throttle.mfa_resend_cooldown", 60*time.Second)
 	v.SetDefault(prefix+".throttle.mfa_max_resends", 3)
 	v.SetDefault(prefix+".throttle.external_start_max", 300)
+	v.SetDefault(prefix+".throttle.registration_max", 20)
+	v.SetDefault(prefix+".password.min_length", 8)
+	v.SetDefault(prefix+".password.max_length", 128)
 
 	_ = v.BindEnv(prefix+".secret", "AUTH_SECRET")
 	_ = v.BindEnv(prefix+".same_site", "AUTH_SAME_SITE")
 	_ = v.BindEnv(prefix+".cookie_name", "AUTH_COOKIE_NAME")
 	_ = v.BindEnv(prefix+".cookie_path", "AUTH_COOKIE_PATH")
-	_ = v.BindEnv(prefix+".logout_invalidates_cookie", "AUTH_LOGOUT_INVALIDATES_COOKIE")
+	_ = v.BindEnv(prefix+".logout_keeps_cookie", "AUTH_LOGOUT_KEEPS_COOKIE")
 	_ = v.BindEnv(prefix+".logout_policy", "AUTH_LOGOUT_POLICY")
 	_ = v.BindEnv(prefix+".access_token_ttl", "AUTH_ACCESS_TOKEN_TTL")
 	_ = v.BindEnv(prefix+".session_ttl", "AUTH_SESSION_TTL")
 	_ = v.BindEnv(prefix+".code_ttl", "AUTH_CODE_TTL")
 	_ = v.BindEnv(prefix+".external_state_ttl", "AUTH_EXTERNAL_STATE_TTL")
+	_ = v.BindEnv(prefix+".password_reset_ttl", "AUTH_PASSWORD_RESET_TTL")
 	_ = v.BindEnv(prefix+".clock_skew", "AUTH_CLOCK_SKEW")
 	_ = v.BindEnv(prefix+".base_url", "AUTH_BASE_URL")
 	_ = v.BindEnv(prefix+".issuer", "AUTH_ISSUER")
@@ -207,6 +233,9 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".throttle.mfa_resend_cooldown", "AUTH_THROTTLE_MFA_RESEND_COOLDOWN")
 	_ = v.BindEnv(prefix+".throttle.mfa_max_resends", "AUTH_THROTTLE_MFA_MAX_RESENDS")
 	_ = v.BindEnv(prefix+".throttle.external_start_max", "AUTH_THROTTLE_EXTERNAL_START_MAX")
+	_ = v.BindEnv(prefix+".throttle.registration_max", "AUTH_THROTTLE_REGISTRATION_MAX")
+	_ = v.BindEnv(prefix+".password.min_length", "AUTH_PASSWORD_MIN_LENGTH")
+	_ = v.BindEnv(prefix+".password.max_length", "AUTH_PASSWORD_MAX_LENGTH")
 
 	// Load primary key from remote secret
 	if primaryKey, _ := config.LoadRemoteSecret("AUTH_KEYS_PRIMARY"); primaryKey != "" {

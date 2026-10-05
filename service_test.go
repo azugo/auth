@@ -75,10 +75,7 @@ func newServiceTestAuth(t *testing.T, cl *client.Client, opts ...Option) *Auth {
 		passwords: map[string]string{"alice": "secret123", "carol": "secret123"},
 	}
 
-	// validConfig() is a bare struct literal (bypassing viper's Bind defaults), so
-	// LogoutInvalidatesCookie's own "default true" must be set explicitly here.
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 
 	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl), opts...)
 	qt.Assert(t, qt.IsNil(err))
@@ -486,7 +483,7 @@ func thirdPartyAccessToken(t *testing.T, a *Auth, cookie string) string {
 	sess, err := a.sessions.Get(context.Background(), claims.SessionID)
 	qt.Assert(t, qt.IsNil(err))
 
-	at, _, err := a.issueAccessToken(context.Background(), sess, &client.Client{ID: "other"}, "openid", "", "")
+	at, _, err := a.issueAccessToken(context.Background(), sess, &client.Client{ID: "other"}, "openid", "", "", "")
 	qt.Assert(t, qt.IsNil(err))
 
 	return at

@@ -73,7 +73,7 @@ type cacheStore struct {
 }
 
 // NewCacheStore creates the default cache-backed code Store using the app's cache.
-func NewCacheStore(c *cache.Cache, codeTTL time.Duration) (Store, error) {
+func NewCacheStore(c *cache.Cache, tombstoneTTL time.Duration) (Store, error) {
 	codes, err := cache.Create[AuthorizationCode](c, "auth:code")
 	if err != nil {
 		return nil, err
@@ -89,7 +89,7 @@ func NewCacheStore(c *cache.Cache, codeTTL time.Duration) (Store, error) {
 		return nil, err
 	}
 
-	return &cacheStore{codes: codes, used: used, issued: issued, tombstoneTTL: codeTTL}, nil
+	return &cacheStore{codes: codes, used: used, issued: issued, tombstoneTTL: tombstoneTTL}, nil
 }
 
 // Save persists a freshly minted code with a TTL equal to its remaining lifetime.

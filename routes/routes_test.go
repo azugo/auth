@@ -51,9 +51,6 @@ func newTestAuthWithOpts(t *testing.T, sessions session.Store, opts []auth.Optio
 		Secret:   "0123456789abcdef0123456789abcdef",
 		SameSite: "strict",
 		Issuer:   "https://issuer.example",
-		// validConfig-style literals bypass viper's Bind defaults, so this "default true"
-		// field must be set explicitly.
-		LogoutInvalidatesCookie: true,
 	}
 
 	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile email"}}

@@ -3,6 +3,7 @@ package portal
 import (
 	"context"
 	"crypto/subtle"
+	"sync"
 
 	"azugo.io/auth"
 )
@@ -12,15 +13,28 @@ type demoUser struct {
 	password string
 }
 
-// DemoUsers is a hard-coded in-memory UserProvider for the example.
+// DemoUsers is a hard-coded in-memory UserProvider for the example, with self-service
+// password changes.
 type DemoUsers struct {
+	mu    sync.Mutex
 	users map[string]demoUser
 }
 
-// NewDemoUsers creates the demo user provider with two predefined accounts.
+// NewDemoUsers creates the demo user provider with three predefined accounts, one of which
+// must change its password on first sign-in.
 func NewDemoUsers() *DemoUsers {
 	return &DemoUsers{
 		users: map[string]demoUser{
+			"guest": {
+				password: "guest123",
+				info: auth.UserInfo{
+					ID:                     "u-0003",
+					Name:                   "Portal Guest",
+					Email:                  "guest@example.com",
+					Scope:                  "openid profile",
+					RequiresPasswordChange: true,
+				},
+			},
 			"admin": {
 				password: "admin123",
 				info: auth.UserInfo{
@@ -45,6 +59,9 @@ func NewDemoUsers() *DemoUsers {
 
 // Authenticate implements auth.UserProvider.
 func (p *DemoUsers) Authenticate(_ context.Context, username, password string) (auth.UserInfo, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	u, ok := p.users[username]
 	if !ok || subtle.ConstantTimeCompare([]byte(u.password), []byte(password)) != 1 {
 		return auth.UserInfo{}, auth.ErrInvalidCredentials
@@ -55,11 +72,63 @@ func (p *DemoUsers) Authenticate(_ context.Context, username, password string) (
 
 // GetUser implements auth.UserProvider.
 func (p *DemoUsers) GetUser(_ context.Context, userID string) (auth.UserInfo, error) {
-	for _, u := range p.users {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	name, ok := p.username(userID)
+	if !ok {
+		return auth.UserInfo{}, auth.ErrUserNotFound
+	}
+
+	return p.users[name].info, nil
+}
+
+// username finds the account name of userID; the caller holds mu.
+func (p *DemoUsers) username(userID string) (string, bool) {
+	for name, u := range p.users {
 		if u.info.ID == userID {
-			return u.info, nil
+			return name, true
 		}
 	}
 
-	return auth.UserInfo{}, auth.ErrUserNotFound
+	return "", false
+}
+
+// ChangePassword implements auth.PasswordChanger.
+func (p *DemoUsers) ChangePassword(_ context.Context, userID, currentPassword, newPassword string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	name, ok := p.username(userID)
+	if !ok {
+		return auth.ErrUserNotFound
+	}
+
+	u := p.users[name]
+	if subtle.ConstantTimeCompare([]byte(u.password), []byte(currentPassword)) != 1 {
+		return auth.ErrInvalidCredentials
+	}
+
+	u.password = newPassword
+	p.users[name] = u
+
+	return nil
+}
+
+// SetPassword implements auth.PasswordChanger.
+func (p *DemoUsers) SetPassword(_ context.Context, userID, newPassword string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	name, ok := p.username(userID)
+	if !ok {
+		return auth.ErrUserNotFound
+	}
+
+	u := p.users[name]
+	u.password = newPassword
+	u.info.RequiresPasswordChange = false
+	p.users[name] = u
+
+	return nil
 }

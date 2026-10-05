@@ -306,7 +306,7 @@ func (a *Auth) ListMFAMethods(ctx context.Context, tok string) ([]MFAMethodInfo,
 			info.Enrolled = true
 
 			// A password-only caller learns nothing about the devices it has to get past.
-			if sc.sess.Status == session.StatusActive {
+			if sc.sess.Status == session.StatusActive && a.mfaVerified(sc.sess) {
 				info.Enrollments = append(info.Enrollments, MFAEnrollmentInfo{ID: e.ID, Label: e.Label, CreatedAt: e.CreatedAt, LastUsedAt: e.LastUsedAt})
 			}
 		}

@@ -25,7 +25,6 @@ func benchAuth(b *testing.B) *Auth {
 	b.Cleanup(app.Stop)
 
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 
 	users := fakeUsers{
 		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "openid profile"}},

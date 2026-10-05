@@ -13,6 +13,9 @@ const AuthMethodPassword = "password"
 // GrantTypeAuthorizationCode is the RFC 6749 grant_type value for the authorization code grant.
 const GrantTypeAuthorizationCode = "authorization_code"
 
+// GrantTypeClientCredentials is the RFC 6749 grant_type value for the client credentials grant.
+const GrantTypeClientCredentials = "client_credentials"
+
 // GrantTypePassword is the RFC 6749 grant_type value for the password grant.
 const GrantTypePassword = "password"
 
@@ -61,6 +64,16 @@ const (
 	MFAPolicyRequired MFAPolicy = "required" // MFA always required; onboarding if not enrolled
 )
 
+// RegistrationPolicy declares whether a client may self-register users and what follows.
+type RegistrationPolicy string
+
+// RegistrationPolicy values.
+const (
+	RegistrationPolicyDisabled     RegistrationPolicy = ""              // no self-registration (default)
+	RegistrationPolicyRequireLogin RegistrationPolicy = "require_login" // account created; the user then logs in normally
+	RegistrationPolicySignIn       RegistrationPolicy = "sign_in"       // account created and signed in at once, like a password login
+)
+
 // Client is the registered OAuth client metadata.
 type Client struct {
 	ID           string
@@ -88,8 +101,11 @@ type Client struct {
 	// parameter.
 	IDTokenSignedResponseAlg string
 	MFAPolicy                MFAPolicy
+	RegistrationPolicy       RegistrationPolicy
 	// AllowedMFAMethods restricts which registered MFA drivers are offered. Empty = all.
 	AllowedMFAMethods []string
+	// AllowedPasswordResetMethods restricts which reset methods are offered. Empty = all.
+	AllowedPasswordResetMethods []string
 	// AllowedAuthMethods restricts which auth methods are permitted. Empty = all.
 	// Use AuthMethodPassword for internal login; use the provider name for external ones.
 	AllowedAuthMethods []string

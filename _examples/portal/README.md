@@ -15,6 +15,8 @@ go run ./cmd/server
 ```
 
 Open <http://localhost:8080> and sign in with `admin / admin123` or `user / user123`.
+`guest / guest123` is held at the `/password` page until it sets a new password, the same page
+a signed-in user reaches from `/security` to change theirs.
 
 ## Two-factor authentication
 

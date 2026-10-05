@@ -14,6 +14,7 @@ import (
 	"azugo.io/auth/jti"
 	"azugo.io/auth/mfa"
 	"azugo.io/auth/provider"
+	"azugo.io/auth/reset"
 	"azugo.io/auth/session"
 	"azugo.io/auth/throttle"
 	"azugo.io/auth/token"
@@ -42,6 +43,8 @@ type (
 	ProfileManager = contract.ProfileManager
 	// RegistrationRequest carries the data for a new user registration.
 	RegistrationRequest = contract.RegistrationRequest
+	// PasswordConfig tunes the default password policy.
+	PasswordConfig = contract.PasswordConfig
 	// ClaimMapper maps a UserInfo into token / id_token claims.
 	ClaimMapper = contract.ClaimMapper
 	// ClaimMapperFunc adapts a plain function to the ClaimMapper interface.
@@ -80,7 +83,9 @@ type Auth struct {
 	throttle   throttle.Throttle
 	// extstart bounds how often one caller may start an external IdP round-trip
 	extstart throttle.Throttle
-	events   event.Sink // nil = no audit events
+	// registrations bounds how many accounts one caller may register
+	registrations throttle.Throttle
+	events        event.Sink // nil = no audit events
 
 	providers      provider.Registry
 	providerClaims ClaimMapper               // app-wide external claim mapper (nil = driver default)
@@ -97,8 +102,14 @@ type Auth struct {
 	pending cache.Instance[pendingState]
 	// enrollments holds in-progress MFA enrollment state, keyed by user ID and method
 	enrollments cache.Instance[mfaEnrollment]
-	// challenges counts issued MFA challenges per session and method
+	// challenges counts issued MFA and reset challenges per pending flow and method
 	challenges cache.Counter
+	// resets holds the reset requests in progress; nil unless users is a PasswordResetter
+	resets reset.Store
+	// resetMethods resolves the ways a user may prove ownership for a reset
+	resetMethods reset.Registry
+	// passwords accepts or rejects every new password before it reaches users
+	passwords contract.PasswordPolicy
 
 	// Cookie provides session cookie attribute helpers.
 	Cookie CookieCtx
@@ -165,8 +176,8 @@ func RelinkPolicy(p provider.RelinkAuthorizer) Option {
 	return func(a *Auth) { a.relink = p }
 }
 
-// MFAStore enables MFA. Without it no MFA endpoint is mounted and every client's MFAPolicy is
-// treated as disabled.
+// MFAStore enables MFA. Without it no MFA endpoint is mounted, a client whose MFAPolicy is
+// required refuses every login and optional is inert.
 func MFAStore(s mfa.Store) Option {
 	return func(a *Auth) { a.mfaStore = s }
 }
@@ -175,6 +186,22 @@ func MFAStore(s mfa.Store) Option {
 // custom.
 func MFARegistry(r mfa.Registry) Option {
 	return func(a *Auth) { a.mfaMethods = r }
+}
+
+// PasswordResetStore replaces the default cache-backed store of reset requests with a custom.
+func PasswordResetStore(s reset.Store) Option {
+	return func(a *Auth) { a.resets = s }
+}
+
+// PasswordResetRegistry replaces the default Configuration.PasswordResetMethods-backed method
+// registry with a custom, e.g. reset.Methods for methods built in code.
+func PasswordResetRegistry(r reset.Registry) Option {
+	return func(a *Auth) { a.resetMethods = r }
+}
+
+// PasswordPolicy replaces the default Configuration.Password-driven policy with a custom.
+func PasswordPolicy(p contract.PasswordPolicy) Option {
+	return func(a *Auth) { a.passwords = p }
 }
 
 // CookieScopeToBasePath makes the default session cookie Path resolve to the app's base path.
@@ -249,7 +276,7 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 	}
 
 	if a.codes == nil {
-		store, err := code.NewCacheStore(app.Cache(), config.CodeTTL)
+		store, err := code.NewCacheStore(app.Cache(), config.AccessTokenTTL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create authorization code store: %w", err)
 		}
@@ -272,7 +299,7 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 	a.assertions = assertions
 
 	if a.throttle == nil {
-		t, err := throttle.New(app.Cache(), config.Throttle)
+		t, err := throttle.New(app.Cache(), &config.Throttle)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create throttle: %w", err)
 		}
@@ -287,8 +314,19 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 
 	a.extstart = extstart
 
+	registrations, err := throttle.NewLimit(app.Cache(), "auth:register", config.Throttle.RegistrationMax, config.Throttle.Window)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registration throttle: %w", err)
+	}
+
+	a.registrations = registrations
+
 	if a.events == nil {
 		a.events = &logEventSink{auth: a}
+	}
+
+	if a.passwords == nil {
+		a.passwords = NewPasswordPolicy(&config.Password)
 	}
 
 	if a.providers == nil {
@@ -327,6 +365,30 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 
 	a.pending = pending
 
+	if _, ok := users.(PasswordResetter); ok {
+		if a.resets == nil {
+			resets, err := reset.NewCacheStore(app.Cache())
+			if err != nil {
+				return nil, fmt.Errorf("failed to create password reset store: %w", err)
+			}
+
+			a.resets = resets
+		}
+
+		if a.resetMethods == nil {
+			a.resetMethods = reset.NewConfigRegistry(config)
+		}
+
+		names, err := a.resetMethods.Names(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to list password reset methods: %w", err)
+		}
+
+		if len(names) == 0 {
+			return nil, errors.New("a PasswordResetter user provider requires at least one password reset method")
+		}
+	}
+
 	if a.mfaStore != nil {
 		if a.mfaMethods == nil {
 			a.mfaMethods = mfa.NewConfigRegistry(config, a.mfaStore)
@@ -338,14 +400,14 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 		}
 
 		a.enrollments = enrollments
-
-		challenges, err := cache.CreateCounter(app.Cache(), "auth:mfa:challenge")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create MFA challenge counter: %w", err)
-		}
-
-		a.challenges = challenges
 	}
+
+	challenges, err := cache.CreateCounter(app.Cache(), "auth:challenge")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create challenge counter: %w", err)
+	}
+
+	a.challenges = challenges
 
 	return a, nil
 }
@@ -394,6 +456,23 @@ func (a *Auth) Identities() provider.IdentityStore {
 // MFA returns the configured MFA enrollment store, or nil when MFA is disabled.
 func (a *Auth) MFA() mfa.Store {
 	return a.mfaStore
+}
+
+// PasswordResets returns the configured store of reset requests, or nil when the user provider
+// is not a PasswordResetter.
+func (a *Auth) PasswordResets() reset.Store {
+	return a.resets
+}
+
+// PasswordResetMethods returns the configured reset method registry, or nil when the user
+// provider is not a PasswordResetter.
+func (a *Auth) PasswordResetMethods() reset.Registry {
+	return a.resetMethods
+}
+
+// PasswordPolicy returns the configured password policy.
+func (a *Auth) PasswordPolicy() contract.PasswordPolicy {
+	return a.passwords
 }
 
 // MFAMethods returns the configured MFA method registry, or nil when MFA is disabled.
@@ -447,6 +526,18 @@ func setDefaults(cfg *Configuration) {
 		cfg.ExternalStateTTL = 15 * time.Minute
 	}
 
+	if cfg.PasswordResetTTL == 0 {
+		cfg.PasswordResetTTL = time.Hour
+	}
+
+	if cfg.Password.MinLength == 0 {
+		cfg.Password.MinLength = 8
+	}
+
+	if cfg.Password.MaxLength == 0 {
+		cfg.Password.MaxLength = 128
+	}
+
 	if cfg.Throttle.MaxAttempts == 0 {
 		cfg.Throttle.MaxAttempts = 5
 	}
@@ -469,5 +560,9 @@ func setDefaults(cfg *Configuration) {
 
 	if cfg.Throttle.ExternalStartMax == 0 {
 		cfg.Throttle.ExternalStartMax = 300
+	}
+
+	if cfg.Throttle.RegistrationMax == 0 {
+		cfg.Throttle.RegistrationMax = 20
 	}
 }

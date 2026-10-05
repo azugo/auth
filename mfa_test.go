@@ -78,12 +78,17 @@ func enrollTOTP(t *testing.T, a *Auth, tok string) string {
 	return seed
 }
 
-func TestLoginWithoutMFAStoreIgnoresPolicy(t *testing.T) {
+func TestLoginWithoutMFAStoreFailsClosedOnRequiredPolicy(t *testing.T) {
 	a := newServiceTestAuth(t, mfaClient(client.MFAPolicyRequired))
+
+	_, err := a.Login(context.Background(), alice(""))
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeUnmetAuthenticationRequirements))
+
+	// An optional policy has nothing to require.
+	a = newServiceTestAuth(t, mfaClient(client.MFAPolicyOptional))
 
 	res := loginAs(t, a, alice(""))
 	qt.Check(t, qt.Equals(res.Status, session.StatusActive))
-	qt.Check(t, qt.IsTrue(res.AccessToken != ""))
 	qt.Check(t, qt.DeepEquals(res.AMR, []string{"pwd"}))
 }
 
@@ -398,7 +403,6 @@ func TestMFAResendCooldown(t *testing.T) {
 
 func TestMFAVerifyLockout(t *testing.T) {
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
 
 	a := newGrantsTestAuth(t, cfg, []Option{MFAStore(mfa.NewMemoryStore())}, mfaClient(client.MFAPolicyOptional))
@@ -528,7 +532,6 @@ func throttledMFAAuth(t *testing.T) *Auth {
 	t.Helper()
 
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
 
 	a := newGrantsTestAuth(t, cfg, []Option{MFAStore(mfa.NewMemoryStore())}, mfaClient(client.MFAPolicyOptional))
@@ -987,7 +990,6 @@ func TestMFAVerifyBudgetHoldsAcrossConcurrentGuesses(t *testing.T) {
 
 func TestMFAChallengeOpensAreBoundedPerUserAcrossLogins(t *testing.T) {
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
 
 	a := newGrantsTestAuth(t, cfg, []Option{MFAStore(mfa.NewMemoryStore())}, mfaClient(client.MFAPolicyOptional))
@@ -1022,7 +1024,6 @@ func assertedAMRAuth(t *testing.T, store mfa.Store, amr []string) *Auth {
 	t.Helper()
 
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 
 	users := fakeUsers{
 		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "openid profile", AMR: amr}},
@@ -1064,7 +1065,6 @@ func TestFactorAdministrationIgnoresUnconfiguredAMR(t *testing.T) {
 
 func TestLoginLockoutOutlivesTheCountingWindow(t *testing.T) {
 	cfg := validConfig()
-	cfg.LogoutInvalidatesCookie = true
 	cfg.Throttle = contract.ThrottleConfig{
 		Enabled: true, MaxAttempts: 2, Window: 50 * time.Millisecond, LockoutTTL: time.Hour,
 	}

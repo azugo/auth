@@ -78,16 +78,17 @@ type PasswordChanger interface {
 	// Used by the self-service flow on an active session.
 	ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error
 	// SetPassword sets a new password WITHOUT verifying a current one. It is called only to
-	// complete a pending_password_change session.
+	// complete a pending_password_change session and must clear RequiresPasswordChange.
 	SetPassword(ctx context.Context, userID, newPassword string) error
 }
 
-// PasswordResetter is an optional UserProvider extension for reseting forgotten password.
+// PasswordResetter is an optional UserProvider extension for resetting a forgotten password.
+// Proving ownership of the account is the job of the configured reset methods.
 type PasswordResetter interface {
-	// RequestPasswordReset initiates a reset flow (e.g. sends an email with a token).
-	RequestPasswordReset(ctx context.Context, identifier string) error
-	// ResetPassword sets a new password using a verified reset token (no old password needed).
-	ResetPassword(ctx context.Context, token, newPassword string) error
+	// FindUser resolves a username or email to its account, ErrUserNotFound when unknown.
+	FindUser(ctx context.Context, identifier string) (UserInfo, error)
+	// ResetPassword sets a new password for userID after a reset method approved the request.
+	ResetPassword(ctx context.Context, userID, newPassword string) error
 }
 
 // ProfileManager is an optional UserProvider extension for user profile.
@@ -96,6 +97,14 @@ type ProfileManager interface {
 	GetProfile(ctx context.Context, userID string) (map[string]any, error)
 	// UpdateProfile updates display/profile data for the authenticated user.
 	UpdateProfile(ctx context.Context, userID string, data map[string]any) error
+}
+
+// PasswordPolicy decides whether a new password is acceptable, before it reaches the
+// UserProvider.
+type PasswordPolicy interface {
+	// Validate returns an error wrapping ErrWeakPassword when password is not acceptable for
+	// the account info.
+	Validate(ctx context.Context, password string, info UserInfo) error
 }
 
 // RegistrationRequest carries the data for a new user registration.

@@ -47,6 +47,19 @@ type SessionRoutes struct {
 	Revoke azugo.RequestHandler // DELETE /sessions/{id}
 }
 
+// AccountRoutes holds the self-service account adapters, each set only when the user provider
+// implements its interface, and mounted under AccountGroup.
+type AccountRoutes struct {
+	Register             azugo.RequestHandler // POST /account/register (Registerer)
+	ChangePassword       azugo.RequestHandler // POST /account/password (PasswordChanger)
+	RequestPasswordReset azugo.RequestHandler // POST /account/password/reset (PasswordResetter)
+	BeginPasswordReset   azugo.RequestHandler // POST /account/password/reset/begin (PasswordResetter)
+	PasswordResetStatus  azugo.RequestHandler // GET /account/password/reset/status (PasswordResetter)
+	ResetPassword        azugo.RequestHandler // POST /account/password/reset/confirm (PasswordResetter)
+	Profile              azugo.RequestHandler // GET /account/profile (ProfileManager)
+	UpdateProfile        azugo.RequestHandler // PUT /account/profile (ProfileManager)
+}
+
 // MFARoutes holds the MFA adapters, set only when an MFA store is configured and mounted under
 // MFAGroup.
 type MFARoutes struct {
@@ -68,6 +81,7 @@ type Handler struct {
 	OIDC     OIDCRoutes
 	External ExternalRoutes
 	Session  SessionRoutes
+	Account  AccountRoutes
 	MFA      MFARoutes
 
 	auth *auth.Auth
@@ -97,6 +111,8 @@ type Group int
 const (
 	// SessionGroup mounts /sessions and /session routes.
 	SessionGroup Group = iota
+	// AccountGroup mounts the /account/* routes.
+	AccountGroup
 	// LinkingGroup mounts the account-linking routes (/external/{provider}/link and
 	// /external/identities), distinct from the always-on external login redirects.
 	LinkingGroup
@@ -218,6 +234,11 @@ func (o EndSessionEndpoint) apply(b *bindOptions) {
 func supportedGroups(a *auth.Auth) []Group {
 	groups := []Group{SessionGroup}
 
+	switch a.Users().(type) {
+	case auth.Registerer, auth.PasswordChanger, auth.PasswordResetter, auth.ProfileManager:
+		groups = append(groups, AccountGroup)
+	}
+
 	if a.Identities() != nil {
 		groups = append(groups, LinkingGroup)
 	}
@@ -298,6 +319,26 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	h.Session.Get = h.getSession
 	h.Session.Delete = h.deleteSession
 
+	if _, ok := a.Users().(auth.Registerer); ok {
+		h.Account.Register = h.register
+	}
+
+	if _, ok := a.Users().(auth.PasswordChanger); ok {
+		h.Account.ChangePassword = h.changePassword
+	}
+
+	if _, ok := a.Users().(auth.PasswordResetter); ok {
+		h.Account.RequestPasswordReset = h.requestPasswordReset
+		h.Account.BeginPasswordReset = h.beginPasswordReset
+		h.Account.PasswordResetStatus = h.passwordResetStatus
+		h.Account.ResetPassword = h.resetPassword
+	}
+
+	if _, ok := a.Users().(auth.ProfileManager); ok {
+		h.Account.Profile = h.profile
+		h.Account.UpdateProfile = h.updateProfile
+	}
+
 	if _, ok := a.Sessions().(session.Lister); ok {
 		h.Session.List = h.listSessions
 		h.Session.Revoke = h.revokeSession
@@ -367,6 +408,26 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 
 			if h.Session.Revoke != nil {
 				g.Delete("/sessions/{id}", h.Session.Revoke)
+			}
+		case AccountGroup:
+			if h.Account.Register != nil {
+				g.Post("/account/register", h.Account.Register)
+			}
+
+			if h.Account.ChangePassword != nil {
+				g.Post("/account/password", h.Account.ChangePassword)
+			}
+
+			if h.Account.RequestPasswordReset != nil {
+				g.Post("/account/password/reset", h.Account.RequestPasswordReset)
+				g.Post("/account/password/reset/begin", h.Account.BeginPasswordReset)
+				g.Get("/account/password/reset/status", h.Account.PasswordResetStatus)
+				g.Post("/account/password/reset/confirm", h.Account.ResetPassword)
+			}
+
+			if h.Account.Profile != nil {
+				g.Get("/account/profile", h.Account.Profile)
+				g.Put("/account/profile", h.Account.UpdateProfile)
 			}
 		case LinkingGroup:
 			if h.External.Link == nil {

@@ -27,11 +27,10 @@ func newConfirmingAuth(t *testing.T, cl *client.Client) *auth.Auth {
 	t.Cleanup(app.Stop)
 
 	cfg := &auth.Configuration{
-		Secret:                  "0123456789abcdef0123456789abcdef",
-		SameSite:                "lax",
-		Issuer:                  "https://issuer.example",
-		LogoutInvalidatesCookie: true,
-		LogoutPolicy:            auth.LogoutPolicyConfirm,
+		Secret:       "0123456789abcdef0123456789abcdef",
+		SameSite:     "lax",
+		Issuer:       "https://issuer.example",
+		LogoutPolicy: auth.LogoutPolicyConfirm,
 	}
 
 	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Scope: "openid"}}
@@ -72,14 +71,43 @@ func TestLogoutConfirmationRendersPageAndPostConfirms(t *testing.T) {
 	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
 	qt.Check(t, qt.IsNil(err))
 
-	// Posting back confirms, which a cross-site navigation cannot do.
-	resp2, err := tc.Post("/auth/logout", nil, cookie)
+	// A cross-site form post carrying the cookie is not a confirmation: the page is shown again.
+	for _, headers := range [][2]string{{"Sec-Fetch-Site", "cross-site"}, {"Origin", "https://evil.example"}, {"Origin", "null"}} {
+		resp2, err := tc.Post("/auth/logout", nil, cookie, tc.WithHeader(headers[0], headers[1]))
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.Equals(resp2.StatusCode(), 200), qt.Commentf("%v", headers))
+		fasthttp.ReleaseResponse(resp2)
+
+		_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
+		qt.Check(t, qt.IsNil(err))
+	}
+
+	// Posting back from our own page confirms.
+	resp2, err := tc.Post("/auth/logout", nil, cookie, tc.WithHeader("Sec-Fetch-Site", "same-origin"))
 	defer fasthttp.ReleaseResponse(resp2)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp2.StatusCode(), 303))
 
 	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestLogoutConfirmationAcceptsMatchingOrigin(t *testing.T) {
+	cl := &client.Client{ID: "spa", GrantTypes: []string{client.GrantTypePassword}, AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON}
+	a := newConfirmingAuth(t, cl)
+
+	app := newTestApp(t)
+	Bind(app, "/auth", a, LogoutConfirmation(func(ctx *azugo.Context) { ctx.Text("confirm?") }))
+
+	tc := app.TestClient()
+	login := loginFor(t, a, "spa")
+	cookie := tc.WithCookie(a.Config().CookieName, login.Cookie.Value)
+
+	// An older browser without Fetch Metadata is judged by its Origin header.
+	resp, err := tc.Post("/auth/logout", nil, cookie, tc.WithHeader("Origin", "http://test"))
+	defer fasthttp.ReleaseResponse(resp)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(resp.StatusCode(), 303))
 }
 
 func TestLogoutConfirmationWithoutPageIsAnError(t *testing.T) {
