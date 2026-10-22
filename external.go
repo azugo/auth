@@ -413,7 +413,20 @@ func (a *Auth) mapExternalClaims(ctx context.Context, cfg *contract.ExternalProv
 		}
 	}
 
-	return mapper.MapClaims(ctx, providerName, raw)
+	info, err := mapper.MapClaims(ctx, providerName, raw)
+	if err != nil {
+		return info, err
+	}
+
+	// The provider receives every address in its canonical form, verified only by a trusted IdP.
+	for channel, contacts := range info.Contacts {
+		for i := range contacts {
+			contacts[i].Address = a.NormalizeAddress(channel, contacts[i].Address)
+			contacts[i].Verified = contacts[i].Verified && cfg.TrustVerifiedContacts
+		}
+	}
+
+	return info, nil
 }
 
 func (a *Auth) resolveExternalUser(ctx context.Context, providerName string, info UserInfo) (UserInfo, error) {
@@ -454,11 +467,13 @@ func (a *Auth) resolveExternalUser(ctx context.Context, providerName string, inf
 	info = resolved
 
 	if a.identities != nil {
+		email, _ := info.PreferredContact(ChannelEmail)
+
 		if err := a.identities.Link(ctx, &provider.IdentityLink{
 			UserID:   info.ID,
 			Provider: providerName,
 			Subject:  subject,
-			Email:    info.Email,
+			Email:    email.Address,
 			LinkedAt: time.Now(),
 		}); err != nil {
 			return UserInfo{}, err
@@ -471,11 +486,13 @@ func (a *Auth) resolveExternalUser(ctx context.Context, providerName string, inf
 }
 
 func (a *Auth) linkExternalIdentity(ctx context.Context, userID, providerName string, info UserInfo, ip string) (*provider.IdentityLink, error) {
+	email, _ := info.PreferredContact(ChannelEmail)
+
 	link := &provider.IdentityLink{
 		UserID:   userID,
 		Provider: providerName,
 		Subject:  info.ID,
-		Email:    info.Email,
+		Email:    email.Address,
 		LinkedAt: time.Now(),
 	}
 
@@ -725,7 +742,8 @@ func (a *Auth) ListIdentities(ctx context.Context, userID, providerName string, 
 	return a.identities.List(ctx, userID, providerName, page)
 }
 
-// UnlinkIdentity removes one of userID's own identity links.
+// UnlinkIdentity removes one of userID's own identity links; a trusted call that does not
+// consult the step-up policy, see RequireStepUp with ActionUnlinkIdentity.
 func (a *Auth) UnlinkIdentity(ctx context.Context, userID, linkID string) error {
 	if a.identities == nil {
 		return errors.New("identity store is not configured")

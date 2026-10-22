@@ -42,9 +42,12 @@ type Request struct {
 	ChallengeID string
 	Data        map[string]any
 	// Approved is set once an asynchronous method reported approval.
-	Approved  bool
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Approved bool
+	// Registration marks a reset opened for an already registered account that someone tried to
+	// register again.
+	Registration bool
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 }
 
 // Decoy reports whether the request stands in for an unknown or unservable account.
@@ -119,8 +122,7 @@ func (s *cacheStore) Update(ctx context.Context, r *Request) error {
 func (s *cacheStore) Consume(ctx context.Context, id string) (*Request, error) {
 	r, err := s.requests.Pop(ctx, id)
 	if err != nil {
-		var knf cache.KeyNotFoundError
-		if errors.As(err, &knf) {
+		if _, ok := errors.AsType[cache.KeyNotFoundError](err); ok {
 			return nil, ErrNotFound
 		}
 
@@ -154,7 +156,8 @@ const (
 // Method is one way for a user to prove ownership of the account being reset.
 type Method interface {
 	// Begin opens a challenge for the account behind request, e.g. sends a code or a link built
-	// from req.ID, or ErrUnavailable when the account lacks what the method needs.
+	// from req.ID, or ErrUnavailable when the account lacks what the method needs. An empty
+	// challengeID means nothing was sent.
 	Begin(ctx context.Context, req *Request, info contract.UserInfo) (challengeID string, data map[string]any, err error)
 	// Verify evaluates response against request ChallengeID.
 	Verify(ctx context.Context, req *Request, info contract.UserInfo, response map[string]any) (VerifyResult, error)
@@ -178,8 +181,8 @@ func MethodInteraction(m Method) string {
 type Deliverer interface {
 	// Available reports whether the account has a destination for the channel.
 	Available(info contract.UserInfo) bool
-	// Deliver sends the secret for request requestID.
-	Deliver(ctx context.Context, info contract.UserInfo, requestID, secret string) error
+	// Deliver sends the secret opened for request.
+	Deliver(ctx context.Context, info contract.UserInfo, req *Request, secret string) error
 }
 
 // Link returns a method that delivers a single-use 256-bit token.
@@ -227,8 +230,10 @@ func (m *secretMethod) Begin(ctx context.Context, req *Request, info contract.Us
 	}
 
 	// The challenge is live before the secret leaves, and the response does not wait for it.
+	sent := *req
+
 	go func() {
-		_ = m.deliver.Deliver(context.WithoutCancel(ctx), info, req.ID, secret)
+		_ = m.deliver.Deliver(context.WithoutCancel(ctx), info, &sent, secret)
 	}()
 
 	return hashSecret(req.ID, secret), nil, nil

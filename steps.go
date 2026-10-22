@@ -3,9 +3,9 @@ package auth
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/url"
 	"slices"
-	"strings"
 	"time"
 
 	"azugo.io/auth/client"
@@ -18,6 +18,122 @@ import (
 	"azugo.io/core/cache"
 	"azugo.io/core/http"
 )
+
+// ErrInvalidSelection is returned by a LoginStep or Switcher for a selection the user may not make.
+var ErrInvalidSelection = errors.New("invalid selection")
+
+// LoginStep is an application-defined gate that must be satisfied before a session becomes
+// active.
+type LoginStep interface {
+	// Name identifies the step in URLs, in Session.Step and in the pending response.
+	Name() string
+	// Required reports whether the session must satisfy the step before activation.
+	Required(ctx context.Context, s *session.Session, user UserInfo) (bool, error)
+	// Prompt returns the interaction data the client renders to drive the step.
+	Prompt(ctx context.Context, s *session.Session, user UserInfo) (StepPrompt, error)
+	// Resolve processes the user's submission and may write the outcome into session context, which
+	// is persisted only when the result is Done.
+	Resolve(ctx context.Context, s *session.Session, user UserInfo, payload []byte) (StepResult, error)
+}
+
+// StepPrompt is the app-defined interaction descriptor surfaced to the client.
+type StepPrompt struct {
+	// Interaction is an app-defined hint, e.g. "select_tenant" or "accept_agreement".
+	Interaction string
+	// Data is the payload the client renders.
+	Data map[string]any
+}
+
+// StepResult is result from resolve.
+type StepResult struct {
+	// Done clears the step; false keeps it pending and counts as a failed attempt.
+	Done bool
+	// NoAttempt keeps a pending result out of the throttle, for a submission that is no guess
+	// such as a resend.
+	NoAttempt bool
+	// Data is merged into the prompt data when the step stays pending.
+	Data map[string]any
+}
+
+// SwitchMode is how SwitchSession applies a new selection.
+type SwitchMode int
+
+const (
+	// SwitchSkip leaves the step untouched, as the selection is not for it.
+	SwitchSkip SwitchMode = iota
+	// SwitchRotate keeps the session and rotates its credentials.
+	SwitchRotate
+	// SwitchRecreate replaces the session with a new one and revokes the old.
+	SwitchRecreate
+)
+
+// Switcher is an optional LoginStep extension that applies a SwitchSession selection.
+type Switcher interface {
+	// Switch validates selection and writes it into session context, returning SwitchSkip when
+	// the selection is not for this step.
+	Switch(ctx context.Context, s *session.Session, selection map[string]any) (SwitchMode, error)
+}
+
+// LoginSteps registers the ordered application login steps.
+func LoginSteps(steps ...LoginStep) Option {
+	return func(a *Auth) {
+		a.steps = append(a.steps, steps...)
+	}
+}
+
+// StepRequest carries a submission for the pending login step behind Token.
+type StepRequest struct {
+	// Token is the step token (or the pending session cookie).
+	Token string
+	// Name is the login step the submission is for.
+	Name string
+	// Payload is passed to LoginStep.Resolve verbatim.
+	Payload   []byte
+	ReturnTo  string
+	BaseURL   string
+	MountPath string
+	IP        string
+}
+
+// SwitchSessionRequest carries a new selection for the active session behind Token.
+type SwitchSessionRequest struct {
+	Token string
+	// Selection is the app-defined choice applied by the Switcher steps.
+	Selection map[string]any
+	ReturnTo  string
+	BaseURL   string
+	MountPath string
+	IP        string
+}
+
+// LoginSteps returns the registered login steps, the built-in ones first.
+func (a *Auth) LoginSteps() []LoginStep {
+	steps := make([]LoginStep, 0, len(a.contacts)+len(a.steps))
+	for _, c := range a.contacts {
+		steps = append(steps, c)
+	}
+
+	return append(steps, a.steps...)
+}
+
+// SessionSwitching reports whether any login step implements Switcher.
+func (a *Auth) SessionSwitching() bool {
+	return slices.ContainsFunc(a.steps, func(s LoginStep) bool {
+		_, ok := s.(Switcher)
+
+		return ok
+	})
+}
+
+func (a *Auth) loginStep(name string) LoginStep {
+	for _, s := range a.LoginSteps() {
+		if s.Name() == name {
+			return s
+		}
+	}
+
+	return nil
+}
 
 // amrPassword is the RFC 8176 amr value recorded for a password login.
 const amrPassword = "pwd"
@@ -36,11 +152,24 @@ type pendingState struct {
 	// TokenIDs are the pending-phase credentials (cookie and step tokens), all retired once
 	// the session activates.
 	TokenIDs []string
+	// Resolved are the login steps already resolved in this flow.
+	Resolved []string
+	// Switched is the context a SwitchSession applies once its steps are resolved, while the
+	// stored session stays active on the previous selection; nil for a login.
+	Switched map[string]any
+	// SwitchStep is the step the switch waits on.
+	SwitchStep string
+	// Recreate makes applying the switch replace the session with a new one.
+	Recreate bool
+	// SwitchedBy is the credential that asked for the switch, retired once it applies.
+	SwitchedBy string
 }
 
 // mfaEnrollment is the driver state of an in-progress enrollment.
 type mfaEnrollment struct {
 	State []byte
+	// SessionID is the session that began the enrolment.
+	SessionID string
 }
 
 // stepContext bundles a pending session with what the step endpoints need about it.
@@ -49,6 +178,22 @@ type stepContext struct {
 	claims *token.AccessClaims
 	client *client.Client
 	state  pendingState
+}
+
+// loadUser fills info with user id unless an earlier call of the evaluation already did.
+func (a *Auth) loadUser(ctx context.Context, id string, info *UserInfo) error {
+	if info.ID != "" {
+		return nil
+	}
+
+	loaded, err := a.users.GetUser(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	*info = loaded
+
+	return nil
 }
 
 // filterMethods returns the method names both the client and level permit.
@@ -117,11 +262,14 @@ func (a *Auth) mfaMethodSets(ctx context.Context, userID string, cl *client.Clie
 	return permitted, available, nil
 }
 
-// evaluateSteps resolves the target ACR and the built-in login steps for session.
-func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *client.Client, req acrRequest) (pendingState, error) {
+// evaluateSteps resolves the target ACR and the login steps for session, skipping the
+// resolved login steps.
+func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, info *UserInfo, cl *client.Client, req acrRequest, resolved []string) (pendingState, error) {
 	var names, primary, enrolled []string
 
-	if a.mfaStore != nil {
+	// The factors matter only when the client or a level can ask for one.
+	if a.mfaStore != nil && (cl.MFAPolicy == client.MFAPolicyRequired || cl.MFAPolicy == client.MFAPolicyOptional ||
+		slices.ContainsFunc(a.config.ACRLevels, func(lvl contract.ACRLevelConfig) bool { return lvl.RequireMFA })) {
 		var err error
 
 		if names, err = a.mfaMethods.Names(ctx); err != nil {
@@ -161,12 +309,22 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 		return pendingState{}, err
 	}
 
-	st := pendingState{Initialized: true, Essential: req.Essential}
+	st := pendingState{
+		Initialized: true,
+		Essential:   req.Essential,
+		Resolved:    resolved,
+	}
 	if target != nil {
 		st.TargetACR = target.Value
 	}
 
 	sess.Status = session.StatusActive
+	sess.Step = ""
+
+	// An unverified address is proven before a factor can be bound to the account.
+	if err := evaluateGates(ctx, a, sess, info, a.contacts, resolved); err != nil || sess.Status != session.StatusActive {
+		return st, err
+	}
 
 	required := cl.MFAPolicy == client.MFAPolicyRequired || (target != nil && target.RequireMFA)
 	optional := cl.MFAPolicy == client.MFAPolicyOptional
@@ -178,20 +336,10 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 	}
 
 	if a.mfaStore != nil && !satisfied && (required || optional) {
-		permitted := filterMethods(names, cl, target)
-
-		available := 0
-
-		for _, m := range enrolled {
-			if slices.Contains(permitted, m) {
-				available++
-			}
-		}
-
 		// Only a user without any factor is onboarded; an enrolled factor that the client or
 		// level does not permit must not be bypassed by enrolling a new one.
 		switch {
-		case available > 0:
+		case intersects(enrolled, filterMethods(names, cl, target)):
 			sess.Status = session.StatusPendingMFA
 		case required && len(enrolled) == 0 && len(filterMethods(primary, cl, target)) > 0:
 			sess.Status = session.StatusPendingMFASetup
@@ -212,8 +360,7 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 
 	// A forced password change is the last step, so only a login that passed every factor
 	// may replace the credential
-	info, err := a.users.GetUser(ctx, sess.UserID)
-	if err != nil {
+	if err := a.loadUser(ctx, sess.UserID, info); err != nil {
 		return pendingState{}, err
 	}
 
@@ -223,15 +370,59 @@ func (a *Auth) evaluateSteps(ctx context.Context, sess *session.Session, cl *cli
 		}
 
 		sess.Status = session.StatusPendingPasswordChange
+
+		return st, nil
+	}
+
+	if err := evaluateGates(ctx, a, sess, info, a.steps, resolved); err != nil {
+		return pendingState{}, err
 	}
 
 	return st, nil
 }
 
+// evaluateLoginGates holds session at the first contact or application step it still requires.
+func (a *Auth) evaluateLoginGates(ctx context.Context, sess *session.Session, info *UserInfo, resolved []string) error {
+	if err := evaluateGates(ctx, a, sess, info, a.contacts, resolved); err != nil || sess.Status != session.StatusActive {
+		return err
+	}
+
+	return evaluateGates(ctx, a, sess, info, a.steps, resolved)
+}
+
+// evaluateGates holds session at the first of steps it still requires.
+func evaluateGates[S LoginStep](ctx context.Context, a *Auth, sess *session.Session, info *UserInfo, steps []S, resolved []string) error {
+	for _, step := range steps {
+		if slices.Contains(resolved, step.Name()) {
+			continue
+		}
+
+		if err := a.loadUser(ctx, sess.UserID, info); err != nil {
+			return err
+		}
+
+		required, err := step.Required(ctx, sess, *info)
+		if err != nil {
+			return err
+		}
+
+		if required {
+			sess.Status = session.StatusPendingStep
+			sess.Step = step.Name()
+
+			return nil
+		}
+	}
+
+	return nil
+}
+
 // startSession resolves the login steps for a freshly authenticated sess, persists it and
 // returns the final credentials when active or a step token when pending.
 func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *client.Client, req acrRequest, returnTo string, baseURL, mountPath string) (LoginResult, error) {
-	st, err := a.evaluateSteps(ctx, sess, cl, req)
+	var info UserInfo
+
+	st, err := a.evaluateSteps(ctx, sess, &info, cl, req, nil)
 	if err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
@@ -239,27 +430,20 @@ func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *clie
 	now := time.Now()
 	sess.CreatedAt = now
 	sess.LastSeen = now
+	sess.AuthTime = now
+	sess.AuthMethods = sess.AMR
+	sess.AuthACR = sess.ACR
+	sess.AuthMFA = a.mfaVerified(sess)
 	sess.ExpiresAt = now.Add(a.config.SessionTTL)
 
 	// A pending session lives only as long as its step token.
 	if sess.Status != session.StatusActive {
-		sess.ExpiresAt = now.Add(a.config.AccessTokenTTL)
+		sess.ExpiresAt = now.Add(a.config.PendingTTL)
 	}
 
-	var cookie, jti string
-
-	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
-		if err := a.sessions.Create(ctx, sess); err != nil {
-			return err
-		}
-
-		var err error
-
-		cookie, jti, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
-
-		return err
-	}); err != nil {
-		return LoginResult{}, NewOAuthErrorFrom(err)
+	cookie, jti, err := a.commitSession(ctx, sess, "", nil, now)
+	if err != nil {
+		return LoginResult{}, err
 	}
 
 	if sess.Status == session.StatusActive {
@@ -268,22 +452,23 @@ func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *clie
 
 	st.TokenIDs = append(st.TokenIDs, jti)
 
-	return a.pendingLoginResult(ctx, sess, cl, st, cookie, returnTo, baseURL, mountPath)
+	prompt, err := a.promptPending(ctx, sess, &info, cl, &st)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	return a.pendingLoginResult(ctx, sess, cl, st, prompt, cookie, returnTo, baseURL, mountPath)
 }
 
 // pendingLoginResult persists the step state, opens the first MFA challenge when needed and
 // issues the step token for a pending session.
-func (a *Auth) pendingLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, st pendingState, cookie, returnTo string, baseURL, mountPath string) (LoginResult, error) {
-	res := LoginResult{Status: sess.Status, ACR: sess.ACR, AMR: sess.AMR}
+func (a *Auth) pendingLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, st pendingState, res LoginResult, cookie, returnTo string, baseURL, mountPath string) (LoginResult, error) {
+	res.Status = sess.Status
+	res.ACR = sess.ACR
+	res.AMR = sess.AMR
 
 	if cookie != "" {
 		res.Cookie = a.cookieDirective(cookie, time.Until(sess.ExpiresAt), baseURL, mountPath)
-	}
-
-	if sess.Status == session.StatusPendingMFA {
-		if err := a.selectMFA(ctx, sess, cl, &st, &res, "", false); err != nil {
-			return LoginResult{}, err
-		}
 	}
 
 	step, jti, err := a.issueStepToken(ctx, sess, cl)
@@ -293,7 +478,7 @@ func (a *Auth) pendingLoginResult(ctx context.Context, sess *session.Session, cl
 
 	st.TokenIDs = append(st.TokenIDs, jti)
 
-	if err := setSynced(ctx, a.pending, sess.ID, st, cache.TTL[pendingState](time.Until(sess.ExpiresAt))); err != nil {
+	if err := setSynced(ctx, a.pending, sess.ID, st, cache.TTL[pendingState](time.Until(a.pendingUntil(sess)))); err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
@@ -306,27 +491,73 @@ func (a *Auth) pendingLoginResult(ctx context.Context, sess *session.Session, cl
 	return res, nil
 }
 
-// limitChallenge claims the right to issue another challenge for method within the pending
-// flow id (a session or a reset request). Re-issuing one is a resend whichever way it is
-// reached, so it is capped and rate limited per flow, and every issue is bounded by the
-// per-user budget key across flows so repeated attempts cannot flood a device.
-func (a *Auth) limitChallenge(ctx context.Context, id, budget string, expiresAt time.Time, clientID, method string) (string, error) {
-	issued, err := a.challenges.Get(ctx, id+":"+method)
-	if err != nil {
-		return "", NewOAuthErrorFrom(err)
+// promptPending builds the prompt of a pending session, opening its MFA challenge when needed;
+// callers run it before retiring any credential, so a failure leaves the flow usable.
+func (a *Auth) promptPending(ctx context.Context, sess *session.Session, info *UserInfo, cl *client.Client, st *pendingState) (LoginResult, error) {
+	var res LoginResult
+
+	switch sess.Status {
+	case session.StatusPendingMFA:
+		if err := a.selectMFA(ctx, sess, cl, st, &res, "", false); err != nil {
+			return LoginResult{}, err
+		}
+	case session.StatusPendingStep:
+		if err := a.promptStep(ctx, sess, info, &res); err != nil {
+			return LoginResult{}, err
+		}
+	case session.StatusActive, session.StatusPendingPasswordChange, session.StatusPendingMFASetup:
 	}
 
-	if issued > int64(a.config.Throttle.MFAMaxResends) {
-		return "", NewThrottledError(time.Until(expiresAt))
+	return res, nil
+}
+
+// limitChallenge claims the right to issue another challenge for method within the pending
+// flow id (a session or a reset request), counted for ttl. Re-issuing one is a resend whichever
+// way it is reached, so it is capped and rate limited per flow, and every issue is bounded by
+// the per-user budget key across flows so repeated attempts cannot flood a device. The returned
+// release undoes the claim when nothing was issued.
+func (a *Auth) limitChallenge(ctx context.Context, id, budget string, ttl time.Duration, clientID, method string) (func(), error) {
+	counter := id + ":" + method
+
+	// Counting before anything is issued keeps a failure to count from letting one through.
+	issued, err := a.challenges.Increment(ctx, counter, 1, cache.TTL[int64](ttl))
+	if err != nil {
+		return nil, NewOAuthErrorFrom(err)
+	}
+
+	revert := func() {
+		_, _ = a.challenges.Increment(ctx, counter, -1)
+	}
+
+	if issued > int64(a.config.Throttle.MFAMaxResends)+1 {
+		revert()
+
+		remaining, _, err := a.challenges.TTL(ctx, counter)
+		if err != nil {
+			return nil, NewOAuthErrorFrom(err)
+		}
+
+		if remaining <= 0 {
+			remaining = ttl
+		}
+
+		return nil, NewThrottledError(remaining)
 	}
 
 	if err := a.checkThrottle(ctx, []string{budget}, clientID, ""); err != nil {
-		return "", err
+		revert()
+
+		return nil, err
+	}
+
+	release := func() {
+		revert()
+		a.refundThrottle(ctx, []string{budget})
 	}
 
 	cooldown := a.config.Throttle.MFAResendCooldown
 	if cooldown <= 0 {
-		return "", nil
+		return release, nil
 	}
 
 	// Claiming is atomic and the marker's own lifetime is the cooldown, so its presence is
@@ -335,27 +566,31 @@ func (a *Auth) limitChallenge(ctx context.Context, id, budget string, expiresAt 
 
 	fresh, err := a.challenges.Add(ctx, key, 1, cache.TTL[int64](cooldown))
 	if err != nil {
-		a.refundThrottle(ctx, []string{budget})
+		release()
 
-		return "", NewOAuthErrorFrom(err)
+		return nil, NewOAuthErrorFrom(err)
 	}
 
 	if !fresh {
-		a.refundThrottle(ctx, []string{budget})
+		release()
 
 		remaining, _, err := a.challenges.TTL(ctx, key)
 		if err != nil {
-			return "", NewOAuthErrorFrom(err)
+			return nil, NewOAuthErrorFrom(err)
 		}
 
 		if remaining <= 0 {
 			remaining = cooldown
 		}
 
-		return "", NewThrottledError(remaining)
+		return nil, NewThrottledError(remaining)
 	}
 
-	return key, nil
+	return func() {
+		release()
+
+		_ = a.challenges.Delete(ctx, key)
+	}, nil
 }
 
 // selectMFA fills the pending_mfa prompt on login result.
@@ -387,34 +622,9 @@ func (a *Auth) selectMFA(ctx context.Context, sess *session.Session, cl *client.
 	}
 
 	if force || method != st.Method {
-		cooldownKey, err := a.limitChallenge(ctx, sess.ID, "mfa-open:"+sess.UserID, sess.ExpiresAt, cl.ID, method)
+		challengeID, data, err := a.openMFAChallenge(ctx, sess.ID, sess.UserID, sess.ExpiresAt, cl.ID, method, m)
 		if err != nil {
 			return err
-		}
-
-		challengeID, data, err := m.BeginVerify(ctx, sess.UserID)
-
-		// A self-contained method issues nothing and a failed one delivered nothing, so
-		// neither counts against the limits and neither holds the cooldown.
-		if challengeID == "" {
-			a.refundThrottle(ctx, []string{"mfa-open:" + sess.UserID})
-
-			if cooldownKey != "" {
-				_ = a.challenges.Delete(ctx, cooldownKey)
-			}
-		}
-
-		if err != nil {
-			return NewOAuthErrorFrom(err)
-		}
-
-		if challengeID != "" {
-			if _, err := a.challenges.Increment(ctx, sess.ID+":"+method, 1,
-				cache.TTL[int64](time.Until(sess.ExpiresAt))); err != nil {
-				return NewOAuthErrorFrom(err)
-			}
-
-			a.failThrottle(ctx, []string{"mfa-open:" + sess.UserID})
 		}
 
 		st.Method = method
@@ -430,6 +640,46 @@ func (a *Auth) selectMFA(ctx context.Context, sess *session.Session, cl *client.
 	return nil
 }
 
+// openMFAChallenge opens a challenge for method within flow id under the resend limits and the
+// user's per-user budget.
+func (a *Auth) openMFAChallenge(ctx context.Context, id, userID string, expiresAt time.Time, clientID, method string, m mfa.Method) (string, map[string]any, error) {
+	budget := "mfa-open:" + userID
+
+	release, err := a.limitChallenge(ctx, id, budget, time.Until(expiresAt), clientID, method)
+	if err != nil {
+		return "", nil, err
+	}
+
+	challengeID, data, err := m.BeginVerify(ctx, userID)
+
+	// A self-contained method issues nothing and a failed one delivered nothing, so
+	// neither counts against the limits and neither holds the cooldown.
+	if challengeID == "" {
+		release()
+	}
+
+	if err != nil {
+		return "", nil, NewOAuthErrorFrom(err)
+	}
+
+	if challengeID != "" {
+		a.failThrottle(ctx, []string{budget})
+	}
+
+	return challengeID, data, nil
+}
+
+// pendingUntil is when sess's pending phase and its step token end; a switched session outlives
+// them.
+func (a *Auth) pendingUntil(sess *session.Session) time.Time {
+	until := time.Now().Add(a.config.PendingTTL)
+	if sess.ExpiresAt.Before(until) {
+		return sess.ExpiresAt
+	}
+
+	return until
+}
+
 // issueStepToken mints a step token bound to the pending sess, returning it with its jti.
 func (a *Auth) issueStepToken(ctx context.Context, sess *session.Session, cl *client.Client) (string, string, error) {
 	jti, err := newJTI()
@@ -437,7 +687,9 @@ func (a *Auth) issueStepToken(ctx context.Context, sess *session.Session, cl *cl
 		return "", "", NewOAuthErrorFrom(err)
 	}
 
-	if err := a.jti.Issue(ctx, jti, sess.ID, time.Until(sess.ExpiresAt)); err != nil {
+	expiresAt := a.pendingUntil(sess)
+
+	if err := a.jti.Issue(ctx, jti, sess.ID, time.Until(expiresAt)); err != nil {
 		return "", "", NewOAuthErrorFrom(err)
 	}
 
@@ -447,7 +699,7 @@ func (a *Auth) issueStepToken(ctx context.Context, sess *session.Session, cl *cl
 		TokenID:   jti,
 		ClientID:  cl.ID,
 		IssuedAt:  time.Now().Unix(),
-		ExpiresAt: sess.ExpiresAt.Unix(),
+		ExpiresAt: expiresAt.Unix(),
 	})
 	if err != nil {
 		return "", "", NewOAuthErrorFrom(err)
@@ -524,10 +776,6 @@ func (a *Auth) stepSession(ctx context.Context, tok string, statuses ...session.
 		return nil, err
 	}
 
-	if !slices.Contains(statuses, sess.Status) {
-		return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
-	}
-
 	cl, err := a.clients.GetClient(ctx, sess.ClientID)
 	if err != nil {
 		return nil, NewOAuthErrorFrom(err)
@@ -535,14 +783,14 @@ func (a *Auth) stepSession(ctx context.Context, tok string, statuses ...session.
 
 	sc := &stepContext{sess: sess, claims: claims, client: cl}
 
-	if sess.Status == session.StatusActive {
+	// A step token reaches an active session only through a switch waiting on its steps.
+	if sess.Status == session.StatusActive && claims.Type != token.TypeStepToken && slices.Contains(statuses, session.StatusActive) {
 		return sc, nil
 	}
 
 	st, err := a.pending.Get(ctx, sess.ID)
 	if err != nil {
-		var knf cache.KeyNotFoundError
-		if errors.As(err, &knf) {
+		if _, ok := errors.AsType[cache.KeyNotFoundError](err); ok {
 			return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 		}
 
@@ -550,6 +798,24 @@ func (a *Auth) stepSession(ctx context.Context, tok string, statuses ...session.
 	}
 
 	if !st.Initialized {
+		return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	// An active session is pending only through a switch waiting on its steps.
+	if sess.Status == session.StatusActive {
+		if st.Switched == nil {
+			return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+		}
+
+		// The switch is laid over the stored session as it is now.
+		switched := *sess
+		switched.Context = st.Switched
+		switched.Status = session.StatusPendingStep
+		switched.Step = st.SwitchStep
+		sc.sess = &switched
+	}
+
+	if !slices.Contains(statuses, sc.sess.Status) {
 		return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
@@ -568,7 +834,22 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 		req.Values = []string{sc.state.TargetACR}
 	}
 
-	st, err := a.evaluateSteps(ctx, sess, sc.client, req)
+	var (
+		info UserInfo
+		st   pendingState
+		err  error
+	)
+
+	// A switch re-checks only the login steps, as SwitchSession does.
+	if sc.state.Switched != nil {
+		st = pendingState{Initialized: true, TargetACR: sc.state.TargetACR, Resolved: sc.state.Resolved, Recreate: sc.state.Recreate, SwitchedBy: sc.state.SwitchedBy}
+		sess.Status = session.StatusActive
+		sess.Step = ""
+		err = a.evaluateLoginGates(ctx, sess, &info, sc.state.Resolved)
+	} else {
+		st, err = a.evaluateSteps(ctx, sess, &info, sc.client, req, sc.state.Resolved)
+	}
+
 	if err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
@@ -582,40 +863,310 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 		retired = append(retired, sc.claims.TokenID)
 	}
 
-	var cookie, jti string
-
 	// A session still pending after a step gets a fresh cookie and step token
 	if sess.Status != session.StatusActive {
-		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
-			if err := a.sessions.Update(ctx, sess); err != nil {
-				return err
-			}
+		prompt, err := a.promptPending(ctx, sess, &info, sc.client, &st)
+		if err != nil {
+			return LoginResult{}, err
+		}
 
-			for _, id := range retired {
-				if err := a.jti.Revoke(ctx, id); err != nil {
-					return err
+		// A switch keeps the stored session and its cookie until its steps are resolved.
+		if sc.state.Switched != nil {
+			st.TokenIDs = sc.state.TokenIDs
+
+			if sc.claims.Type == token.TypeStepToken {
+				if err := a.jti.Revoke(ctx, sc.claims.TokenID); err != nil {
+					return LoginResult{}, NewOAuthErrorFrom(err)
 				}
+
+				st.TokenIDs = slices.DeleteFunc(slices.Clone(st.TokenIDs), func(id string) bool { return id == sc.claims.TokenID })
 			}
 
-			var err error
+			st.Switched = sess.Context
+			st.SwitchStep = sess.Step
 
-			cookie, jti, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
+			return a.pendingLoginResult(ctx, sess, sc.client, st, prompt, "", returnTo, baseURL, mountPath)
+		}
 
-			return err
-		}); err != nil {
-			return LoginResult{}, NewOAuthErrorFrom(err)
+		cookie, jti, err := a.commitSession(ctx, sess, "", retired, now)
+		if err != nil {
+			return LoginResult{}, err
 		}
 
 		st.TokenIDs = []string{jti}
 
-		return a.pendingLoginResult(ctx, sess, sc.client, st, cookie, returnTo, baseURL, mountPath)
+		return a.pendingLoginResult(ctx, sess, sc.client, st, prompt, cookie, returnTo, baseURL, mountPath)
+	}
+
+	if sc.state.Switched != nil {
+		cookie, err := a.applySwitch(ctx, sess, sc.state.Recreate, append(retired, sc.state.SwitchedBy), "")
+		if err != nil {
+			return LoginResult{}, err
+		}
+
+		return a.buildLoginResult(ctx, sess, sc.client, returnTo, cookie, baseURL, mountPath)
+	}
+
+	// A step may have held the login before its level was known, so it is scored once complete.
+	var mfaMethod string
+	if sess.AuthMFA {
+		mfaMethod = sess.MFAMethod
+	}
+
+	sess.AuthACR = a.authACR(primaryMethod(sess), sess.AuthMethods, mfaMethod)
+
+	if lvl := a.acrLevel(sess.AuthACR); lvl != nil && intersects(sess.AuthMethods, lvl.MFASatisfiedByAMR) {
+		sess.AuthMFA = true
 	}
 
 	sess.ExpiresAt = now.Add(a.config.SessionTTL)
 
+	cookie, _, err := a.commitSession(ctx, sess, "", retired, now)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	_ = deleteSynced(ctx, a.pending, sess.ID)
+
+	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: sess.UserID, ClientID: sess.ClientID, Detail: map[string]any{"step": "completed"}})
+
+	return a.buildLoginResult(ctx, sess, sc.client, returnTo, cookie, baseURL, mountPath)
+}
+
+// promptStep fills the pending_step prompt on login result.
+func (a *Auth) promptStep(ctx context.Context, sess *session.Session, info *UserInfo, res *LoginResult) error {
+	step := a.loginStep(sess.Step)
+	if step == nil {
+		return NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	if err := a.loadUser(ctx, sess.UserID, info); err != nil {
+		return NewOAuthErrorFrom(err)
+	}
+
+	p, err := step.Prompt(ctx, sess, *info)
+	if err != nil {
+		return NewOAuthErrorFrom(err)
+	}
+
+	res.Step = sess.Step
+	res.Interaction = p.Interaction
+	res.Data = p.Data
+
+	return nil
+}
+
+// ResolveStep submits a payload to the pending login step: a done step advances the session,
+// otherwise the step stays pending as a throttled failed attempt.
+func (a *Auth) ResolveStep(ctx context.Context, in StepRequest) (LoginResult, error) {
+	step := a.loginStep(in.Name)
+	if step == nil {
+		return LoginResult{}, NewOAuthError(http.StatusNotFound, ErrCodeInvalidRequest, "unknown login step")
+	}
+
+	sc, err := a.stepSession(ctx, in.Token, session.StatusPendingStep)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	if sc.sess.Step != in.Name {
+		return LoginResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "login step is not the pending one")
+	}
+
+	identity := "step:" + sc.sess.UserID
+	keys := throttleKeys(identity, in.IP)
+
+	if err := a.checkThrottle(ctx, keys, sc.client.ID, in.IP); err != nil {
+		return LoginResult{}, err
+	}
+
+	// Resolve works on a copy so an unfinished step leaves nothing behind.
+	work := *sc.sess
+	work.Context = maps.Clone(sc.sess.Context)
+
+	if work.Context == nil {
+		work.Context = make(map[string]any)
+	}
+
+	// The step and the prompt that may follow share one load of the user.
+	var info UserInfo
+
+	if err := a.loadUser(ctx, work.UserID, &info); err != nil {
+		a.refundThrottle(ctx, keys)
+
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	r, err := step.Resolve(ctx, &work, info, in.Payload)
+	if err != nil {
+		a.refundThrottle(ctx, keys)
+
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	detail := map[string]any{"step": in.Name}
+
+	if !r.Done {
+		if r.NoAttempt {
+			a.refundThrottle(ctx, keys)
+		} else {
+			a.failThrottle(ctx, keys)
+			a.emit(ctx, event.Event{Type: event.TypeStepFailure, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
+		}
+
+		res := stepResult(sc, in.Token, in.ReturnTo)
+
+		if err := a.promptStep(ctx, sc.sess, &info, &res); err != nil {
+			return LoginResult{}, err
+		}
+
+		if len(r.Data) > 0 {
+			data := maps.Clone(res.Data)
+			if data == nil {
+				data = make(map[string]any, len(r.Data))
+			}
+
+			maps.Copy(data, r.Data)
+			res.Data = data
+		}
+
+		return res, nil
+	}
+
+	a.passThrottle(ctx, keys, identity)
+	a.emit(ctx, event.Event{Type: event.TypeStepCompleted, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
+
+	sc.sess = &work
+	sc.state.Resolved = append(sc.state.Resolved, in.Name)
+
+	return a.advanceSession(ctx, sc, in.ReturnTo, in.BaseURL, in.MountPath)
+}
+
+// SwitchSession applies a new selection to an active session through the Switcher steps,
+// re-evaluates the login steps and re-issues its credentials. When a step is required again it
+// returns a step token instead and applies the selection only once the step is resolved.
+func (a *Auth) SwitchSession(ctx context.Context, in SwitchSessionRequest) (LoginResult, error) {
+	if !a.SessionSwitching() {
+		return LoginResult{}, NewOAuthError(http.StatusNotFound, ErrCodeInvalidRequest, "session switching is not enabled")
+	}
+
+	sc, err := a.stepSession(ctx, in.Token, session.StatusActive)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	if err := a.checkStepUp(ctx, sc.sess, ActionSwitchSession); err != nil {
+		return LoginResult{}, err
+	}
+
+	old := sc.sess
+
+	sess := *old
+	sess.Context = maps.Clone(old.Context)
+
+	if sess.Context == nil {
+		sess.Context = make(map[string]any)
+	}
+
+	recreate := false
+
+	// A step that applied the selection is resolved by it.
+	var resolved []string
+
+	for _, step := range a.steps {
+		sw, ok := step.(Switcher)
+		if !ok {
+			continue
+		}
+
+		mode, err := sw.Switch(ctx, &sess, in.Selection)
+		if err != nil {
+			return LoginResult{}, NewOAuthErrorFrom(err)
+		}
+
+		if mode == SwitchSkip {
+			continue
+		}
+
+		recreate = recreate || mode == SwitchRecreate
+
+		resolved = append(resolved, step.Name())
+	}
+
+	if len(resolved) == 0 {
+		return LoginResult{}, NewOAuthErrorFrom(ErrInvalidSelection)
+	}
+
+	var info UserInfo
+
+	if err := a.evaluateLoginGates(ctx, &sess, &info, resolved); err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(err)
+	}
+
+	sess.LastSeen = time.Now()
+
+	// A switch still waiting is replaced; its step tokens are retired once the new one is stored.
+	var replaced []string
+	if waiting, err := a.pending.Get(ctx, old.ID); err == nil && waiting.Switched != nil {
+		replaced = waiting.TokenIDs
+	}
+
+	// A switch waiting on a step takes effect once it is resolved; the session stays as it is.
+	if sess.Status != session.StatusActive {
+		st := pendingState{
+			Initialized: true,
+			TargetACR:   sess.ACR,
+			Resolved:    resolved,
+			Recreate:    recreate,
+			SwitchedBy:  sc.claims.TokenID,
+		}
+
+		prompt, err := a.promptPending(ctx, &sess, &info, sc.client, &st)
+		if err != nil {
+			return LoginResult{}, err
+		}
+
+		st.Switched = sess.Context
+		st.SwitchStep = sess.Step
+
+		res, err := a.pendingLoginResult(ctx, &sess, sc.client, st, prompt, "", in.ReturnTo, in.BaseURL, in.MountPath)
+		if err != nil {
+			return LoginResult{}, err
+		}
+
+		for _, id := range replaced {
+			_ = a.jti.Revoke(ctx, id)
+		}
+
+		return res, nil
+	}
+
+	cookie, err := a.applySwitch(ctx, &sess, recreate, append([]string{sc.claims.TokenID}, replaced...), in.IP)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	return a.buildLoginResult(ctx, &sess, sc.client, in.ReturnTo, cookie, in.BaseURL, in.MountPath)
+}
+
+// commitSession stores sess, creating it when it has no ID yet and revoking the session it
+// replaces, retires the credentials in retired and issues its new session cookie, all at once.
+func (a *Auth) commitSession(ctx context.Context, sess *session.Session, replaces string, retired []string, now time.Time) (string, string, error) {
+	var cookie, jti string
+
 	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
-		if err := a.sessions.Update(ctx, sess); err != nil {
+		if sess.ID == "" {
+			if err := a.sessions.Create(ctx, sess); err != nil {
+				return err
+			}
+		} else if err := a.sessions.Update(ctx, sess); err != nil {
 			return err
+		}
+
+		if replaces != "" {
+			if err := a.sessions.Revoke(ctx, replaces); err != nil && !errors.Is(err, session.ErrNotFound) {
+				return err
+			}
 		}
 
 		for _, id := range retired {
@@ -626,89 +1177,45 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 
 		var err error
 
-		cookie, _, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
+		cookie, jti, err = a.issueSessionCookie(ctx, sess, now, sess.ExpiresAt)
 
 		return err
 	}); err != nil {
-		return LoginResult{}, NewOAuthErrorFrom(err)
+		return "", "", NewOAuthErrorFrom(err)
 	}
 
-	_ = deleteSynced(ctx, a.pending, sess.ID)
-
-	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: sess.UserID, ClientID: sess.ClientID, Detail: map[string]any{"step": "completed"}})
-
-	return a.buildLoginResult(ctx, sess, sc.client, returnTo, cookie, baseURL, mountPath)
+	return cookie, jti, nil
 }
 
-// checkThrottle claims an attempt on every key, refusing (and refunding the claims made so
-// far) when any key is exhausted or locked out.
-func (a *Auth) checkThrottle(ctx context.Context, keys []string, clientID, ip string) error {
-	for i, key := range keys {
-		ok, retryAfter, err := a.throttle.Allow(ctx, key)
-		if err != nil {
-			a.refundThrottle(ctx, keys[:i])
+// applySwitch stores the switched sess in place of the stored session, recreating it under a
+// new ID when asked, retires the credentials in retired and returns the new session cookie.
+func (a *Auth) applySwitch(ctx context.Context, sess *session.Session, recreate bool, retired []string, ip string) (string, error) {
+	stored := sess.ID
 
-			return NewOAuthErrorFrom(err)
+	var replaces string
+
+	if recreate {
+		sess.ID = ""
+		replaces = stored
+	}
+
+	cookie, _, err := a.commitSession(ctx, sess, replaces, retired, time.Now())
+	if err != nil {
+		return "", err
+	}
+
+	_ = deleteSynced(ctx, a.pending, stored)
+
+	if recreate {
+		// The IdP session still backs the new session.
+		if idt, err := a.fedIDTokens.Get(ctx, stored); err == nil && idt != "" {
+			_ = setSynced(ctx, a.fedIDTokens, sess.ID, idt, cache.TTL[string](time.Until(sess.ExpiresAt)))
 		}
 
-		if !ok {
-			a.refundThrottle(ctx, keys[:i])
-			a.emit(ctx, event.Event{Type: event.TypeLockout, ClientID: clientID, IP: ip, Detail: map[string]any{"key": key}})
-
-			return NewThrottledError(retryAfter)
-		}
+		_ = deleteSynced(ctx, a.fedIDTokens, stored)
 	}
 
-	return nil
-}
+	a.emit(ctx, event.Event{Type: event.TypeSessionSwitched, UserID: sess.UserID, ClientID: sess.ClientID, IP: ip, Detail: map[string]any{"recreated": recreate}})
 
-// refundThrottle returns the claims on every key when the attempt was not a guess.
-func (a *Auth) refundThrottle(ctx context.Context, keys []string) {
-	for _, key := range keys {
-		_ = a.throttle.Refund(ctx, key)
-	}
-}
-
-// passThrottle settles a successful attempt: the identity key is cleared and the source keys
-// are refunded, so successes never count against a shared source.
-func (a *Auth) passThrottle(ctx context.Context, keys []string) {
-	if len(keys) == 0 {
-		return
-	}
-
-	a.resetThrottle(ctx, keys[:1])
-	a.refundThrottle(ctx, keys[1:])
-}
-
-// failThrottle records a failed attempt on every key.
-func (a *Auth) failThrottle(ctx context.Context, keys []string) {
-	for _, key := range keys {
-		_ = a.throttle.Fail(ctx, key)
-	}
-}
-
-// resetThrottle clears every key after a successful attempt.
-func (a *Auth) resetThrottle(ctx context.Context, keys []string) {
-	for _, key := range keys {
-		_ = a.throttle.Reset(ctx, key)
-	}
-}
-
-func throttleIdentity(prefix, identifier string) string {
-	return prefix + strings.ToLower(strings.TrimSpace(identifier))
-}
-
-// throttleKeys combines a stable identity key with the caller's IP.
-func throttleKeys(identity, ip string) []string {
-	keys := make([]string, 0, 2)
-
-	if identity != "" {
-		keys = append(keys, identity)
-	}
-
-	if ip != "" {
-		keys = append(keys, "ip:"+ip)
-	}
-
-	return keys
+	return cookie, nil
 }

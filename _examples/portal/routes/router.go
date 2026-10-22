@@ -36,6 +36,8 @@ func Init(a *portal.App) error {
 	a.Post("/mfa/resend", r.mfaResend)
 	a.Get("/password", r.passwordForm)
 	a.Post("/password", r.changePassword)
+	a.Get("/rules", r.rulesPage)
+	a.Post("/rules", r.acceptRules)
 	a.Post("/logout", r.logout)
 
 	routes.Bind(a, "/auth", a.Auth())

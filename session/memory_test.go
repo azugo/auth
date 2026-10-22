@@ -189,3 +189,14 @@ func TestPendingStatus(t *testing.T) {
 	qt.Check(t, qt.IsTrue(s.Pending()))
 	qt.Check(t, qt.IsFalse(s.Active()))
 }
+
+func TestAuthenticatedAtFallsBackToCreatedAt(t *testing.T) {
+	created := time.Now().Add(-time.Hour)
+
+	// A session stored before AuthTime existed counts from its creation.
+	s := &Session{CreatedAt: created}
+	qt.Check(t, qt.IsTrue(s.AuthenticatedAt().Equal(created)))
+
+	s.AuthTime = created.Add(30 * time.Minute)
+	qt.Check(t, qt.IsTrue(s.AuthenticatedAt().Equal(s.AuthTime)))
+}

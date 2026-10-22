@@ -12,7 +12,7 @@ func TestDefaultPasswordPolicy(t *testing.T) {
 	cfg := &PasswordConfig{MinLength: 8, MaxLength: 16}
 	p := NewPasswordPolicy(cfg)
 
-	owner := UserInfo{ID: "u1", Email: "alice.smith@example.com", Name: "Alice Smith", Claims: map[string]any{"preferred_username": "alice"}}
+	owner := UserInfo{ID: "u1", Contacts: map[string][]Contact{ChannelEmail: {{Address: "alice.smith@example.com"}}}, Name: "Alice Smith", Claims: map[string]any{"preferred_username": "alice"}}
 
 	for _, tc := range []struct {
 		name, password string
@@ -33,7 +33,10 @@ func TestDefaultPasswordPolicy(t *testing.T) {
 	}
 
 	// Short owner identifiers are not matched.
-	qt.Check(t, qt.IsNil(p.Validate(context.Background(), "bobbobbob", UserInfo{Email: "bob@x.io", Claims: map[string]any{"preferred_username": "bob"}})))
+	phone := UserInfo{Contacts: map[string][]Contact{ChannelPhone: {{Address: "+37120000000"}}}}
+	qt.Check(t, qt.IsTrue(errors.Is(p.Validate(context.Background(), "x+37120000000x", phone), ErrWeakPassword)))
+
+	qt.Check(t, qt.IsNil(p.Validate(context.Background(), "bobbobbob", UserInfo{Contacts: map[string][]Contact{ChannelEmail: {{Address: "bob@x.io"}}}, Claims: map[string]any{"preferred_username": "bob"}})))
 
 	// Limits are read live.
 	cfg.MinLength = 14
@@ -43,8 +46,8 @@ func TestDefaultPasswordPolicy(t *testing.T) {
 func TestWeakPasswordMapsToInvalidRequestWithReason(t *testing.T) {
 	err := NewOAuthErrorFrom(NewPasswordPolicy(&PasswordConfig{MinLength: 8}).Validate(context.Background(), "short", UserInfo{}))
 
-	var oe *OAuthError
-	qt.Assert(t, qt.IsTrue(errors.As(err, &oe)))
+	oe, ok := errors.AsType[*OAuthError](err)
+	qt.Assert(t, qt.IsTrue(ok))
 	qt.Check(t, qt.Equals(oe.Code, ErrCodeInvalidRequest))
 	qt.Check(t, qt.Equals(oe.StatusCode(), 400))
 	qt.Check(t, qt.Equals(oe.Description, "password does not meet the policy: must be at least 8 characters"))

@@ -45,6 +45,40 @@ func TestSignIDTokenRSAVerifiesWithStdlib(t *testing.T) {
 	qt.Check(t, qt.Equals(parsed.Header["kid"], "k1"))
 }
 
+func TestSignIDTokenDropsReservedExtraClaims(t *testing.T) {
+	key, priv, pub := genRSA(t)
+
+	kp, err := NewConfigKeyProvider(keySetConfigFor("k1", "RS256", priv, pub))
+	qt.Assert(t, qt.IsNil(err))
+
+	set, err := kp.KeySet(t.Context())
+	qt.Assert(t, qt.IsNil(err))
+
+	raw, err := SignIDToken(set.Primary, IDTokenClaims{
+		Issuer: "https://issuer.example", Subject: "u1", Audience: "client1", IssuedAt: 1000, ExpiresAt: 2000,
+		Extra: map[string]any{
+			"tenant": "acme",
+			"sub":    "admin",
+			"email":  "ceo@example.com", "email_verified": true,
+			"acr": "loa3",
+		},
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	claims := jwt.MapClaims{}
+	_, err = jwt.ParseWithClaims(raw, claims, func(_ *jwt.Token) (any, error) {
+		return &key.PublicKey, nil
+	}, jwt.WithValidMethods([]string{"RS256"}), jwt.WithoutClaimsValidation())
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(claims["tenant"], any("acme")))
+	qt.Check(t, qt.Equals(claims["sub"], any("u1")))
+
+	for _, name := range []string{"email", "email_verified", "acr"} {
+		_, ok := claims[name]
+		qt.Check(t, qt.IsFalse(ok), qt.Commentf("claim %s", name))
+	}
+}
+
 func TestSignIDTokenECDSAVerifiesWithStdlib(t *testing.T) {
 	key, priv, pub := genECDSA(t)
 

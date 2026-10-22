@@ -50,7 +50,7 @@ func TestEnrollVerifyAndReplay(t *testing.T) {
 
 	ctx := context.Background()
 
-	data, err := m.BeginEnroll(ctx, "u1", contract.UserInfo{Email: "alice@example.com"})
+	data, err := m.BeginEnroll(ctx, "u1", contract.UserInfo{Contacts: map[string][]contract.Contact{contract.ChannelEmail: {{Address: "alice@example.com"}}}})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(data.Data["issuer"], "Example"))
 	qt.Check(t, qt.Equals(data.Data["account"], "alice@example.com"))

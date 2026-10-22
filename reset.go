@@ -14,7 +14,6 @@ import (
 	"azugo.io/auth/reset"
 	"azugo.io/auth/session"
 
-	"azugo.io/core/cache"
 	"azugo.io/core/http"
 	"go.uber.org/zap"
 )
@@ -90,7 +89,43 @@ func (a *Auth) openResetChallenge(ctx context.Context, req *reset.Request, m res
 		return
 	}
 
+	// On a channel the library verifies only verified addresses may be used, the primary first
+	reachable := make(map[string][]Contact, len(info.Contacts))
+
+	for channel, contacts := range info.Contacts {
+		verifies := a.contactStep(channel) != nil
+
+		for _, c := range contacts {
+			switch {
+			case verifies && !c.Verified:
+			case c.Primary:
+				reachable[channel] = append([]Contact{c}, reachable[channel]...)
+			default:
+				reachable[channel] = append(reachable[channel], c)
+			}
+		}
+	}
+
+	info.Contacts = reachable
+
+	mail := "reset-mail:" + info.ID
+
+	// Anyone can register an address, so its notices must not spend the owner's own resets.
+	if req.Registration {
+		mail = "notice-mail:" + info.ID
+	}
+
+	if ok, _, err := a.throttle.Allow(ctx, mail); err != nil || !ok {
+		return
+	}
+
 	challengeID, data, err := m.Begin(ctx, req, info)
+
+	// Only a challenge that went out counts as a mail.
+	if err != nil || challengeID == "" {
+		_ = a.throttle.Refund(ctx, mail)
+	}
+
 	if err != nil {
 		if !errors.Is(err, reset.ErrUnavailable) {
 			a.Log(ctx).Error("failed to open password reset challenge", zap.String("user.id", req.UserID), zap.String("method", method), zap.Error(err))
@@ -239,12 +274,8 @@ func (a *Auth) BeginPasswordReset(ctx context.Context, in PasswordResetStepReque
 
 	budget := throttleIdentity("reset-open:", req.Identifier)
 
-	if _, err := a.limitChallenge(ctx, req.ID, budget, req.ExpiresAt, cl.ID, method); err != nil {
+	if _, err := a.limitChallenge(ctx, req.ID, budget, time.Until(req.ExpiresAt), cl.ID, method); err != nil {
 		return PasswordResetResult{}, err
-	}
-
-	if _, err := a.challenges.Increment(ctx, req.ID+":"+method, 1, cache.TTL[int64](time.Until(req.ExpiresAt))); err != nil {
-		return PasswordResetResult{}, NewOAuthErrorFrom(err)
 	}
 
 	a.failThrottle(ctx, []string{budget})
@@ -329,7 +360,8 @@ func (a *Auth) ResetPassword(ctx context.Context, in PasswordResetConfirmRequest
 	}
 
 	// The token is hashed into the key so a lockout event never carries it
-	keys := throttleKeys(fmt.Sprintf("reset-verify:%x", sha256.Sum256([]byte(in.Token))), in.IP)
+	identity := fmt.Sprintf("reset-verify:%x", sha256.Sum256([]byte(in.Token)))
+	keys := throttleKeys(identity, in.IP)
 
 	if err := a.checkThrottle(ctx, keys, "", in.IP); err != nil {
 		return LoginResult{}, err
@@ -391,7 +423,7 @@ func (a *Auth) ResetPassword(ctx context.Context, in PasswordResetConfirmRequest
 		}
 	}
 
-	a.passThrottle(ctx, keys)
+	a.passThrottle(ctx, keys, identity)
 
 	// The policy runs only for a proven owner, so it cannot tell a decoy from a real request
 	if err := a.passwords.Validate(ctx, in.NewPassword, info); err != nil {

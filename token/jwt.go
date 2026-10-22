@@ -35,6 +35,23 @@ type IDTokenClaims struct {
 	// ACR and AMR are the satisfied authentication context and methods.
 	ACR string
 	AMR []string
+	// Extra holds additional claims.
+	Extra map[string]any
+}
+
+// reservedClaims are the ID Token protocol and OIDC standard claim names.
+var reservedClaims = []string{
+	"iss", "sub", "aud", "exp", "iat", "nbf", "jti", "nonce", "auth_time", "acr", "amr", "azp", "at_hash", "c_hash", "sid",
+	"name", "given_name", "family_name", "middle_name", "nickname", "preferred_username", "profile", "picture", "website",
+	"email", "email_verified", "gender", "birthdate", "zoneinfo", "locale", "phone_number", "phone_number_verified",
+	"address", "updated_at",
+	"_claim_names", "_claim_sources", "typ", "cnf", "client_id", "scope", "act", "may_act",
+}
+
+// ReservedClaim reports whether name is an ID Token protocol or OIDC standard claim, which
+// application-defined claims must not supply.
+func ReservedClaim(name string) bool {
+	return slices.Contains(reservedClaims, name)
 }
 
 // accessTokenType is the RFC 9068 typ header value marking a JWT as an access token.
@@ -42,13 +59,18 @@ const accessTokenType = "at+jwt"
 
 // SignIDToken mints a signed ID Token using signingKey.
 func SignIDToken(signingKey SigningKey, claims IDTokenClaims) (string, error) {
-	m := jwt.MapClaims{
-		"iss": claims.Issuer,
-		"sub": claims.Subject,
-		"aud": claims.Audience,
-		"iat": claims.IssuedAt,
-		"exp": claims.ExpiresAt,
+	m := make(jwt.MapClaims, len(claims.Extra)+9)
+	for name, v := range claims.Extra {
+		if !ReservedClaim(name) {
+			m[name] = v
+		}
 	}
+
+	m["iss"] = claims.Issuer
+	m["sub"] = claims.Subject
+	m["aud"] = claims.Audience
+	m["iat"] = claims.IssuedAt
+	m["exp"] = claims.ExpiresAt
 
 	if claims.Nonce != "" {
 		m["nonce"] = claims.Nonce

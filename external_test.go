@@ -41,7 +41,7 @@ func (p *fakeExtProvider) Exchange(_ context.Context, code, codeVerifier, _ stri
 	return &provider.Tokens{
 		IDToken: "idt-" + code,
 		RawClaims: map[string]any{
-			"sub": sub, "name": "Ext Alice", "email": "ext@example.com", "scp": "openid profile",
+			"sub": sub, "name": "Ext Alice", "email": "ext@example.com", "email_verified": true, "scp": "openid profile",
 		},
 	}, nil
 }
@@ -86,12 +86,12 @@ type extTestUsers struct {
 }
 
 func (f extTestUsers) FindOrCreateUser(_ context.Context, _ string, info UserInfo) (UserInfo, error) {
-	return UserInfo{ID: "local-" + info.ID, Name: info.Name, Email: info.Email, Scope: info.Scope}, nil
+	return UserInfo{ID: "local-" + info.ID, Name: info.Name, Contacts: info.Contacts, Scope: info.Scope}, nil
 }
 
 func (f extTestUsers) GetUser(ctx context.Context, id string) (UserInfo, error) {
 	if strings.HasPrefix(id, "local-") {
-		return UserInfo{ID: id, Name: "Ext Alice", Email: "ext@example.com", Scope: "openid profile"}, nil
+		return UserInfo{ID: id, Name: "Ext Alice", Contacts: map[string][]Contact{ChannelEmail: {{Address: "ext@example.com"}}}, Scope: "openid profile"}, nil
 	}
 
 	return f.fakeUsers.GetUser(ctx, id)
@@ -275,8 +275,8 @@ func TestExternalLinkCeremonyAndConflict(t *testing.T) {
 	_, err = a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: u.Query().Get("state"), Binding: res.Cookie.Value, Code: "c2"})
 	qt.Check(t, qt.IsTrue(errors.Is(err, provider.ErrIdentityLinked)))
 
-	var oe *OAuthError
-	qt.Assert(t, qt.IsTrue(errors.As(err, &oe)))
+	oe, ok := errors.AsType[*OAuthError](err)
+	qt.Assert(t, qt.IsTrue(ok))
 	qt.Check(t, qt.Equals(oe.StatusCode(), 409))
 }
 
@@ -312,6 +312,56 @@ func TestExternalRelinkPolicyAllowsMove(t *testing.T) {
 	links, _, err := store.List(context.Background(), "u2", "", nil)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.HasLen(links, 0))
+}
+
+// seenExtUsers records the identity FindOrCreateUser receives.
+type seenExtUsers struct {
+	extTestUsers
+
+	seen *UserInfo
+}
+
+func (f seenExtUsers) FindOrCreateUser(ctx context.Context, method string, info UserInfo) (UserInfo, error) {
+	*f.seen = info
+
+	return f.extTestUsers.FindOrCreateUser(ctx, method, info)
+}
+
+func TestExternalContactsArriveUnverifiedUnlessTrusted(t *testing.T) {
+	for _, trust := range []bool{false, true} {
+		entry := extProviderEntry("corp", "fake")
+		entry.TrustVerifiedContacts = trust
+
+		users := seenExtUsers{extTestUsers: extTestUsers{fakeUsers{users: map[string]UserInfo{}}}, seen: &UserInfo{}}
+		a := newExternalTestAuth(t, []contract.ExternalProviderConfig{entry}, users, extPortalClient())
+
+		state, binding := beginAndExtractState(t, a, "corp", "portal", "")
+
+		_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c"})
+		qt.Assert(t, qt.IsNil(err))
+
+		// The IdP's own flag stays visible either way.
+		qt.Check(t, qt.Equals(users.seen.Contacts[ChannelEmail][0].Verified, trust))
+		qt.Check(t, qt.Equals(users.seen.Claims["email_verified"], any(true)))
+	}
+}
+
+func TestExternalContactsArriveNormalized(t *testing.T) {
+	entry := extProviderEntry("corp", "fake")
+	entry.ClaimMapper = ClaimMapperFunc(func(context.Context, string, map[string]any) (UserInfo, error) {
+		return UserInfo{ID: "ext-1", Contacts: map[string][]Contact{ChannelEmail: {{Address: " Ext@Example.COM "}}}}, nil
+	})
+
+	users := seenExtUsers{extTestUsers: extTestUsers{fakeUsers{users: map[string]UserInfo{}}}, seen: &UserInfo{}}
+	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{entry}, users, extPortalClient())
+
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "")
+
+	_, err := a.ExternalCallback(context.Background(), ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c"})
+	qt.Assert(t, qt.IsNil(err))
+
+	// The provider gets the same spelling every later call will use.
+	qt.Check(t, qt.Equals(users.seen.Contacts[ChannelEmail][0].Address, "ext@example.com"))
 }
 
 func TestExternalPerProviderClaimMapperOverride(t *testing.T) {

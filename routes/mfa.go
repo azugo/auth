@@ -10,11 +10,13 @@ import (
 	"azugo.io/core/http"
 )
 
-// stepInput is the JSON body of the MFA step and enrollment endpoints. A form-encoded body is
-// accepted too, with code and device as the response fields.
+// stepInput is the JSON body of the MFA step, enrollment and re-authentication endpoints. A
+// form-encoded body is accepted too, with code and device as the response fields.
 type stepInput struct {
+	Action   string         `json:"action"`
 	Method   string         `json:"method"`
 	Label    string         `json:"label"`
+	Password string         `json:"password"`
 	Response map[string]any `json:"response"`
 	ReturnTo string         `json:"return_to"`
 }
@@ -31,8 +33,16 @@ func readStepInput(ctx *azugo.Context) (stepInput, error) {
 		return in, ctx.Body.JSON(&in)
 	}
 
+	if v := ctx.Form.StringOptional("action"); v != nil {
+		in.Action = *v
+	}
+
 	if v := ctx.Form.StringOptional("method"); v != nil {
 		in.Method = *v
+	}
+
+	if v := ctx.Form.StringOptional("password"); v != nil {
+		in.Password = *v
 	}
 
 	if v := ctx.Form.StringOptional("return_to"); v != nil {

@@ -3,6 +3,7 @@ package routes
 import (
 	"time"
 
+	"azugo.io/auth"
 	"azugo.io/auth/session"
 
 	"azugo.io/azugo"
@@ -50,7 +51,7 @@ func (h *Handler) listSessions(ctx *azugo.Context) {
 // revokeSession implements DELETE /sessions/{id}: caller-filtered revoke of one of the
 // caller's own sessions.
 func (h *Handler) revokeSession(ctx *azugo.Context) {
-	info, _, err := h.auth.IntrospectFirstParty(ctx, h.auth.ReadSessionToken(ctx))
+	info, err := h.auth.RequireStepUp(ctx, h.auth.ReadSessionToken(ctx), auth.ActionRevokeSession)
 	if err != nil {
 		ctx.Error(err)
 

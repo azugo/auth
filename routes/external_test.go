@@ -59,6 +59,14 @@ func (extUsers) Authenticate(_ context.Context, _, password string) (auth.UserIn
 	return auth.UserInfo{ID: "u1", Name: "Alice", Scope: "openid"}, nil
 }
 
+func (extUsers) VerifyPassword(_ context.Context, _, password string) error {
+	if password == "wrong" {
+		return auth.ErrInvalidCredentials
+	}
+
+	return nil
+}
+
 func (extUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) {
 	return auth.UserInfo{ID: id, Name: "Ext Alice", Scope: "openid"}, nil
 }

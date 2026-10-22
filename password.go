@@ -33,14 +33,22 @@ func (p lengthPolicy) Validate(_ context.Context, password string, info UserInfo
 	}
 
 	username, _ := info.Claims["preferred_username"].(string)
-	local, _, _ := strings.Cut(info.Email, "@")
 	password = strings.ToLower(password)
 
+	ids := []string{username, info.Name}
+
+	for _, contacts := range info.Contacts {
+		for _, c := range contacts {
+			local, _, _ := strings.Cut(c.Address, "@")
+			ids = append(ids, c.Address, local)
+		}
+	}
+
 	// Check only values that are more than 3 chars
-	if slices.ContainsFunc([]string{username, info.Email, local, info.Name}, func(id string) bool {
+	if slices.ContainsFunc(ids, func(id string) bool {
 		return utf8.RuneCountInString(id) > 3 && strings.Contains(password, strings.ToLower(id))
 	}) {
-		return fmt.Errorf("%w: must not contain your username, email or name", ErrWeakPassword)
+		return fmt.Errorf("%w: must not contain your username, contact address or name", ErrWeakPassword)
 	}
 
 	return nil

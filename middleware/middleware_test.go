@@ -19,6 +19,10 @@ func (s stubUsers) Authenticate(context.Context, string, string) (auth.UserInfo,
 	return s.info, nil
 }
 
+func (s stubUsers) VerifyPassword(context.Context, string, string) error {
+	return nil
+}
+
 func (s stubUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) {
 	if id != s.info.ID {
 		return auth.UserInfo{}, auth.ErrUserNotFound
@@ -27,7 +31,7 @@ func (s stubUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) 
 	return s.info, nil
 }
 
-func newTestAuth(t *testing.T, cl *client.Client) *auth.Auth {
+func newTestAuth(t *testing.T, cl *client.Client, opts ...auth.Option) *auth.Auth {
 	t.Helper()
 
 	app := core.New()
@@ -45,7 +49,7 @@ func newTestAuth(t *testing.T, cl *client.Client) *auth.Auth {
 
 	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Scope: "openid"}}
 
-	a, err := auth.New(app, cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	a, err := auth.New(app, cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl), opts...)
 	qt.Assert(t, qt.IsNil(err))
 
 	return a

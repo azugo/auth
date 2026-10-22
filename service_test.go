@@ -54,6 +54,16 @@ func (f fakeUsers) Authenticate(_ context.Context, username, password string) (U
 	return f.users[username], nil
 }
 
+func (f fakeUsers) VerifyPassword(_ context.Context, userID, password string) error {
+	for name, u := range f.users {
+		if u.ID == userID && f.passwords[name] == password {
+			return nil
+		}
+	}
+
+	return ErrInvalidCredentials
+}
+
 func (f fakeUsers) GetUser(_ context.Context, id string) (UserInfo, error) {
 	for _, u := range f.users {
 		if u.ID == id {
@@ -69,8 +79,8 @@ func newServiceTestAuth(t *testing.T, cl *client.Client, opts ...Option) *Auth {
 
 	users := fakeUsers{
 		users: map[string]UserInfo{
-			"alice": {ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile"},
-			"carol": {ID: "u2", Name: "Carol", Email: "carol@example.com", Scope: "profile"},
+			"alice": {ID: "u1", Name: "Alice", Contacts: map[string][]Contact{ChannelEmail: {{Address: "alice@example.com"}}}, Scope: "openid profile"},
+			"carol": {ID: "u2", Name: "Carol", Contacts: map[string][]Contact{ChannelEmail: {{Address: "carol@example.com"}}}, Scope: "profile"},
 		},
 		passwords: map[string]string{"alice": "secret123", "carol": "secret123"},
 	}
@@ -86,8 +96,8 @@ func newServiceTestAuth(t *testing.T, cl *client.Client, opts ...Option) *Auth {
 func oauthErrorCode(t *testing.T, err error) ErrorCode {
 	t.Helper()
 
-	var oe *OAuthError
-	qt.Assert(t, qt.IsTrue(errors.As(err, &oe)))
+	oe, ok := errors.AsType[*OAuthError](err)
+	qt.Assert(t, qt.IsTrue(ok))
 
 	return oe.Code
 }
@@ -347,6 +357,55 @@ func TestLoginIssuesIDTokenForOpenIDScopeWithKeyProvider(t *testing.T) {
 	qt.Check(t, qt.Equals(claims["iss"], "https://issuer.example"))
 }
 
+func TestIDTokenClaimsTheLevelOfItsAuthTime(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+	keys := &contract.KeySetConfig{Primary: contract.KeyConfig{ID: "k1", Algorithm: "RS256", PrivateKey: priv, PublicKey: pub}}
+
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	}, func(a *Auth) {
+		kp, err := token.NewConfigKeyProvider(keys)
+		qt.Assert(t, qt.IsNil(err))
+
+		a.keys = kp
+	})
+	a.Config().ACRLevels = acrLadder()
+
+	res, err := a.Login(context.Background(), LoginRequest{
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123", BaseURL: "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	// The session once passed a factor, but its latest authentication was the password alone.
+	_, sess, err := a.IntrospectToken(context.Background(), res.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+
+	sess.ACR = "loa2"
+	sess.AMR = []string{"pwd", "otp"}
+	sess.AuthACR = "loa1"
+	sess.AuthMethods = []string{"pwd"}
+	sess.AuthTime = time.Now()
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(context.Background(), sess)))
+
+	refreshed, err := a.Refresh(context.Background(), RefreshRequest{Token: res.Cookie.Value, BaseURL: "https://issuer.example"})
+	qt.Assert(t, qt.IsNil(err))
+
+	block, _ := pem.Decode([]byte(pub))
+	pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	qt.Assert(t, qt.IsNil(err))
+
+	claims := jwt.MapClaims{}
+	_, err = jwt.ParseWithClaims(refreshed.IDToken, claims, func(_ *jwt.Token) (any, error) {
+		return pubKey, nil
+	}, jwt.WithValidMethods([]string{"RS256"}))
+	qt.Assert(t, qt.IsNil(err))
+
+	// A fresh auth_time comes with the level and methods that authentication reached.
+	qt.Check(t, qt.Equals(claims["acr"], any("loa1")))
+	qt.Check(t, qt.DeepEquals(claims["amr"], any([]any{"pwd"})))
+}
+
 // genTestECDSAKeyPair generates a fresh ECDSA P-256 key pair PEM-encoded as PKCS#8 (private) /
 // PKIX (public), for KeyProvider-related tests.
 func genTestECDSAKeyPair(t *testing.T) (priv, pub string) {
@@ -545,4 +604,24 @@ func TestLogoutIgnoresStaleTokenButStillClearsCookie(t *testing.T) {
 
 	_, _, err = a.IntrospectToken(context.Background(), rotated.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestUserInfoClaimsReleaseContactsByScope(t *testing.T) {
+	users := fakeUsers{
+		users: map[string]UserInfo{"alice": {ID: "u1", Scope: "openid phone", Contacts: map[string][]Contact{
+			ChannelEmail: {{Address: "alice@example.com"}},
+			ChannelPhone: {{Address: "+37120000000", Verified: true}},
+			"fax":        {{Address: "+37160000000"}},
+		}}},
+		passwords: map[string]string{"alice": "secret123"},
+	}
+
+	a, err := New(newApp(t), validConfig(), users, session.NewMemoryStore(), client.NewMemoryRegistry(mfaClient(client.MFAPolicyDisabled)))
+	qt.Assert(t, qt.IsNil(err))
+
+	res := loginAs(t, a, alice(""))
+
+	info, err := a.UserInfoClaims(context.Background(), res.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.DeepEquals(info.Contacts, map[string][]Contact{ChannelPhone: {{Address: "+37120000000", Verified: true}}}))
 }

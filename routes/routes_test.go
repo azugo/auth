@@ -25,6 +25,14 @@ func (s stubUsers) Authenticate(_ context.Context, _, password string) (auth.Use
 	return s.info, nil
 }
 
+func (s stubUsers) VerifyPassword(_ context.Context, _, password string) error {
+	if password == "wrong" {
+		return auth.ErrInvalidCredentials
+	}
+
+	return nil
+}
+
 func (s stubUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) {
 	if id != s.info.ID {
 		return auth.UserInfo{}, auth.ErrUserNotFound
@@ -53,7 +61,7 @@ func newTestAuthWithOpts(t *testing.T, sessions session.Store, opts []auth.Optio
 		Issuer:   "https://issuer.example",
 	}
 
-	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile email"}}
+	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Contacts: map[string][]auth.Contact{auth.ChannelEmail: {{Address: "alice@example.com"}}, auth.ChannelPhone: {{Address: "+37120000000", Verified: true}}}, Scope: "openid profile email"}}
 
 	a, err := auth.New(app, cfg, users, sessions, client.NewMemoryRegistry(cls...), opts...)
 	qt.Assert(t, qt.IsNil(err))

@@ -31,7 +31,7 @@ type Configuration struct {
 	// FallbackSecrets holds previous PASETO local secrets, kept for decryption/verification only,
 	// enabling zero-downtime rotation of Secret. New tokens are always sealed with Secret;
 	// decryption falls back to this.
-	FallbackSecrets []string `mapstructure:"fallback_secrets"`
+	FallbackSecrets []string `mapstructure:"fallback_secrets" validate:"dive,min=32"`
 	// SameSite pins the cookie SameSite mode, defaults to strict.
 	SameSite   string `mapstructure:"same_site" validate:"omitempty,oneof=strict lax none"`
 	CookieName string `mapstructure:"cookie_name"` // default: "session"
@@ -45,10 +45,15 @@ type Configuration struct {
 	AccessTokenTTL time.Duration `mapstructure:"access_token_ttl" validate:"required"` // default: 20m
 	SessionTTL     time.Duration `mapstructure:"session_ttl"      validate:"required"` // default: 8h
 	CodeTTL        time.Duration `mapstructure:"code_ttl"`                             // authorization-code lifetime; default: 60s
+	// PendingTTL bounds a login, or a session switch, waiting on its steps, and its step token.
+	// Default 30m, so a mailed verification code can arrive meanwhile.
+	PendingTTL time.Duration `mapstructure:"pending_ttl"`
 	// ExternalStateTTL bounds one external IdP round-trip, from redirect to callback.
 	ExternalStateTTL time.Duration `mapstructure:"external_state_ttl"`
 	// PasswordResetTTL is the lifetime of a password-reset token. Default 1h.
 	PasswordResetTTL time.Duration `mapstructure:"password_reset_ttl"`
+	// ContactVerificationTTL is the lifetime of a contact verification request. Default 24h.
+	ContactVerificationTTL time.Duration `mapstructure:"contact_verification_ttl"`
 	// ClockSkew is the leeway allowed on external id_token time claims, inherited by every
 	// provider that does not set its own. Default 1m; keep it under 2m.
 	ClockSkew time.Duration `mapstructure:"clock_skew"`
@@ -115,11 +120,19 @@ type ThrottleConfig struct {
 	// re-opened within a pending login.
 	MFAResendCooldown time.Duration `mapstructure:"mfa_resend_cooldown"` // default: 60s
 	MFAMaxResends     int           `mapstructure:"mfa_max_resends"`     // default: 3
-	// ExternalStartMax caps how many external IdP round-trips one caller may start.
+	// ExternalStartMax caps how many external IdP round-trips one caller may start per Window.
+	// Default 300; a negative value disables the cap.
 	ExternalStartMax int `mapstructure:"external_start_max"`
 	// RegistrationMax caps how many accounts one caller may register per Window. Default 20;
-	// 0 disables the cap.
+	// a negative value disables the cap.
 	RegistrationMax int `mapstructure:"registration_max"`
+	// ContactDeliveryMax caps the verification messages one account has sent to a contact
+	// address per Window. Default 5; a negative value disables the cap.
+	ContactDeliveryMax int `mapstructure:"contact_delivery_max"`
+	// ContactSendMax caps the verification messages one user may have sent on a channel per
+	// ContactVerificationTTL, whichever addresses they go to. Default 10; a negative value
+	// disables the cap.
+	ContactSendMax int `mapstructure:"contact_send_max"`
 }
 
 // ACRLevelConfig defines one authentication context class (Level of Assurance). Levels form
@@ -170,6 +183,9 @@ type ExternalProviderConfig struct {
 	// LogoutAfterAuth is the "no-SSO" mode: RP-initiate logout at the IdP immediately after a
 	// successful login and finalize the local session only on the logout callback.
 	LogoutAfterAuth bool `mapstructure:"logout_after_auth"`
+	// TrustVerifiedContacts keeps the contacts the IdP marks verified as verified; otherwise every
+	// contact from it arrives unverified.
+	TrustVerifiedContacts bool `mapstructure:"trust_verified_contacts"`
 	// ClockSkew pins the leeway allowed on this provider's id_token time claims, nil inherits
 	// Configuration.ClockSkew and zero validates strictly. The registry resolves it before
 	// opening a driver, so drivers see it set.
@@ -196,10 +212,12 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	v.SetDefault(prefix+".secret", secret)
 	v.SetDefault(prefix+".cookie_name", "session")
 	v.SetDefault(prefix+".access_token_ttl", 20*time.Minute)
+	v.SetDefault(prefix+".pending_ttl", 30*time.Minute)
 	v.SetDefault(prefix+".session_ttl", 8*time.Hour)
 	v.SetDefault(prefix+".code_ttl", 60*time.Second)
 	v.SetDefault(prefix+".external_state_ttl", 15*time.Minute)
 	v.SetDefault(prefix+".password_reset_ttl", time.Hour)
+	v.SetDefault(prefix+".contact_verification_ttl", 24*time.Hour)
 	v.SetDefault(prefix+".clock_skew", time.Minute)
 	v.SetDefault(prefix+".throttle.enabled", true)
 	v.SetDefault(prefix+".throttle.max_attempts", 5)
@@ -209,6 +227,8 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	v.SetDefault(prefix+".throttle.mfa_max_resends", 3)
 	v.SetDefault(prefix+".throttle.external_start_max", 300)
 	v.SetDefault(prefix+".throttle.registration_max", 20)
+	v.SetDefault(prefix+".throttle.contact_delivery_max", 5)
+	v.SetDefault(prefix+".throttle.contact_send_max", 10)
 	v.SetDefault(prefix+".password.min_length", 8)
 	v.SetDefault(prefix+".password.max_length", 128)
 
@@ -219,10 +239,12 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".logout_keeps_cookie", "AUTH_LOGOUT_KEEPS_COOKIE")
 	_ = v.BindEnv(prefix+".logout_policy", "AUTH_LOGOUT_POLICY")
 	_ = v.BindEnv(prefix+".access_token_ttl", "AUTH_ACCESS_TOKEN_TTL")
+	_ = v.BindEnv(prefix+".pending_ttl", "AUTH_PENDING_TTL")
 	_ = v.BindEnv(prefix+".session_ttl", "AUTH_SESSION_TTL")
 	_ = v.BindEnv(prefix+".code_ttl", "AUTH_CODE_TTL")
 	_ = v.BindEnv(prefix+".external_state_ttl", "AUTH_EXTERNAL_STATE_TTL")
 	_ = v.BindEnv(prefix+".password_reset_ttl", "AUTH_PASSWORD_RESET_TTL")
+	_ = v.BindEnv(prefix+".contact_verification_ttl", "AUTH_CONTACT_VERIFICATION_TTL")
 	_ = v.BindEnv(prefix+".clock_skew", "AUTH_CLOCK_SKEW")
 	_ = v.BindEnv(prefix+".base_url", "AUTH_BASE_URL")
 	_ = v.BindEnv(prefix+".issuer", "AUTH_ISSUER")
@@ -234,6 +256,8 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".throttle.mfa_max_resends", "AUTH_THROTTLE_MFA_MAX_RESENDS")
 	_ = v.BindEnv(prefix+".throttle.external_start_max", "AUTH_THROTTLE_EXTERNAL_START_MAX")
 	_ = v.BindEnv(prefix+".throttle.registration_max", "AUTH_THROTTLE_REGISTRATION_MAX")
+	_ = v.BindEnv(prefix+".throttle.contact_delivery_max", "AUTH_THROTTLE_CONTACT_DELIVERY_MAX")
+	_ = v.BindEnv(prefix+".throttle.contact_send_max", "AUTH_THROTTLE_CONTACT_SEND_MAX")
 	_ = v.BindEnv(prefix+".password.min_length", "AUTH_PASSWORD_MIN_LENGTH")
 	_ = v.BindEnv(prefix+".password.max_length", "AUTH_PASSWORD_MAX_LENGTH")
 

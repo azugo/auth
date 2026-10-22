@@ -119,6 +119,9 @@ type Client struct {
 	FederatedLogout bool
 	// PostLogoutRedirectURIs is the exact-match allowlist for post_logout_redirect_uri.
 	PostLogoutRedirectURIs []string
+	// ContextClaims lists the Session.Context keys released to this client in the id_token and
+	// /userinfo when the session belongs to another client; its own sessions release them all.
+	ContextClaims []string
 }
 
 // AuthMethodAllowed returns true when method is a permitted primary auth method for this

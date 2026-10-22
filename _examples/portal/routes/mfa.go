@@ -3,6 +3,7 @@ package routes
 import (
 	"errors"
 
+	"example/portal"
 	"example/portal/views"
 
 	"azugo.io/auth"
@@ -35,8 +36,7 @@ func (r *router) mfaPage(ctx *azugo.Context) {
 
 	denied := false
 
-	var oe *auth.OAuthError
-	if errors.As(err, &oe) && oe.Code == auth.ErrCodeInvalidGrant {
+	if oe, ok := errors.AsType[*auth.OAuthError](err); ok && oe.Code == auth.ErrCodeInvalidGrant {
 		denied = true
 		res, err = r.Auth().BeginMFA(ctx, r.stepRequest(ctx, returnTo))
 
@@ -89,8 +89,13 @@ func (r *router) mfaResend(ctx *azugo.Context) {
 func (r *router) finishStep(ctx *azugo.Context, res auth.LoginResult, returnTo string) {
 	r.Auth().WriteCookie(ctx, res.Cookie)
 
-	if res.Status == session.StatusPendingPasswordChange {
+	switch {
+	case res.Status == session.StatusPendingPasswordChange:
 		ctx.Redirect(pageURL("/password", returnTo))
+
+		return
+	case res.Status == session.StatusPendingStep && res.Step == portal.StepRules:
+		ctx.Redirect(pageURL("/rules", returnTo))
 
 		return
 	}

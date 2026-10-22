@@ -26,6 +26,13 @@ const (
 	TypePasswordResetRequested = "password.reset_requested"
 	TypePasswordResetFailure   = "password.reset_failure"
 	TypePasswordReset          = "password.reset"
+	TypeStepCompleted          = "step.completed"
+	TypeStepFailure            = "step.failure"
+	TypeSessionSwitched        = "session.switched"
+	TypeContactVerified        = "contact.verified"
+	TypeContactRemoved         = "contact.removed"
+	TypeContactPrimary         = "contact.primary"
+	TypeSessionReauthenticated = "session.reauthenticated"
 )
 
 // Event is one security-relevant occurrence for audit/SIEM.

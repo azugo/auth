@@ -51,8 +51,7 @@ func (s *cacheStore) Create(ctx context.Context, sess *Session) error {
 func (s *cacheStore) Get(ctx context.Context, id string) (*Session, error) {
 	sess, err := s.c.Get(ctx, id)
 	if err != nil {
-		var knf cache.KeyNotFoundError
-		if errors.As(err, &knf) {
+		if _, ok := errors.AsType[cache.KeyNotFoundError](err); ok {
 			return nil, ErrNotFound
 		}
 
@@ -102,8 +101,7 @@ func (s *cacheStore) Touch(ctx context.Context, id string) error {
 // Revoke session by deleting it.
 func (s *cacheStore) Revoke(ctx context.Context, id string) error {
 	if err := s.c.Delete(ctx, id); err != nil {
-		var knf cache.KeyNotFoundError
-		if errors.As(err, &knf) {
+		if _, ok := errors.AsType[cache.KeyNotFoundError](err); ok {
 			return nil
 		}
 

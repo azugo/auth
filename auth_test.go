@@ -22,6 +22,10 @@ func (stubUsers) Authenticate(_ context.Context, _, _ string) (UserInfo, error) 
 	return UserInfo{}, nil
 }
 
+func (stubUsers) VerifyPassword(context.Context, string, string) error {
+	return nil
+}
+
 func (stubUsers) GetUser(_ context.Context, id string) (UserInfo, error) {
 	return UserInfo{ID: id}, nil
 }
@@ -212,4 +216,35 @@ func TestNewBuildsConfigKeyProviderFromEnvBoundKeys(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(set.Primary.Algorithm, "RS256"))
 	qt.Check(t, qt.IsNotNil(set.Primary.Public))
+}
+
+// passwordlessUsers only loads users; the app has no local passwords.
+type passwordlessUsers struct{}
+
+func (passwordlessUsers) GetUser(_ context.Context, id string) (UserInfo, error) {
+	return UserInfo{ID: id, Scope: "openid"}, nil
+}
+
+// passwordlessRegisterer registers accounts without being able to check passwords.
+type passwordlessRegisterer struct{ passwordlessUsers }
+
+func (passwordlessRegisterer) Register(context.Context, RegistrationRequest) (UserInfo, error) {
+	return UserInfo{}, nil
+}
+
+func TestPasswordlessProviderHasNoPasswordLogin(t *testing.T) {
+	cl := &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	}
+
+	a, err := New(newApp(t), validConfig(), passwordlessUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeUnsupportedGrantType))
+
+	// Password features without a way to check passwords are a configuration error.
+	_, err = New(newApp(t), validConfig(), passwordlessRegisterer{}, session.NewMemoryStore(), client.NewMemoryRegistry(cl))
+	qt.Check(t, qt.ErrorMatches(err, ".*require a user provider implementing PasswordAuthenticator"))
 }

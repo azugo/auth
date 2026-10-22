@@ -75,16 +75,16 @@ type MFAMethodInfo struct {
 
 // stepResult starts the response for a still-pending session: the presented token stays valid
 // and a redirect-mode client is sent back to its step page.
-func stepResult(sc *stepContext, in MFAStepRequest) LoginResult {
+func stepResult(sc *stepContext, tok, returnTo string) LoginResult {
 	res := LoginResult{Status: sc.sess.Status}
 
 	// The HttpOnly pending cookie is never handed to page scripts.
 	if sc.claims.Type == token.TypeStepToken {
-		res.StepToken = in.Token
+		res.StepToken = tok
 	}
 
 	if sc.client.ResponseMode == client.ResponseModeRedirect {
-		res.ReturnTo = stepRedirect(sc.client, in.ReturnTo)
+		res.ReturnTo = stepRedirect(sc.client, returnTo)
 	}
 
 	return res
@@ -93,7 +93,7 @@ func stepResult(sc *stepContext, in MFAStepRequest) LoginResult {
 // pendingMFAResult builds the pending response for the current challenge without opening a new
 // one.
 func (a *Auth) pendingMFAResult(ctx context.Context, sc *stepContext, in MFAStepRequest) (LoginResult, error) {
-	res := stepResult(sc, in)
+	res := stepResult(sc, in.Token, in.ReturnTo)
 
 	if err := a.selectMFA(ctx, sc.sess, sc.client, &sc.state, &res, "", false); err != nil {
 		return LoginResult{}, err
@@ -119,7 +119,7 @@ func (a *Auth) BeginMFA(ctx context.Context, in MFAStepRequest) (LoginResult, er
 		return LoginResult{}, err
 	}
 
-	res := stepResult(sc, in)
+	res := stepResult(sc, in.Token, in.ReturnTo)
 
 	if err := a.selectMFA(ctx, sc.sess, sc.client, &sc.state, &res, in.Method, false); err != nil {
 		return LoginResult{}, err
@@ -140,7 +140,8 @@ func (a *Auth) VerifyMFA(ctx context.Context, in MFAStepRequest) (LoginResult, e
 		return LoginResult{}, err
 	}
 
-	keys := throttleKeys("mfa:"+sc.sess.UserID, in.IP)
+	identity := "mfa:" + sc.sess.UserID
+	keys := throttleKeys(identity, in.IP)
 
 	if err := a.checkThrottle(ctx, keys, sc.client.ID, in.IP); err != nil {
 		return LoginResult{}, err
@@ -176,36 +177,63 @@ func (a *Auth) settleMFA(ctx context.Context, sc *stepContext, m mfa.Method, v m
 		detail["enrollment_id"] = v.EnrollmentID
 	}
 
-	switch v.Result {
-	case mfa.VerifyPending:
-		a.refundThrottle(ctx, keys)
+	result, err := a.settleFactor(ctx, sc.sess.UserID, sc.client.ID, in.IP, v, keys, detail)
+	if err != nil {
+		return LoginResult{}, err
+	}
 
+	if result == mfa.VerifyPending {
 		return a.pendingMFAResult(ctx, sc, in)
-	case mfa.VerifyDenied:
-		a.failThrottle(ctx, keys)
-		a.emit(ctx, event.Event{Type: event.TypeMFAFailure, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
+	}
 
+	if result == mfa.VerifyDenied {
 		return LoginResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "mfa verification failed")
-	case mfa.VerifyApproved:
-	default:
-		return LoginResult{}, NewOAuthError(http.StatusInternalServerError, ErrCodeServerError, "unexpected mfa verification result")
 	}
 
-	if v.EnrollmentID != "" {
-		if err := a.mfaStore.Touch(ctx, sc.sess.UserID, v.EnrollmentID, time.Now()); err != nil && !errors.Is(err, mfa.ErrNotEnrolled) {
-			return LoginResult{}, NewOAuthErrorFrom(err)
-		}
-	}
-
-	a.passThrottle(ctx, keys)
-	a.resetThrottle(ctx, []string{"mfa-open:" + sc.sess.UserID})
 	a.emit(ctx, event.Event{Type: event.TypeMFASuccess, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: detail})
 
 	sc.sess.MFAMethod = sc.state.Method
 	sc.sess.MFAEnrollmentID = v.EnrollmentID
 	sc.sess.AMR = mergeAMR(sc.sess.AMR, mfa.MethodAMR(m))
+	sc.sess.AuthTime = time.Now()
+	sc.sess.AuthMethods = sc.sess.AMR
+	sc.sess.AuthACR = a.authACR(primaryMethod(sc.sess), sc.sess.AMR, sc.sess.MFAMethod)
+	sc.sess.AuthMFA = true
 
 	return a.advanceSession(ctx, sc, in.ReturnTo, in.BaseURL, in.MountPath)
+}
+
+// settleFactor settles the throttle on keys for a verification of userID's factor: a pending one
+// is refunded, a denied one counted and reported, and an approved one releases the user's MFA
+// limits and touches the enrollment that answered.
+func (a *Auth) settleFactor(ctx context.Context, userID, clientID, ip string, v mfa.Verification, keys []string, detail map[string]any) (mfa.VerifyResult, error) {
+	switch v.Result {
+	case mfa.VerifyPending:
+		a.refundThrottle(ctx, keys)
+
+		return v.Result, nil
+	case mfa.VerifyDenied:
+		a.failThrottle(ctx, keys)
+		a.emit(ctx, event.Event{Type: event.TypeMFAFailure, UserID: userID, ClientID: clientID, IP: ip, Detail: detail})
+
+		return v.Result, nil
+	case mfa.VerifyApproved:
+	default:
+		a.refundThrottle(ctx, keys)
+
+		return "", NewOAuthError(http.StatusInternalServerError, ErrCodeServerError, "unexpected mfa verification result")
+	}
+
+	a.passThrottle(ctx, keys, "mfa:"+userID)
+	a.resetThrottle(ctx, []string{"mfa-open:" + userID})
+
+	if v.EnrollmentID != "" {
+		if err := a.mfaStore.Touch(ctx, userID, v.EnrollmentID, time.Now()); err != nil && !errors.Is(err, mfa.ErrNotEnrolled) {
+			return "", NewOAuthErrorFrom(err)
+		}
+	}
+
+	return v.Result, nil
 }
 
 // ResendMFA re-opens the selected challenge (a fresh code) under the resend cooldown and cap.
@@ -223,7 +251,7 @@ func (a *Auth) ResendMFA(ctx context.Context, in MFAStepRequest) (LoginResult, e
 		return LoginResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "mfa method is not the selected one")
 	}
 
-	res := stepResult(sc, in)
+	res := stepResult(sc, in.Token, in.ReturnTo)
 
 	if err := a.selectMFA(ctx, sc.sess, sc.client, &sc.state, &res, "", true); err != nil {
 		return LoginResult{}, err
@@ -380,6 +408,13 @@ func (a *Auth) BeginMFAEnroll(ctx context.Context, in MFAEnrollRequest) (map[str
 		return nil, err
 	}
 
+	// Onboarding during login is part of the login, not a change to an active account
+	if sc.sess.Status == session.StatusActive {
+		if err := a.checkStepUp(ctx, sc.sess, ActionEnrollMFA); err != nil {
+			return nil, err
+		}
+	}
+
 	if mfa.MethodBackup(m) {
 		enrolled, err := mfa.EnrolledMethods(ctx, a.mfaStore, sc.sess.UserID)
 		if err != nil {
@@ -427,7 +462,7 @@ func (a *Auth) BeginMFAEnroll(ctx context.Context, in MFAEnrollRequest) (map[str
 
 	a.failThrottle(ctx, keys)
 
-	if err := setSynced(ctx, a.enrollments, enrollmentKey(sc.sess.UserID, in.Method), mfaEnrollment{State: data.State}, cache.TTL[mfaEnrollment](a.config.AccessTokenTTL)); err != nil {
+	if err := setSynced(ctx, a.enrollments, enrollmentKey(sc.sess.UserID, in.Method), mfaEnrollment{State: data.State, SessionID: sc.sess.ID}, cache.TTL[mfaEnrollment](a.config.AccessTokenTTL)); err != nil {
 		return nil, NewOAuthErrorFrom(err)
 	}
 
@@ -442,7 +477,8 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 		return MFAEnrollResult{}, err
 	}
 
-	keys := throttleKeys("mfa:"+sc.sess.UserID, in.IP)
+	identity := "mfa:" + sc.sess.UserID
+	keys := throttleKeys(identity, in.IP)
 
 	if err := a.checkThrottle(ctx, keys, sc.client.ID, in.IP); err != nil {
 		return MFAEnrollResult{}, err
@@ -454,12 +490,18 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 	if err != nil {
 		a.refundThrottle(ctx, keys)
 
-		var knf cache.KeyNotFoundError
-		if errors.As(err, &knf) {
+		if _, ok := errors.AsType[cache.KeyNotFoundError](err); ok {
 			return MFAEnrollResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "no mfa enrollment in progress")
 		}
 
 		return MFAEnrollResult{}, NewOAuthErrorFrom(err)
+	}
+
+	// Only the session that began the enrolment, under its step-up, may finish it.
+	if pending.SessionID != sc.sess.ID {
+		a.refundThrottle(ctx, keys)
+
+		return MFAEnrollResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "no mfa enrollment in progress")
 	}
 
 	detail := map[string]any{"method": in.Method}
@@ -476,7 +518,7 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 		return MFAEnrollResult{}, NewOAuthErrorFrom(err)
 	}
 
-	a.passThrottle(ctx, keys)
+	a.passThrottle(ctx, keys, identity)
 
 	id, err := newJTI()
 	if err != nil {
@@ -506,6 +548,11 @@ func (a *Auth) FinishMFAEnroll(ctx context.Context, in MFAEnrollRequest) (MFAEnr
 		sc.sess.MFAMethod = in.Method
 		sc.sess.MFAEnrollmentID = id
 		sc.sess.AMR = mergeAMR(sc.sess.AMR, mfa.MethodAMR(m))
+
+		if sc.sess.Status == session.StatusPendingMFASetup {
+			sc.sess.AuthMethods = sc.sess.AMR
+			sc.sess.AuthMFA = true
+		}
 	}
 
 	if sc.sess.Status != session.StatusPendingMFASetup {
@@ -540,6 +587,10 @@ func (a *Auth) revokeSession(ctx context.Context, tok string) (UserInfo, *sessio
 
 	if !a.mfaVerified(sess) {
 		return UserInfo{}, nil, NewOAuthErrorFrom(ErrUnmetAuthenticationRequirements)
+	}
+
+	if err := a.checkStepUp(ctx, sess, ActionRevokeMFA); err != nil {
+		return UserInfo{}, nil, err
 	}
 
 	return info, sess, nil

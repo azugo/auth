@@ -45,7 +45,10 @@ type LoginResult struct {
 	ReturnTo string
 	// StepToken is set while a step is pending; feed it to the step endpoints.
 	StepToken string
-	// Available, Selected, Interaction and Data describe the pending_mfa prompt.
+	// Step names the pending login step of a pending_step session.
+	Step string
+	// Available and Selected describe the pending_mfa prompt; Interaction and Data the
+	// pending_mfa or pending_step prompt.
 	Available   []string
 	Selected    string
 	Interaction string
@@ -103,18 +106,25 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		return LoginResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeUnauthorizedClient, "client is not allowed to use the password grant")
 	}
 
+	passwords, ok := a.users.(PasswordAuthenticator)
+	if !ok {
+		return LoginResult{}, NewOAuthErrorFrom(ErrUnsupportedGrantType)
+	}
+
 	// Throttle keys combine the stable identity with the IP so neither a single account nor
 	// a single source can be brute-forced.
-	keys := throttleKeys("", in.IP)
+	var identity string
 	if in.Username != "" {
-		keys = throttleKeys(throttleIdentity("pwd:", in.Username), in.IP)
+		identity = throttleIdentity("pwd:", in.Username)
 	}
+
+	keys := throttleKeys(identity, in.IP)
 
 	if err := a.checkThrottle(ctx, keys, cl.ID, in.IP); err != nil {
 		return LoginResult{}, err
 	}
 
-	info, err := a.users.Authenticate(ctx, in.Username, in.Password)
+	info, err := passwords.Authenticate(ctx, in.Username, in.Password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
 			a.failThrottle(ctx, keys)
@@ -127,11 +137,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
-	if in.Username != "" {
-		a.passThrottle(ctx, keys)
-	} else {
-		a.refundThrottle(ctx, keys)
-	}
+	a.passThrottle(ctx, keys, identity)
 
 	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
 
@@ -322,9 +328,10 @@ func (a *Auth) introspect(ctx context.Context, tok string) (UserInfo, *session.S
 		info.Scope = claims.Scope
 	}
 
-	info.ACR = sess.ACR
-	info.AMR = sess.AMR
+	info.ACR = sess.AuthenticatedACR()
+	info.AMR = sess.AuthenticatedMethods()
 	info.ClientID = cmp.Or(claims.ClientID, sess.ClientID)
+	info.Context = sess.Context
 
 	return info, sess, claims, nil
 }
@@ -345,7 +352,7 @@ func firstParty(claims *token.AccessClaims, sess *session.Session) bool {
 
 // UserInfoClaims resolves the OIDC UserInfo claims a token's granted scope permits.
 func (a *Auth) UserInfoClaims(ctx context.Context, tok string) (UserInfo, error) {
-	info, _, err := a.IntrospectToken(ctx, tok)
+	info, sess, err := a.IntrospectToken(ctx, tok)
 	if err != nil {
 		return UserInfo{}, err
 	}
@@ -354,13 +361,31 @@ func (a *Auth) UserInfoClaims(ctx context.Context, tok string) (UserInfo, error)
 		return UserInfo{}, NewOAuthError(http.StatusForbidden, ErrCodeInsufficientScope, "openid scope is required")
 	}
 
+	if info.ClientID != sess.ClientID {
+		cl, err := a.clients.GetClient(ctx, info.ClientID)
+		if err != nil {
+			return UserInfo{}, NewOAuthErrorFrom(err)
+		}
+
+		info.Context = releasedContext(sess, cl)
+	}
+
 	if !scopeContains(info.Scope, ScopeProfile) {
 		info.Name = ""
 	}
 
-	if !scopeContains(info.Scope, ScopeEmail) {
-		info.Email = ""
+	// A contact is released only under its OIDC scope.
+	contacts := make(map[string][]Contact, 2)
+
+	if c, ok := info.Contacts[ChannelEmail]; ok && scopeContains(info.Scope, ScopeEmail) {
+		contacts[ChannelEmail] = c
 	}
+
+	if c, ok := info.Contacts[ChannelPhone]; ok && scopeContains(info.Scope, ScopePhone) {
+		contacts[ChannelPhone] = c
+	}
+
+	info.Contacts = contacts
 
 	return info, nil
 }
@@ -375,7 +400,7 @@ func (a *Auth) ListSessions(ctx context.Context, userID string, filter *session.
 	return lister.List(ctx, userID, filter, page)
 }
 
-// RevokeSession revokes sessionID after verifying it belongs to userID.
+// RevokeSession revokes sessionID after verifying it belongs to user.
 func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) error {
 	sess, err := a.sessions.Get(ctx, sessionID)
 	if err != nil {
@@ -489,10 +514,30 @@ func (a *Auth) issueIDToken(ctx context.Context, sess *session.Session, cl *clie
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(a.config.AccessTokenTTL).Unix(),
 		Nonce:     nonce,
-		AuthTime:  sess.CreatedAt.Unix(),
-		ACR:       sess.ACR,
-		AMR:       sess.AMR,
+		// The level and methods are those of the authentication auth_time names.
+		AuthTime: sess.AuthenticatedAt().Unix(),
+		ACR:      sess.AuthenticatedACR(),
+		AMR:      sess.AuthenticatedMethods(),
+		Extra:    releasedContext(sess, cl),
 	})
+}
+
+// releasedContext returns the part of sessions context released to client: all of it to the session's
+// own client, otherwise only the keys cl.ContextClaims lists.
+func releasedContext(sess *session.Session, cl *client.Client) map[string]any {
+	if cl.ID == sess.ClientID {
+		return sess.Context
+	}
+
+	out := make(map[string]any, len(cl.ContextClaims))
+
+	for _, name := range cl.ContextClaims {
+		if v, ok := sess.Context[name]; ok {
+			out[name] = v
+		}
+	}
+
+	return out
 }
 
 // safeLocalRedirect validates returnTo as a local absolute path, falling back to "/".

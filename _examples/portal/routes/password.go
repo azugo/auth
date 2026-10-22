@@ -66,8 +66,7 @@ func (r *router) changePassword(ctx *azugo.Context) {
 		// A rejected credential is the current password; anything else is about the new one.
 		field := "new_password"
 
-		var oe *auth.OAuthError
-		if errors.As(err, &oe) && oe.Code == auth.ErrCodeInvalidGrant {
+		if oe, ok := errors.AsType[*auth.OAuthError](err); ok && oe.Code == auth.ErrCodeInvalidGrant {
 			field = "current_password"
 		}
 

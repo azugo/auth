@@ -14,20 +14,23 @@ import (
 // accountInput is the JSON body of the account endpoints. A form-encoded body is accepted
 // too, with the client authenticated as at /token.
 type accountInput struct {
-	ClientID          string         `json:"client_id"`
-	ClientSecret      string         `json:"client_secret"`
-	Username          string         `json:"username"`
-	Email             string         `json:"email"`
-	Password          string         `json:"password"`
-	Extra             map[string]any `json:"extra"`
-	CurrentPassword   string         `json:"current_password"`
-	NewPassword       string         `json:"new_password"`
-	KeepOtherSessions bool           `json:"keep_other_sessions"`
-	Identifier        string         `json:"identifier"`
-	Method            string         `json:"method"`
-	ResetToken        string         `json:"reset_token"`
-	Response          map[string]any `json:"response"`
-	ReturnTo          string         `json:"return_to"`
+	ClientID          string            `json:"client_id"`
+	ClientSecret      string            `json:"client_secret"`
+	Username          string            `json:"username"`
+	Contacts          map[string]string `json:"contacts"`
+	Password          string            `json:"password"`
+	Extra             map[string]any    `json:"extra"`
+	CurrentPassword   string            `json:"current_password"`
+	NewPassword       string            `json:"new_password"`
+	KeepOtherSessions bool              `json:"keep_other_sessions"`
+	Identifier        string            `json:"identifier"`
+	Method            string            `json:"method"`
+	ResetToken        string            `json:"reset_token"`
+	Request           string            `json:"request"`
+	Channel           string            `json:"channel"`
+	Address           string            `json:"address"`
+	Response          map[string]any    `json:"response"`
+	ReturnTo          string            `json:"return_to"`
 }
 
 // resetToken returns the reset_token from the body or the Authorization header.
@@ -66,8 +69,15 @@ func (h *Handler) readAccountInput(ctx *azugo.Context) (accountInput, auth.Clien
 		in.Username = *v
 	}
 
-	if v := ctx.Form.StringOptional("email"); v != nil {
-		in.Email = *v
+	// A plain form carries each contact address as contact_<channel>.
+	for k, v := range ctx.Request().PostArgs().All() {
+		if channel, ok := strings.CutPrefix(string(k), "contact_"); ok && channel != "" {
+			if in.Contacts == nil {
+				in.Contacts = make(map[string]string, 1)
+			}
+
+			in.Contacts[channel] = string(v)
+		}
 	}
 
 	if v := ctx.Form.StringOptional("password"); v != nil {
@@ -96,6 +106,18 @@ func (h *Handler) readAccountInput(ctx *azugo.Context) (accountInput, auth.Clien
 
 	if v := ctx.Form.StringOptional("reset_token"); v != nil {
 		in.ResetToken = *v
+	}
+
+	if v := ctx.Form.StringOptional("request"); v != nil {
+		in.Request = *v
+	}
+
+	if v := ctx.Form.StringOptional("channel"); v != nil {
+		in.Channel = *v
+	}
+
+	if v := ctx.Form.StringOptional("address"); v != nil {
+		in.Address = *v
 	}
 
 	if v := ctx.Form.StringOptional("return_to"); v != nil {
@@ -132,7 +154,8 @@ func writeResetResult(ctx *azugo.Context, status int, res auth.PasswordResetResu
 }
 
 // register implements POST /account/register: create the account and, per the client's
-// RegistrationPolicy, sign it in or answer 201 with its ID.
+// RegistrationPolicy, sign it in or answer 201 with its ID; with an address on a verified channel
+// every accepted request answers 202 with the request and interaction to verify it with.
 func (h *Handler) register(ctx *azugo.Context) {
 	in, creds, err := h.readAccountInput(ctx)
 	if err != nil {
@@ -144,7 +167,7 @@ func (h *Handler) register(ctx *azugo.Context) {
 	res, err := h.auth.Register(ctx, auth.RegisterRequest{
 		Credentials: creds,
 		Username:    in.Username,
-		Email:       in.Email,
+		Contacts:    in.Contacts,
 		Password:    in.Password,
 		Extra:       in.Extra,
 		ReturnTo:    in.ReturnTo,
@@ -154,6 +177,16 @@ func (h *Handler) register(ctx *azugo.Context) {
 	})
 	if err != nil {
 		ctx.Error(err)
+
+		return
+	}
+
+	if res.Accepted {
+		ctx.StatusCode(http.StatusAccepted)
+		ctx.JSON(&struct {
+			Request     string `json:"request"`
+			Interaction string `json:"interaction"`
+		}{Request: res.Request, Interaction: res.Interaction})
 
 		return
 	}

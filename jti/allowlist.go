@@ -54,8 +54,7 @@ func (s *cacheStore) Issue(ctx context.Context, jti, sessionID string, ttl time.
 func (s *cacheStore) Rotate(ctx context.Context, oldJTI, newJTI, sessionID string, ttl time.Duration) (bool, error) {
 	prev, err := s.c.Pop(ctx, oldJTI)
 	if err != nil {
-		var knf cache.KeyNotFoundError
-		if errors.As(err, &knf) {
+		if _, ok := errors.AsType[cache.KeyNotFoundError](err); ok {
 			return false, nil
 		}
 

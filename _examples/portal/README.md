@@ -18,6 +18,14 @@ Open <http://localhost:8080> and sign in with `admin / admin123` or `user / user
 `guest / guest123` is held at the `/password` page until it sets a new password, the same page
 a signed-in user reaches from `/security` to change theirs.
 
+## Portal rules
+
+`rules.go` is an example login step (`auth.LoginSteps`): on their first sign-in every user is
+held at the `/rules` page until they accept the portal rules, after any MFA or password step.
+The accepted version is recorded per user and in the session context (`rules_version`, also in
+the `id_token` and `/userinfo`); raising `RulesVersion` asks everyone again on their next
+sign-in. Acceptances are kept in memory, so a restart asks again too.
+
 ## Two-factor authentication
 
 Signed-in users manage second factors on `/security`. TOTP shows a QR code for an

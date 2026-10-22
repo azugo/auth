@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,6 +167,32 @@ func TestMFARejectsMissingPendingState(t *testing.T) {
 
 	_, err = a.BeginMFA(context.Background(), MFAStepRequest{Token: pending.StepToken})
 	qt.Check(t, qt.ErrorIs(err, token.ErrInvalidToken))
+}
+
+func TestOnboardingFactorCountsForTheLogin(t *testing.T) {
+	a := newMFATestAuth(t, mfaClient(client.MFAPolicyRequired), mfa.NewMemoryStore())
+	a.Config().ACRLevels = acrLadder()
+
+	res := loginAs(t, a, alice(""))
+	qt.Assert(t, qt.Equals(res.Status, session.StatusPendingMFASetup))
+
+	data, err := a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: res.StepToken, Method: totp.DriverName})
+	qt.Assert(t, qt.IsNil(err))
+
+	seed, _ := data["secret"].(string)
+	code, err := totp.GenerateCode(seed, time.Now())
+	qt.Assert(t, qt.IsNil(err))
+
+	out, err := a.FinishMFAEnroll(context.Background(), MFAEnrollRequest{Token: res.StepToken, Method: totp.DriverName, Response: map[string]any{"code": code}})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.IsNotNil(out.Login))
+
+	// The factor enrolled while logging in is part of the login's own authentication.
+	_, sess, err := a.IntrospectToken(context.Background(), out.Login.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(sess.AuthMFA))
+	qt.Check(t, qt.Equals(sess.AuthACR, "loa2"))
+	qt.Check(t, qt.Equals(sess.AuthACR, sess.ACR))
 }
 
 func TestLoginRequiredMFAOnboardsUnenrolledUser(t *testing.T) {
@@ -434,9 +462,9 @@ func TestRevokeMFAAndListMethods(t *testing.T) {
 	_, err := a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: first.AccessToken, Method: "recovery"})
 	qt.Assert(t, qt.IsNil(err))
 
-	info, _, err := a.IntrospectToken(context.Background(), first.AccessToken)
+	_, sess, err := a.IntrospectToken(context.Background(), first.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.DeepEquals(info.AMR, []string{"pwd", "otp", "mfa"}))
+	qt.Check(t, qt.DeepEquals(sess.AMR, []string{"pwd", "otp", "mfa"}))
 
 	// ...while a password-only session opened before can neither add nor remove factors.
 	_, err = a.BeginMFAEnroll(context.Background(), MFAEnrollRequest{Token: other.AccessToken, Method: "recovery"})
@@ -947,6 +975,44 @@ func TestMFASwitchingBackReopensUnderResendLimits(t *testing.T) {
 	// ...but switching back to push re-issues it, which is a resend under the cooldown.
 	_, err = a.BeginMFA(context.Background(), MFAStepRequest{Token: res.StepToken, Method: "push"})
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeSlowDown))
+}
+
+// touchFailStore is an MFA store whose Touch fails while fail is set.
+type touchFailStore struct {
+	mfa.Store
+
+	fail *atomic.Bool
+}
+
+func (s touchFailStore) Touch(ctx context.Context, userID, id string, at time.Time) error {
+	if s.fail.Load() {
+		return errors.New("store unavailable")
+	}
+
+	return s.Store.Touch(ctx, userID, id, at)
+}
+
+func TestMFAStoreErrorAfterACorrectCodeIsNoGuess(t *testing.T) {
+	cfg := validConfig()
+	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 1, Window: time.Minute, LockoutTTL: time.Minute}
+
+	fail := &atomic.Bool{}
+	a := newGrantsTestAuth(t, cfg, []Option{MFAStore(touchFailStore{Store: mfa.NewMemoryStore(), fail: fail})}, mfaClient(client.MFAPolicyOptional))
+	seed := enrollTOTP(t, a, loginAs(t, a, alice("")).AccessToken)
+
+	pending := loginAs(t, a, alice(""))
+	qt.Assert(t, qt.Equals(pending.Status, session.StatusPendingMFA))
+
+	fail.Store(true)
+
+	_, err := a.VerifyMFA(context.Background(), MFAStepRequest{Token: pending.StepToken, Response: map[string]any{"code": nextCode(t, seed)}})
+	qt.Check(t, qt.IsNotNil(err))
+
+	fail.Store(false)
+
+	// With one attempt allowed, the next guess is still evaluated rather than throttled.
+	_, err = a.VerifyMFA(context.Background(), MFAStepRequest{Token: pending.StepToken, Response: map[string]any{"code": "000000"}})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
 }
 
 func TestMFAVerifyBudgetHoldsAcrossConcurrentGuesses(t *testing.T) {

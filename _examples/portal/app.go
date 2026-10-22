@@ -61,7 +61,7 @@ func New(cmd *cobra.Command, version string) (*App, error) {
 	}
 
 	au, err := auth.New(a.App, config.Auth, NewDemoUsers(), session.NewMemoryStore(), clients,
-		auth.CookieScopeToBasePath(), auth.MFAStore(mfa.NewMemoryStore()))
+		auth.CookieScopeToBasePath(), auth.MFAStore(mfa.NewMemoryStore()), auth.LoginSteps(NewRules()))
 	if err != nil {
 		return nil, err
 	}

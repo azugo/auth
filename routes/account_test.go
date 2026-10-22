@@ -39,6 +39,17 @@ func (s *accountStubUsers) Authenticate(_ context.Context, _, password string) (
 	return s.info, nil
 }
 
+func (s *accountStubUsers) VerifyPassword(_ context.Context, _, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if password != s.password {
+		return auth.ErrInvalidCredentials
+	}
+
+	return nil
+}
+
 func (s *accountStubUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -59,10 +70,10 @@ func (s *accountStubUsers) Register(_ context.Context, req auth.RegistrationRequ
 	defer s.mu.Unlock()
 
 	if req.Username == "alice" {
-		return auth.UserInfo{}, auth.ErrUserAlreadyExists
+		return auth.UserInfo{}, auth.ErrUsernameTaken
 	}
 
-	s.registered = &auth.UserInfo{ID: "u9", Name: req.Username, Email: req.Email, Scope: "openid"}
+	s.registered = &auth.UserInfo{ID: "u9", Name: req.Username, Contacts: map[string][]auth.Contact{auth.ChannelEmail: {{Address: req.Contacts[auth.ChannelEmail]}}}, Scope: "openid"}
 
 	return *s.registered, nil
 }
@@ -91,7 +102,7 @@ func (s *accountStubUsers) SetPassword(_ context.Context, _, newPassword string)
 }
 
 func (s *accountStubUsers) FindUser(_ context.Context, identifier string) (auth.UserInfo, error) {
-	if identifier != s.info.Email {
+	if identifier != s.info.Contacts[auth.ChannelEmail][0].Address {
 		return auth.UserInfo{}, auth.ErrUserNotFound
 	}
 
@@ -102,7 +113,7 @@ func (s *accountStubUsers) FindUser(_ context.Context, identifier string) (auth.
 func (s *accountStubUsers) Available(auth.UserInfo) bool { return true }
 
 // Deliver implements reset.Deliverer by handing the secret to the test.
-func (s *accountStubUsers) Deliver(_ context.Context, _ auth.UserInfo, _, secret string) error {
+func (s *accountStubUsers) Deliver(_ context.Context, _ auth.UserInfo, _ *reset.Request, secret string) error {
 	s.delivered <- secret
 
 	return nil
@@ -150,7 +161,7 @@ func accountTestAuth(t *testing.T, cl *client.Client) (*auth.Auth, *accountStubU
 	}
 
 	users := &accountStubUsers{
-		stubUsers: stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile email"}},
+		stubUsers: stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Contacts: map[string][]auth.Contact{auth.ChannelEmail: {{Address: "alice@example.com"}}}, Scope: "openid profile email"}},
 		password:  "right",
 		delivered: make(chan string, 8),
 	}
@@ -224,13 +235,21 @@ func TestAccountRoutesEndToEndJSON(t *testing.T) {
 	tc := app.TestClient()
 
 	// Registration signs the new account in.
-	resp, err := tc.PostJSON("/auth/account/register", map[string]any{"client_id": "spa", "username": "bob", "email": "bob@example.com", "password": "pw123456"})
+	resp, err := tc.PostJSON("/auth/account/register", map[string]any{"client_id": "spa", "username": "bob", "contacts": map[string]string{"email": "bob@example.com"}, "password": "pw123456"})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp.StatusCode(), 200))
 
 	registered := decodeJSON[tokenBody](t, resp)
 	fasthttp.ReleaseResponse(resp)
 	qt.Check(t, qt.IsTrue(registered.AccessToken != ""))
+	qt.Check(t, qt.Equals(users.registered.Contacts[auth.ChannelEmail][0].Address, "bob@example.com"))
+
+	// A plain form carries contacts as contact_<channel>.
+	resp, err = tc.PostForm("/auth/account/register", map[string]any{"client_id": "spa", "username": "carol", "contact_email": "carol@example.com", "password": "pw123456"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(resp.StatusCode(), 200))
+	fasthttp.ReleaseResponse(resp)
+	qt.Check(t, qt.Equals(users.registered.Contacts[auth.ChannelEmail][0].Address, "carol@example.com"))
 
 	resp, err = tc.PostForm("/auth/account/register", map[string]any{"client_id": "spa", "username": "alice", "password": "pw123456"})
 	qt.Assert(t, qt.IsNil(err))

@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"azugo.io/auth/client"
 	"azugo.io/auth/code"
+	"azugo.io/auth/contact"
 	"azugo.io/auth/contract"
 	"azugo.io/auth/event"
 	"azugo.io/auth/jti"
@@ -29,8 +31,14 @@ import (
 type (
 	// UserInfo is the user record returned by a UserProvider.
 	UserInfo = contract.UserInfo
-	// UserProvider validates credentials and loads user data.
+	// Contact is one of a user's addresses on a channel.
+	Contact = contract.Contact
+	// ContactManager is an optional UserProvider extension for managing an account's contacts.
+	ContactManager = contract.ContactManager
+	// UserProvider loads user data.
 	UserProvider = contract.UserProvider
+	// PasswordAuthenticator is an optional UserProvider extension for local passwords.
+	PasswordAuthenticator = contract.PasswordAuthenticator
 	// ExternalUserProvider resolves identities for external IdP logins and passwordless authenticators.
 	ExternalUserProvider = contract.ExternalUserProvider
 	// Registerer is an optional UserProvider extension for registering new accounts.
@@ -39,8 +47,12 @@ type (
 	PasswordChanger = contract.PasswordChanger
 	// PasswordResetter is an optional UserProvider extension for resetting a forgotten password.
 	PasswordResetter = contract.PasswordResetter
+	// ContactVerifier is an optional UserProvider extension for verifying contact addresses.
+	ContactVerifier = contract.ContactVerifier
 	// ProfileManager is an optional UserProvider extension for user profile data.
 	ProfileManager = contract.ProfileManager
+	// ContactTakenError is returned by a Registerer for a taken contact address.
+	ContactTakenError = contract.ContactTakenError
 	// RegistrationRequest carries the data for a new user registration.
 	RegistrationRequest = contract.RegistrationRequest
 	// PasswordConfig tunes the default password policy.
@@ -110,6 +122,22 @@ type Auth struct {
 	resetMethods reset.Registry
 	// passwords accepts or rejects every new password before it reaches users
 	passwords contract.PasswordPolicy
+	// steps are the login steps evaluated after the built-in ones
+	steps []LoginStep
+	// contacts are the contact verification steps
+	contacts []*contactStep
+	// verifications holds the open contact verification requests
+	verifications contact.Store
+	// deliveries bounds the verification messages one account has sent to a contact address
+	deliveries throttle.Throttle
+	// sends bounds the verification messages one user has sent on a channel
+	sends throttle.Throttle
+	// addresses canonicalizes contact addresses
+	addresses AddressNormalizer
+	// stepUp decides the authentication sensitive actions need
+	stepUp StepUpPolicy
+	// reauths holds the re-authentications in progress, keyed by session ID
+	reauths cache.Instance[reauthState]
 
 	// Cookie provides session cookie attribute helpers.
 	Cookie CookieCtx
@@ -199,6 +227,12 @@ func PasswordResetRegistry(r reset.Registry) Option {
 	return func(a *Auth) { a.resetMethods = r }
 }
 
+// ContactVerificationStore replaces the default cache-backed store of contact verification
+// requests with a custom.
+func ContactVerificationStore(s contact.Store) Option {
+	return func(a *Auth) { a.verifications = s }
+}
+
 // PasswordPolicy replaces the default Configuration.Password-driven policy with a custom.
 func PasswordPolicy(p contract.PasswordPolicy) Option {
 	return func(a *Auth) { a.passwords = p }
@@ -233,6 +267,14 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 		return nil, errors.New("client registry is required")
 	}
 
+	// Changing, resetting or registering a password needs passwords to sign in with.
+	if _, ok := users.(PasswordAuthenticator); !ok {
+		switch users.(type) {
+		case PasswordChanger, PasswordResetter, Registerer:
+			return nil, errors.New("password change, reset and registration require a user provider implementing PasswordAuthenticator")
+		}
+	}
+
 	// Set defaults if not set
 	setDefaults(config)
 
@@ -255,6 +297,10 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 
 	for _, opt := range opts {
 		opt(a)
+	}
+
+	if a.addresses == nil {
+		a.addresses = DefaultAddressNormalizer
 	}
 
 	if a.jti == nil {
@@ -394,12 +440,75 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 			a.mfaMethods = mfa.NewConfigRegistry(config, a.mfaStore)
 		}
 
+		names, err := a.mfaMethods.Names(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to list MFA methods: %w", err)
+		}
+
+		if slices.Contains(names, reauthPassword) {
+			return nil, fmt.Errorf("mfa method name %q is reserved for password re-authentication", reauthPassword)
+		}
+
 		enrollments, err := cache.Create[mfaEnrollment](app.Cache(), "auth:mfa:enroll")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create MFA enrollment store: %w", err)
 		}
 
 		a.enrollments = enrollments
+	}
+
+	if len(a.contacts) > 0 {
+		if _, ok := users.(ContactVerifier); !ok {
+			return nil, errors.New("contact verification requires a user provider implementing ContactVerifier")
+		}
+
+		deliveries, err := throttle.NewLimit(app.Cache(), "auth:contactdelivery", config.Throttle.ContactDeliveryMax, config.Throttle.Window)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create contact delivery throttle: %w", err)
+		}
+
+		a.deliveries = deliveries
+
+		sends, err := throttle.NewLimit(app.Cache(), "auth:contactsend", config.Throttle.ContactSendMax, config.ContactVerificationTTL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create contact send throttle: %w", err)
+		}
+
+		a.sends = sends
+
+		if a.verifications == nil {
+			verifications, err := contact.NewCacheStore(app.Cache())
+			if err != nil {
+				return nil, fmt.Errorf("failed to create contact verification store: %w", err)
+			}
+
+			a.verifications = verifications
+		}
+	}
+
+	if a.StepUpEnabled() {
+		reauths, err := cache.Create[reauthState](app.Cache(), "auth:reauth")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create re-authentication store: %w", err)
+		}
+
+		a.reauths = reauths
+	}
+
+	steps := a.LoginSteps()
+	seen := make(map[string]struct{}, len(steps))
+
+	for _, step := range steps {
+		name := step.Name()
+		if name == "" {
+			return nil, errors.New("login step name is required")
+		}
+
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("duplicate login step %q", name)
+		}
+
+		seen[name] = struct{}{}
 	}
 
 	challenges, err := cache.CreateCounter(app.Cache(), "auth:challenge")
@@ -470,6 +579,15 @@ func (a *Auth) PasswordResetMethods() reset.Registry {
 	return a.resetMethods
 }
 
+// ContactVerifications returns the configured store of contact verification requests.
+func (a *Auth) ContactVerifications() contact.Store {
+	if len(a.contacts) == 0 {
+		return nil
+	}
+
+	return a.verifications
+}
+
 // PasswordPolicy returns the configured password policy.
 func (a *Auth) PasswordPolicy() contract.PasswordPolicy {
 	return a.passwords
@@ -514,6 +632,10 @@ func setDefaults(cfg *Configuration) {
 		cfg.AccessTokenTTL = 20 * time.Minute
 	}
 
+	if cfg.PendingTTL == 0 {
+		cfg.PendingTTL = 30 * time.Minute
+	}
+
 	if cfg.SessionTTL == 0 {
 		cfg.SessionTTL = 8 * time.Hour
 	}
@@ -528,6 +650,10 @@ func setDefaults(cfg *Configuration) {
 
 	if cfg.PasswordResetTTL == 0 {
 		cfg.PasswordResetTTL = time.Hour
+	}
+
+	if cfg.ContactVerificationTTL == 0 {
+		cfg.ContactVerificationTTL = 24 * time.Hour
 	}
 
 	if cfg.Password.MinLength == 0 {
@@ -564,5 +690,13 @@ func setDefaults(cfg *Configuration) {
 
 	if cfg.Throttle.RegistrationMax == 0 {
 		cfg.Throttle.RegistrationMax = 20
+	}
+
+	if cfg.Throttle.ContactDeliveryMax == 0 {
+		cfg.Throttle.ContactDeliveryMax = 5
+	}
+
+	if cfg.Throttle.ContactSendMax == 0 {
+		cfg.Throttle.ContactSendMax = 10
 	}
 }

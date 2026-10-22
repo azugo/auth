@@ -161,8 +161,7 @@ func (a *Auth) Introspect(ctx context.Context, in IntrospectRequest) (Introspect
 
 		info, sess, err := a.IntrospectToken(ctx, in.Token)
 		if err != nil {
-			var oe *OAuthError
-			if errors.As(err, &oe) && oe.Code == ErrCodeServerError {
+			if oe, ok := errors.AsType[*OAuthError](err); ok && oe.Code == ErrCodeServerError {
 				return IntrospectionResponse{}, err
 			}
 

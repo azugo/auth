@@ -215,7 +215,7 @@ func (h *Handler) listIdentities(ctx *azugo.Context) {
 
 // unlinkIdentity implements DELETE /external/{provider}/identities/{id}: caller-owned unlink.
 func (h *Handler) unlinkIdentity(ctx *azugo.Context) {
-	info, _, err := h.auth.IntrospectFirstParty(ctx, h.auth.ReadSessionToken(ctx))
+	info, err := h.auth.RequireStepUp(ctx, h.auth.ReadSessionToken(ctx), auth.ActionUnlinkIdentity)
 	if err != nil {
 		ctx.Error(err)
 

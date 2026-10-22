@@ -1,0 +1,23 @@
+package views
+
+// Rules renders the portal rules a login is held at until they are accepted.
+templ Rules(version, returnTo, errorMessage string) {
+	@layout("Portal rules") {
+		<p>Please read and accept the portal rules (version { version }) before you continue.</p>
+		<ol>
+			<li>Keep your credentials to yourself.</li>
+			<li>Use the portal only for the work it was given to you for.</li>
+			<li>Report anything that looks wrong to the administrators.</li>
+		</ol>
+		<form method="post" action="/rules">
+			<input type="hidden" name="version" value={ version }/>
+			if returnTo != "" {
+				<input type="hidden" name="return_to" value={ returnTo }/>
+			}
+			<label><input type="checkbox" name="accept" value="1" required/> I accept the portal rules</label>
+			@fieldError(errorMessage)
+			<button type="submit">Continue</button>
+		</form>
+		<p><a href="/login">Start over</a></p>
+	}
+}

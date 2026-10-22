@@ -206,8 +206,14 @@ func TestMFARoutesRedirectModeWithFormsAndCookie(t *testing.T) {
 	qt.Check(t, qt.Equals(string(resp.Header.Peek("Location")), "/mfa?return_to=%2F"))
 	fasthttp.ReleaseResponse(resp)
 
+	// A cookie-authenticated step from another origin is refused.
+	resp, err = tc.PostJSON("/auth/mfa/verify", map[string]any{"response": map[string]any{"approved": true}}, withCookie, tc.WithHeader("Sec-Fetch-Site", "cross-site"))
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(resp.StatusCode(), 403))
+	fasthttp.ReleaseResponse(resp)
+
 	// The login client cannot approve its own push challenge: it stays pending.
-	resp, err = tc.PostJSON("/auth/mfa/verify", map[string]any{"response": map[string]any{"approved": true}, "return_to": "/home"}, withCookie)
+	resp, err = tc.PostJSON("/auth/mfa/verify", map[string]any{"response": map[string]any{"approved": true}, "return_to": "/home"}, withCookie, tc.WithHeader("Sec-Fetch-Site", "same-origin"))
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 303))
 	qt.Check(t, qt.Equals(string(resp.Header.Peek("Location")), "/mfa?return_to=%2Fhome"))

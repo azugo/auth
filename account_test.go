@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +33,18 @@ type accountUsers struct {
 	deliverErr error
 	// registerErr fails registration when set.
 	registerErr error
+	// verifyErr fails VerifyContact when set.
+	verifyErr error
+	// gets counts GetUser calls.
+	gets int
+	// claimable are the channels with contact verification, where only a verified address is taken.
+	claimable map[string]bool
+	// registrationMails records the user IDs mailed for a repeated registration.
+	registrationMails []string
+	// seen records the contacts each delivery was handed.
+	seen []map[string][]Contact
+	// requests records the request ID of the last delivery per user ID.
+	requests map[string]string
 }
 
 // deliver records the secret a reset method hands out; "sms" needs a phone number.
@@ -59,12 +73,23 @@ type testDeliverer struct {
 }
 
 func (d testDeliverer) Available(info UserInfo) bool {
-	return d.channel != "sms" || info.Claims["phone_number"] != nil
+	if d.channel == "sms" {
+		return len(info.Contacts[ChannelPhone]) > 0
+	}
+
+	return len(info.Contacts[ChannelEmail]) > 0
 }
 
-func (d testDeliverer) Deliver(_ context.Context, info UserInfo, _, secret string) error {
+func (d testDeliverer) Deliver(_ context.Context, info UserInfo, req *reset.Request, secret string) error {
 	d.users.mu.Lock()
 	d.users.delivered[info.ID] = append(d.users.delivered[info.ID], secret)
+	d.users.requests[info.ID] = req.ID
+	d.users.seen = append(d.users.seen, info.Contacts)
+
+	if req.Registration {
+		d.users.registrationMails = append(d.users.registrationMails, info.ID)
+	}
+
 	d.users.mu.Unlock()
 
 	d.users.deliveries <- secret
@@ -80,13 +105,15 @@ func (f *accountUsers) resetMethods() reset.Registry {
 func newAccountUsers() *accountUsers {
 	return &accountUsers{
 		users: map[string]UserInfo{
-			"alice": {ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile"},
-			"fresh": {ID: "u3", Name: "Fresh", Email: "fresh@example.com", Scope: "openid profile", RequiresPasswordChange: true, Claims: map[string]any{"phone_number": "+37120000000"}},
+			"alice": {ID: "u1", Name: "Alice", Contacts: map[string][]Contact{ChannelEmail: {{Address: "alice@example.com", Verified: true, Primary: true}}}, Scope: "openid profile"},
+			"fresh": {ID: "u3", Name: "Fresh", Contacts: map[string][]Contact{ChannelEmail: {{Address: "fresh@example.com", Verified: true, Primary: true}}, ChannelPhone: {{Address: "+37120000000", Verified: true, Primary: true}}}, Scope: "openid profile", RequiresPasswordChange: true},
 		},
 		passwords:  map[string]string{"alice": "secret123", "fresh": "changeme"},
 		profiles:   map[string]map[string]any{},
 		delivered:  map[string][]string{},
+		requests:   map[string]string{},
 		deliveries: make(chan string, 64),
+		claimable:  map[string]bool{},
 	}
 }
 
@@ -116,6 +143,8 @@ func (f *accountUsers) GetUser(_ context.Context, id string) (UserInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.gets++
+
 	name, ok := f.username(id)
 	if !ok {
 		return UserInfo{}, ErrUserNotFound
@@ -132,11 +161,28 @@ func (f *accountUsers) Register(_ context.Context, req RegistrationRequest) (Use
 		return UserInfo{}, f.registerErr
 	}
 
-	if _, ok := f.users[req.Username]; ok {
-		return UserInfo{}, ErrUserAlreadyExists
+	if req.Username == "" {
+		return UserInfo{}, fmt.Errorf("%w: username is required", ErrInvalidRegistration)
 	}
 
-	info := UserInfo{ID: "u-" + req.Username, Name: req.Username, Email: req.Email, Scope: "openid profile"}
+	if _, ok := f.users[req.Username]; ok {
+		return UserInfo{}, ErrUsernameTaken
+	}
+
+	for channel, address := range req.Contacts {
+		for _, u := range f.users {
+			if holds(u, channel, address) && (!f.claimable[channel] || holdsVerified(u, channel, address)) {
+				return UserInfo{}, &ContactTakenError{Channel: channel}
+			}
+		}
+	}
+
+	contacts := make(map[string][]Contact, len(req.Contacts))
+	for channel, address := range req.Contacts {
+		contacts[channel] = []Contact{{Address: address}}
+	}
+
+	info := UserInfo{ID: "u-" + req.Username, Name: req.Username, Contacts: contacts, Scope: "openid profile"}
 	f.users[req.Username] = info
 	f.passwords[req.Username] = req.Password
 
@@ -184,7 +230,7 @@ func (f *accountUsers) FindUser(_ context.Context, identifier string) (UserInfo,
 	defer f.mu.Unlock()
 
 	for name, u := range f.users {
-		if name == identifier || u.Email == identifier {
+		if name == identifier || holds(u, ChannelEmail, identifier) || holds(u, ChannelPhone, identifier) {
 			return u, nil
 		}
 	}
@@ -194,6 +240,148 @@ func (f *accountUsers) FindUser(_ context.Context, identifier string) (UserInfo,
 
 func (f *accountUsers) ResetPassword(ctx context.Context, userID, newPassword string) error {
 	return f.SetPassword(ctx, userID, newPassword)
+}
+
+func (f *accountUsers) VerifyPassword(_ context.Context, userID, password string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	name, ok := f.username(userID)
+	if !ok || f.passwords[name] != password {
+		return ErrInvalidCredentials
+	}
+
+	return nil
+}
+
+func (f *accountUsers) FindContact(_ context.Context, channel, address string) (UserInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, u := range f.users {
+		if holdsVerified(u, channel, address) {
+			return u, nil
+		}
+	}
+
+	return UserInfo{}, ErrUserNotFound
+}
+
+// setContacts replaces the contacts of the account name on channel.
+func (f *accountUsers) setContacts(name, channel string, contacts ...Contact) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	u := f.users[name]
+	u.Contacts = maps.Clone(u.Contacts)
+	u.Contacts[channel] = contacts
+	f.users[name] = u
+}
+
+// lastSeen returns the contacts the latest delivery was handed.
+func (f *accountUsers) lastSeen() map[string][]Contact {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.seen[len(f.seen)-1]
+}
+
+// holds reports whether u has address on channel.
+func holds(u UserInfo, channel, address string) bool {
+	return slices.ContainsFunc(u.Contacts[channel], func(c Contact) bool { return c.Address == address })
+}
+
+func holdsVerified(u UserInfo, channel, address string) bool {
+	return slices.ContainsFunc(u.Contacts[channel], func(c Contact) bool { return c.Address == address && c.Verified })
+}
+
+// edit applies change to the contacts of userID on channel.
+func (f *accountUsers) edit(userID, channel string, change func([]Contact) []Contact) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	name, ok := f.username(userID)
+	if !ok {
+		return ErrUserNotFound
+	}
+
+	u := f.users[name]
+	u.Contacts = maps.Clone(u.Contacts)
+	u.Contacts[channel] = change(slices.Clone(u.Contacts[channel]))
+	f.users[name] = u
+
+	return nil
+}
+
+func (f *accountUsers) RemoveContact(_ context.Context, userID, channel, address string) error {
+	return f.edit(userID, channel, func(cs []Contact) []Contact {
+		return slices.DeleteFunc(cs, func(c Contact) bool { return c.Address == address })
+	})
+}
+
+func (f *accountUsers) SetPrimaryContact(_ context.Context, userID, channel, address string) error {
+	var found bool
+
+	err := f.edit(userID, channel, func(cs []Contact) []Contact {
+		for i := range cs {
+			cs[i].Primary = cs[i].Address == address && cs[i].Verified
+			found = found || cs[i].Primary
+		}
+
+		return cs
+	})
+	if err != nil {
+		return err
+	}
+
+	if !found {
+		return fmt.Errorf("%w: address is not a verified contact", ErrInvalidContact)
+	}
+
+	return nil
+}
+
+func (f *accountUsers) VerifyContact(_ context.Context, userID, channel, address string) error {
+	f.mu.Lock()
+	err := f.verifyErr
+	f.mu.Unlock()
+
+	if err != nil {
+		return err
+	}
+
+	// The account that proves an address first keeps it; the others lose their unverified claim.
+	f.mu.Lock()
+
+	for name, u := range f.users {
+		if u.ID == userID || !holds(u, channel, address) {
+			continue
+		}
+
+		if holdsVerified(u, channel, address) {
+			f.mu.Unlock()
+
+			return &ContactTakenError{Channel: channel}
+		}
+
+		u.Contacts = maps.Clone(u.Contacts)
+		u.Contacts[channel] = slices.DeleteFunc(slices.Clone(u.Contacts[channel]), func(c Contact) bool { return c.Address == address })
+		f.users[name] = u
+	}
+
+	f.mu.Unlock()
+
+	return f.edit(userID, channel, func(cs []Contact) []Contact {
+		for i := range cs {
+			if cs[i].Address == address {
+				cs[i].Verified = true
+
+				return cs
+			}
+		}
+
+		return append(cs, Contact{Address: address, Verified: true})
+	})
 }
 
 func (f *accountUsers) GetProfile(_ context.Context, userID string) (map[string]any, error) {
@@ -249,7 +437,7 @@ func TestRegisterCreatesAccountAndSignsIn(t *testing.T) {
 	a, users := newAccountTestAuth(t, registeringClient())
 
 	reg, err := a.Register(context.Background(), RegisterRequest{
-		Credentials: ClientCredentials{ClientID: "spa"}, Username: "bob", Email: "bob@example.com", Password: "pw123456",
+		Credentials: ClientCredentials{ClientID: "spa"}, Username: "bob", Contacts: map[string]string{ChannelEmail: "bob@example.com"}, Password: "pw123456",
 	})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(reg.UserID, "u-bob"))
@@ -268,11 +456,28 @@ func TestRegisterCreatesAccountAndSignsIn(t *testing.T) {
 	// A taken username is a conflict.
 	_, err = a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "bob", Password: "other-password-1"})
 	qt.Assert(t, qt.IsNotNil(err))
-	qt.Check(t, qt.IsTrue(errors.Is(err, ErrUserAlreadyExists)))
+	qt.Check(t, qt.IsTrue(errors.Is(err, ErrUsernameTaken)))
 
 	_, err = a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "eve"})
 	qt.Assert(t, qt.IsNotNil(err))
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	// A registration needs a username or a contact address to sign in with.
+	for _, contacts := range []map[string]string{nil, {ChannelEmail: ""}} {
+		_, err = a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Contacts: contacts, Password: "pw123456"})
+		qt.Check(t, qt.ErrorMatches(err, "invalid_request: username or contact address is required"))
+	}
+
+	// A blank address is dropped rather than handed to the Registerer.
+	_, err = a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "carol", Contacts: map[string]string{ChannelPhone: "  "}, Password: "pw123456"})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, hasPhone := users.users["carol"].Contacts[ChannelPhone]
+	qt.Check(t, qt.IsFalse(hasPhone))
+
+	// Beyond that, what a registration must carry is the Registerer's decision.
+	_, err = a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Contacts: map[string]string{ChannelEmail: "nameless@example.com"}, Password: "pw123456"})
+	qt.Check(t, qt.ErrorMatches(err, "invalid_request: invalid registration: username is required"))
 }
 
 func TestRegistrationPolicyGovernsRegistration(t *testing.T) {
@@ -652,6 +857,35 @@ func TestPasswordResetClientRestrictsMethods(t *testing.T) {
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
 }
 
+// silentMethod is a self-contained reset method that sends nothing.
+type silentMethod struct{}
+
+func (silentMethod) Begin(context.Context, *reset.Request, UserInfo) (string, map[string]any, error) {
+	return "", nil, nil
+}
+
+func (silentMethod) Verify(context.Context, *reset.Request, UserInfo, map[string]any) (reset.VerifyResult, error) {
+	return reset.VerifyDenied, nil
+}
+
+func TestResetMethodSendingNothingKeepsTheMailCap(t *testing.T) {
+	users := newAccountUsers()
+
+	cfg := validConfig()
+	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
+
+	a, err := New(newApp(t), cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(mfaClient(client.MFAPolicyDisabled)),
+		PasswordResetRegistry(reset.Methods(map[string]reset.Method{"email": reset.Link(users.deliver("email")), "silent": silentMethod{}})))
+	qt.Assert(t, qt.IsNil(err))
+
+	requestReset(t, a, "alice", "silent")
+	requestReset(t, a, "alice@example.com", "silent")
+
+	// Nothing was mailed yet, so the mail still goes out.
+	requestReset(t, a, "alice", "email")
+	users.awaitDelivery(t)
+}
+
 // approvalMethod is an asynchronous method approved out of band.
 type approvalMethod struct {
 	mu       sync.Mutex
@@ -822,7 +1056,7 @@ func TestPasswordPolicyGuardsEveryPath(t *testing.T) {
 		qt.Check(t, qt.IsTrue(errors.Is(err, ErrWeakPassword)))
 	}
 
-	_, err := a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "dave", Email: "dave@example.com", Password: "dave2024"})
+	_, err := a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "dave", Contacts: map[string]string{ChannelEmail: "dave@example.com"}, Password: "dave2024"})
 	weak(t, err)
 
 	res := loginAs(t, a, alice(""))
@@ -863,8 +1097,8 @@ func TestPasswordPolicyOptionOverridesDefault(t *testing.T) {
 	_, err := a.Register(context.Background(), RegisterRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "dave", Password: "perfectly fine otherwise"})
 	qt.Assert(t, qt.IsNotNil(err))
 
-	var oe *OAuthError
-	qt.Assert(t, qt.IsTrue(errors.As(err, &oe)))
+	oe, ok := errors.AsType[*OAuthError](err)
+	qt.Assert(t, qt.IsTrue(ok))
 	qt.Check(t, qt.Equals(oe.Description, "password does not meet the policy: breached"))
 }
 

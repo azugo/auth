@@ -28,13 +28,20 @@ func TestUserInfoReturnsClaimsForValidBearer(t *testing.T) {
 	qt.Check(t, qt.Equals(resp.StatusCode(), 200))
 
 	doc := decodeJSON[struct {
-		Subject string `json:"sub"`
-		Name    string `json:"name"`
-		Email   string `json:"email"`
+		Subject       string `json:"sub"`
+		Name          string `json:"name"`
+		Email         string `json:"email"`
+		EmailVerified *bool  `json:"email_verified"`
+		Phone         string `json:"phone_number"`
 	}](t, resp)
 	qt.Check(t, qt.Equals(doc.Subject, "u1"))
 	qt.Check(t, qt.Equals(doc.Name, "Alice"))
 	qt.Check(t, qt.Equals(doc.Email, "alice@example.com"))
+	qt.Assert(t, qt.IsNotNil(doc.EmailVerified))
+	qt.Check(t, qt.IsFalse(*doc.EmailVerified))
+
+	// The phone number needs the phone scope.
+	qt.Check(t, qt.Equals(doc.Phone, ""))
 }
 
 func TestUserInfoHonoursGrantedScope(t *testing.T) {

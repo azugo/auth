@@ -24,10 +24,10 @@ var wording = map[auth.ErrorCode]string{
 
 // fatal takes over a failed request the form cannot recover from.
 func (r *router) fatal(ctx *azugo.Context, err error, returnTo string) bool {
-	var oe *auth.OAuthError
+	oe, ok := errors.AsType[*auth.OAuthError](err)
 
 	switch {
-	case !errors.As(err, &oe) || oe.StatusCode() >= http.StatusInternalServerError:
+	case !ok || oe.StatusCode() >= http.StatusInternalServerError:
 		ctx.Error(err)
 	case oe.Code == auth.ErrCodeInvalidToken:
 		ctx.Flash.FieldError("password", wording[oe.Code])
@@ -41,8 +41,8 @@ func (r *router) fatal(ctx *azugo.Context, err error, returnTo string) bool {
 
 // errorMessage turns a rejected request into text safe to show under a form field.
 func errorMessage(err error, invalid string) string {
-	var oe *auth.OAuthError
-	if !errors.As(err, &oe) {
+	oe, ok := errors.AsType[*auth.OAuthError](err)
+	if !ok {
 		return "Something went wrong. Please try again."
 	}
 

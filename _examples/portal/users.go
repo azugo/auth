@@ -30,7 +30,7 @@ func NewDemoUsers() *DemoUsers {
 				info: auth.UserInfo{
 					ID:                     "u-0003",
 					Name:                   "Portal Guest",
-					Email:                  "guest@example.com",
+					Contacts:               map[string][]auth.Contact{auth.ChannelEmail: {{Address: "guest@example.com", Verified: true, Primary: true}}},
 					Scope:                  "openid profile",
 					RequiresPasswordChange: true,
 				},
@@ -38,26 +38,26 @@ func NewDemoUsers() *DemoUsers {
 			"admin": {
 				password: "admin123",
 				info: auth.UserInfo{
-					ID:    "u-0001",
-					Name:  "Portal Admin",
-					Email: "admin@example.com",
-					Scope: "openid profile admin",
+					ID:       "u-0001",
+					Name:     "Portal Admin",
+					Contacts: map[string][]auth.Contact{auth.ChannelEmail: {{Address: "admin@example.com", Verified: true, Primary: true}}},
+					Scope:    "openid profile admin",
 				},
 			},
 			"user": {
 				password: "user123",
 				info: auth.UserInfo{
-					ID:    "u-0002",
-					Name:  "Portal User",
-					Email: "user@example.com",
-					Scope: "openid profile",
+					ID:       "u-0002",
+					Name:     "Portal User",
+					Contacts: map[string][]auth.Contact{auth.ChannelEmail: {{Address: "user@example.com", Verified: true, Primary: true}}},
+					Scope:    "openid profile",
 				},
 			},
 		},
 	}
 }
 
-// Authenticate implements auth.UserProvider.
+// Authenticate implements auth.PasswordAuthenticator.
 func (p *DemoUsers) Authenticate(_ context.Context, username, password string) (auth.UserInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -68,6 +68,19 @@ func (p *DemoUsers) Authenticate(_ context.Context, username, password string) (
 	}
 
 	return u.info, nil
+}
+
+// VerifyPassword implements auth.PasswordAuthenticator.
+func (p *DemoUsers) VerifyPassword(_ context.Context, userID, password string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	name, ok := p.username(userID)
+	if !ok || subtle.ConstantTimeCompare([]byte(p.users[name].password), []byte(password)) != 1 {
+		return auth.ErrInvalidCredentials
+	}
+
+	return nil
 }
 
 // GetUser implements auth.UserProvider.

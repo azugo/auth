@@ -45,6 +45,14 @@ type SessionRoutes struct {
 	Delete azugo.RequestHandler // DELETE /session
 	List   azugo.RequestHandler // GET /sessions
 	Revoke azugo.RequestHandler // DELETE /sessions/{id}
+	// ResolveStep is set only when login steps are registered.
+	ResolveStep azugo.RequestHandler // POST /steps/{name}
+	// Switch is set only when a login step implements auth.Switcher.
+	Switch azugo.RequestHandler // POST /session/switch
+	// Reauth and ReauthVerify are set when any action may require step-up: a step-up policy, an MFA
+	// store or contact management is configured.
+	Reauth       azugo.RequestHandler // POST /session/reauth
+	ReauthVerify azugo.RequestHandler // POST /session/reauth/verify
 }
 
 // AccountRoutes holds the self-service account adapters, each set only when the user provider
@@ -58,6 +66,11 @@ type AccountRoutes struct {
 	ResetPassword        azugo.RequestHandler // POST /account/password/reset/confirm (PasswordResetter)
 	Profile              azugo.RequestHandler // GET /account/profile (ProfileManager)
 	UpdateProfile        azugo.RequestHandler // PUT /account/profile (ProfileManager)
+	VerifyContact        azugo.RequestHandler // POST /account/contact/verify (ContactVerification)
+	Contacts             azugo.RequestHandler // GET /account/contacts (ContactVerification)
+	AddContact           azugo.RequestHandler // POST /account/contacts (ContactVerification)
+	PrimaryContact       azugo.RequestHandler // POST /account/contacts/primary (ContactManager)
+	RemoveContact        azugo.RequestHandler // POST /account/contacts/remove (ContactManager)
 }
 
 // MFARoutes holds the MFA adapters, set only when an MFA store is configured and mounted under
@@ -109,7 +122,7 @@ type discoveryEndpoints struct {
 type Group int
 
 const (
-	// SessionGroup mounts /sessions and /session routes.
+	// SessionGroup mounts the /sessions, /session and /steps routes.
 	SessionGroup Group = iota
 	// AccountGroup mounts the /account/* routes.
 	AccountGroup
@@ -235,7 +248,7 @@ func supportedGroups(a *auth.Auth) []Group {
 	groups := []Group{SessionGroup}
 
 	switch a.Users().(type) {
-	case auth.Registerer, auth.PasswordChanger, auth.PasswordResetter, auth.ProfileManager:
+	case auth.Registerer, auth.PasswordChanger, auth.PasswordResetter, auth.ProfileManager, auth.ContactVerifier, auth.ContactManager:
 		groups = append(groups, AccountGroup)
 	}
 
@@ -304,14 +317,14 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	}
 
 	if a.MFA() != nil {
-		h.MFA.Verify = h.mfaVerify
-		h.MFA.Begin = h.mfaBegin
-		h.MFA.Resend = h.mfaResend
+		h.MFA.Verify = sameOriginCookie(h.mfaVerify)
+		h.MFA.Begin = sameOriginCookie(h.mfaBegin)
+		h.MFA.Resend = sameOriginCookie(h.mfaResend)
 		h.MFA.Status = h.mfaStatus
 		h.MFA.Callback = h.mfaCallback
 		h.MFA.Methods = h.mfaMethods
-		h.MFA.Enroll = h.mfaEnroll
-		h.MFA.EnrollFinish = h.mfaEnrollFinish
+		h.MFA.Enroll = sameOriginCookie(h.mfaEnroll)
+		h.MFA.EnrollFinish = sameOriginCookie(h.mfaEnrollFinish)
 		h.MFA.EnrollRevoke = h.mfaEnrollRevoke
 		h.MFA.EnrollmentRevoke = h.mfaEnrollmentRevoke
 	}
@@ -324,7 +337,7 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	}
 
 	if _, ok := a.Users().(auth.PasswordChanger); ok {
-		h.Account.ChangePassword = h.changePassword
+		h.Account.ChangePassword = sameOriginCookie(h.changePassword)
 	}
 
 	if _, ok := a.Users().(auth.PasswordResetter); ok {
@@ -339,9 +352,33 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 		h.Account.UpdateProfile = h.updateProfile
 	}
 
+	if len(a.ContactChannels()) > 0 {
+		h.Account.VerifyContact = h.verifyContact
+		h.Account.Contacts = h.contacts
+		h.Account.AddContact = sameOriginCookie(h.addContact)
+	}
+
+	if _, ok := a.Users().(auth.ContactManager); ok {
+		h.Account.PrimaryContact = sameOriginCookie(h.primaryContact)
+		h.Account.RemoveContact = sameOriginCookie(h.removeContact)
+	}
+
 	if _, ok := a.Sessions().(session.Lister); ok {
 		h.Session.List = h.listSessions
 		h.Session.Revoke = h.revokeSession
+	}
+
+	if len(a.LoginSteps()) > 0 {
+		h.Session.ResolveStep = sameOriginCookie(h.resolveStep)
+	}
+
+	if a.SessionSwitching() {
+		h.Session.Switch = sameOriginCookie(h.switchSession)
+	}
+
+	if a.StepUpEnabled() {
+		h.Session.Reauth = sameOriginCookie(h.reauth)
+		h.Session.ReauthVerify = sameOriginCookie(h.reauthVerify)
 	}
 
 	return h
@@ -409,6 +446,19 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 			if h.Session.Revoke != nil {
 				g.Delete("/sessions/{id}", h.Session.Revoke)
 			}
+
+			if h.Session.ResolveStep != nil {
+				g.Post("/steps/{name}", h.Session.ResolveStep)
+			}
+
+			if h.Session.Switch != nil {
+				g.Post("/session/switch", h.Session.Switch)
+			}
+
+			if h.Session.Reauth != nil {
+				g.Post("/session/reauth", h.Session.Reauth)
+				g.Post("/session/reauth/verify", h.Session.ReauthVerify)
+			}
 		case AccountGroup:
 			if h.Account.Register != nil {
 				g.Post("/account/register", h.Account.Register)
@@ -428,6 +478,17 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 			if h.Account.Profile != nil {
 				g.Get("/account/profile", h.Account.Profile)
 				g.Put("/account/profile", h.Account.UpdateProfile)
+			}
+
+			if h.Account.VerifyContact != nil {
+				g.Post("/account/contact/verify", h.Account.VerifyContact)
+				g.Get("/account/contacts", h.Account.Contacts)
+				g.Post("/account/contacts", h.Account.AddContact)
+			}
+
+			if h.Account.PrimaryContact != nil {
+				g.Post("/account/contacts/primary", h.Account.PrimaryContact)
+				g.Post("/account/contacts/remove", h.Account.RemoveContact)
 			}
 		case LinkingGroup:
 			if h.External.Link == nil {
@@ -473,6 +534,7 @@ func (h *Handler) writeLoginResult(ctx *azugo.Context, res auth.LoginResult) {
 		ctx.StatusCode(http.StatusAccepted)
 		ctx.JSON(&struct {
 			Status      session.Status `json:"status"`
+			Step        string         `json:"step,omitempty"`
 			StepToken   string         `json:"step_token,omitempty"`
 			Available   []string       `json:"available,omitempty"`
 			Selected    string         `json:"selected,omitempty"`
@@ -480,6 +542,7 @@ func (h *Handler) writeLoginResult(ctx *azugo.Context, res auth.LoginResult) {
 			Data        map[string]any `json:"data,omitempty"`
 		}{
 			Status:      res.Status,
+			Step:        res.Step,
 			StepToken:   res.StepToken,
 			Available:   res.Available,
 			Selected:    res.Selected,

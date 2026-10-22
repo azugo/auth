@@ -81,7 +81,7 @@ func (r *recorder) Available(contract.UserInfo) bool {
 	return !r.unavailable
 }
 
-func (r *recorder) Deliver(_ context.Context, _ contract.UserInfo, _, secret string) error {
+func (r *recorder) Deliver(_ context.Context, _ contract.UserInfo, _ *Request, secret string) error {
 	r.secrets <- secret
 
 	return nil

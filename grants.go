@@ -88,7 +88,7 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 		return authorizeErrorRedirect(in, ErrCodeUnmetAuthenticationRequirements, "session was not established with an authentication method the client allows"), nil
 	}
 
-	if (cl.MFAPolicy == client.MFAPolicyRequired || cl.MFAPolicy == client.MFAPolicyOptional) && !a.mfaVerified(sess) {
+	if (cl.MFAPolicy == client.MFAPolicyRequired || cl.MFAPolicy == client.MFAPolicyOptional) && !sess.AuthenticatedMFA() {
 		_, available, err := a.mfaMethodSets(ctx, sess.UserID, cl, nil)
 		if err != nil {
 			return AuthorizeResult{}, NewOAuthErrorFrom(err)
@@ -101,7 +101,7 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 
 	// The session is already established, so a level is reachable only if it is satisfied.
 	acr := parseACRRequest(in.ACRValues, in.Claims)
-	if _, err := a.resolveTargetACR(cl, acr, func(lvl *contract.ACRLevelConfig) bool { return levelSatisfied(lvl, sess) }); err != nil {
+	if _, err := a.resolveTargetACR(cl, acr, func(lvl *contract.ACRLevelConfig) bool { return a.ACRSatisfies(sess.AuthenticatedACR(), lvl.Value) }); err != nil {
 		return authorizeErrorRedirect(in, ErrCodeUnmetAuthenticationRequirements, "session does not meet the requested authentication context"), nil //nolint:nilerr
 	}
 
@@ -228,7 +228,7 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "session is no longer active")
 	}
 
-	if !a.ACRSatisfies(sess.ACR, cl.MinACR) || (rec.ACREssential && !slices.ContainsFunc(rec.ACRValues, func(v string) bool { return a.ACRSatisfies(sess.ACR, v) })) {
+	if !a.ACRSatisfies(sess.AuthenticatedACR(), cl.MinACR) || (rec.ACREssential && !slices.ContainsFunc(rec.ACRValues, func(v string) bool { return a.ACRSatisfies(sess.AuthenticatedACR(), v) })) {
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "session does not meet the required authentication context")
 	}
 
@@ -279,7 +279,7 @@ func (a *Auth) ClientCredentialsGrant(ctx context.Context, in ClientCredentialsG
 		return TokenResult{}, err
 	}
 
-	if !cl.GrantTypeAllowed("client_credentials") {
+	if !cl.GrantTypeAllowed(client.GrantTypeClientCredentials) {
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeUnauthorizedClient, "client is not allowed to use the client_credentials grant")
 	}
 
@@ -322,7 +322,7 @@ func (a *Auth) issueAccessToken(ctx context.Context, sess *session.Session, cl *
 			return "", "", NewOAuthError(http.StatusInternalServerError, ErrCodeServerError, "no key provider configured")
 		}
 
-		return a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: sess.UserID, Scope: scope, ACR: sess.ACR, AMR: sess.AMR, GrantType: grantType}, baseURL, mountPath)
+		return a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: sess.UserID, Scope: scope, ACR: sess.AuthenticatedACR(), AMR: sess.AuthenticatedMethods(), GrantType: grantType}, baseURL, mountPath)
 	}
 
 	now := time.Now()

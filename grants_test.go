@@ -27,7 +27,7 @@ func newGrantsTestAuth(t *testing.T, cfg *Configuration, opts []Option, cls ...*
 
 	users := fakeUsers{
 		users: map[string]UserInfo{
-			"alice": {ID: "u1", Name: "Alice", Email: "alice@example.com", Scope: "openid profile"},
+			"alice": {ID: "u1", Name: "Alice", Contacts: map[string][]Contact{ChannelEmail: {{Address: "alice@example.com"}}}, Scope: "openid profile"},
 		},
 		passwords: map[string]string{"alice": "secret123"},
 	}
@@ -134,6 +134,50 @@ func TestAuthorizationCodeFlowEndToEnd(t *testing.T) {
 	info, _, err := a.IntrospectToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "u1"))
+}
+
+func TestSessionContextReleasedOnlyToItsClientOrListedKeys(t *testing.T) {
+	priv, pub := genTestRSAKeyPair(t)
+
+	cfg := validConfig()
+	cfg.Keys = keySetConfig(priv, pub)
+
+	web := codeClient()
+	web.ContextClaims = []string{"tenant", "cnf"}
+
+	a := newGrantsTestAuth(t, cfg, nil, portalClient(), web)
+	cookie := login(t, a)
+
+	_, sess, err := a.IntrospectToken(context.Background(), cookie)
+	qt.Assert(t, qt.IsNil(err))
+
+	sess.Context = map[string]any{"tenant": "acme", "roles": []any{"admin"}, "cnf": "x"}
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(context.Background(), sess)))
+
+	// The session's own client sees its whole context.
+	own, err := a.UserInfoClaims(context.Background(), cookie)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.DeepEquals(own.Context, sess.Context))
+
+	res, err := a.AuthorizationCodeGrant(context.Background(), AuthorizationCodeGrantRequest{
+		Credentials:  ClientCredentials{ClientID: "web"},
+		Code:         authorizeCode(t, a, cookie, "openid", "n0nce"),
+		RedirectURI:  "https://web.example/callback",
+		CodeVerifier: pkceVerifier,
+		BaseURL:      "https://issuer.example",
+	})
+	qt.Assert(t, qt.IsNil(err))
+
+	// Another client gets only the keys it is registered for, and never a reserved claim.
+	claims := decodeIDToken(t, res.IDToken, pub)
+	qt.Check(t, qt.Equals(claims["tenant"], any("acme")))
+	qt.Check(t, qt.IsNil(claims["roles"]))
+	qt.Check(t, qt.IsNil(claims["cnf"]))
+
+	info, err := a.UserInfoClaims(context.Background(), res.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.DeepEquals(info.Context, map[string]any{"tenant": "acme", "cnf": "x"}))
+	qt.Check(t, qt.IsTrue(token.ReservedClaim("cnf")))
 }
 
 func keySetConfig(priv, pub string) *contract.KeySetConfig {
@@ -269,6 +313,45 @@ func TestAuthorizeRejectsPlainPKCEMethod(t *testing.T) {
 	})
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_request"))
+}
+
+func TestAuthorizeJudgesTheLatestAuthentication(t *testing.T) {
+	cfg := validConfig()
+	cfg.ACRLevels = acrLadder()
+
+	web := codeClient()
+	web.MinACR = "loa2"
+
+	a := newGrantsTestAuth(t, cfg, nil, portalClient(), web)
+	cookie := login(t, a)
+
+	// The session once reached loa2, but its latest authentication only loa1.
+	_, sess, err := a.IntrospectToken(context.Background(), cookie)
+	qt.Assert(t, qt.IsNil(err))
+
+	sess.ACR = "loa2"
+	sess.AuthACR = "loa1"
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(context.Background(), sess)))
+
+	authorize := func() string {
+		res, err := a.Authorize(context.Background(), AuthorizeRequest{
+			ResponseType: "code", ClientID: "web", RedirectURI: "https://web.example/callback",
+			Scope: "openid", CodeChallenge: pkceChallenge, CodeChallengeMethod: "S256", SessionToken: cookie,
+		})
+		qt.Assert(t, qt.IsNil(err))
+
+		u, err := url.Parse(res.Redirect)
+		qt.Assert(t, qt.IsNil(err))
+
+		return u.Query().Get("error")
+	}
+
+	qt.Check(t, qt.Equals(authorize(), string(ErrCodeUnmetAuthenticationRequirements)))
+
+	sess.AuthACR = "loa2"
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(context.Background(), sess)))
+
+	qt.Check(t, qt.Equals(authorize(), ""))
 }
 
 func TestAuthorizeRequiresLogin(t *testing.T) {

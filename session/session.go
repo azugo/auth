@@ -47,6 +47,14 @@ type Session struct {
 	AuthProvider string
 	ACR          string   // satisfied authentication context class (trust level)
 	AMR          []string // authentication methods references actually used, e.g. ["pwd","otp"]
+	// AuthTime is when the user last authenticated, at login or re-authentication.
+	AuthTime time.Time
+	// AuthMethods are the amr values of that last authentication.
+	AuthMethods []string
+	// AuthACR is the authentication context class that last authentication reached on its own.
+	AuthACR string
+	// AuthMFA reports that the last authentication passed a second factor.
+	AuthMFA bool
 	// Context carries application-defined selections bound to the session - the active tenant,
 	// the selected role(s), an accepted agreement version, etc.
 	Context   map[string]any
@@ -59,6 +67,45 @@ type Session struct {
 // Valid returns true when the session is still alive, not revoked and not expired.
 func (s *Session) Valid() bool {
 	return s.RevokedAt == nil && time.Now().Before(s.ExpiresAt)
+}
+
+// AuthenticatedAt returns when the user last authenticated.
+func (s *Session) AuthenticatedAt() time.Time {
+	if s.AuthTime.IsZero() {
+		return s.CreatedAt
+	}
+
+	return s.AuthTime
+}
+
+// AuthenticatedACR returns the level the latest authentication reached on its own, or ACR for a
+// session stored before it was recorded.
+func (s *Session) AuthenticatedACR() string {
+	if s.AuthTime.IsZero() {
+		return s.ACR
+	}
+
+	return s.AuthACR
+}
+
+// AuthenticatedMethods returns the latest authentication's methods, or AMR for a session stored
+// before they were recorded.
+func (s *Session) AuthenticatedMethods() []string {
+	if s.AuthTime.IsZero() {
+		return s.AMR
+	}
+
+	return s.AuthMethods
+}
+
+// AuthenticatedMFA reports whether the latest authentication passed a second factor, or whether
+// the session holds one when it was stored before that was recorded.
+func (s *Session) AuthenticatedMFA() bool {
+	if s.AuthTime.IsZero() {
+		return s.MFAMethod != ""
+	}
+
+	return s.AuthMFA
 }
 
 // Active returns true when the session is valid and in the active status.

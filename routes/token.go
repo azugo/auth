@@ -26,7 +26,7 @@ func (h *Handler) token(ctx *azugo.Context) {
 		h.passwordGrant(ctx)
 	case client.GrantTypeAuthorizationCode:
 		h.authorizationCodeGrant(ctx)
-	case "client_credentials":
+	case client.GrantTypeClientCredentials:
 		h.clientCredentialsGrant(ctx)
 	default:
 		ctx.Error(auth.NewOAuthErrorFrom(auth.ErrUnsupportedGrantType))

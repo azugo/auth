@@ -22,12 +22,18 @@ import (
 var (
 	// ErrInvalidCredentials is returned for a bad username and/or password.
 	ErrInvalidCredentials = contract.ErrInvalidCredentials
-	// ErrUserAlreadyExists is returned when the account is taken.
+	// ErrUserAlreadyExists matches a ContactTakenError.
 	ErrUserAlreadyExists = contract.ErrUserAlreadyExists
+	// ErrUsernameTaken is returned when the username is taken.
+	ErrUsernameTaken = contract.ErrUsernameTaken
 	// ErrUserNotFound is returned when the user is unknown.
 	ErrUserNotFound = contract.ErrUserNotFound
 	// ErrWeakPassword is returned for a new password the policy does not accept.
 	ErrWeakPassword = contract.ErrWeakPassword
+	// ErrInvalidRegistration is returned for registration data the Registerer does not accept.
+	ErrInvalidRegistration = contract.ErrInvalidRegistration
+	// ErrInvalidContact is returned for a contact the ContactManager does not accept.
+	ErrInvalidContact = contract.ErrInvalidContact
 	// ErrUnsupportedGrantType is returned for grant_type this library does not
 	// support.
 	ErrUnsupportedGrantType = errors.New("unsupported grant type")
@@ -67,6 +73,7 @@ const (
 	ErrCodeUnsupportedResponseType         ErrorCode = "unsupported_response_type"
 	ErrCodeInvalidScope                    ErrorCode = "invalid_scope"
 	ErrCodeSlowDown                        ErrorCode = "slow_down"
+	ErrCodeInsufficientUserAuthentication  ErrorCode = "insufficient_user_authentication"
 )
 
 var (
@@ -90,6 +97,9 @@ type OAuthError struct {
 	scope  string
 	status int
 	cause  error // underlying error
+	// acrValues and maxAge are the RFC 9470 step-up challenge parameters.
+	acrValues string
+	maxAge    int
 }
 
 // OAuthErrorOption customizes an OAuthError at construction.
@@ -154,12 +164,12 @@ func NewOAuthAuthenticateError(code ErrorCode, description, realm, scope string,
 
 // NewOAuthErrorFrom maps a authentication specifc errors to OAuth 2.0 error and status code.
 func NewOAuthErrorFrom(err error) error {
-	var oe *OAuthError
+	_, mapped := errors.AsType[*OAuthError](err)
 
 	switch {
 	case err == nil:
 		return nil
-	case errors.As(err, &oe):
+	case mapped:
 		// Already mapped - pass through unchanged.
 		return err
 	case errors.Is(err, contract.ErrInvalidCredentials):
@@ -172,9 +182,11 @@ func NewOAuthErrorFrom(err error) error {
 	case errors.Is(err, client.ErrNotFound):
 		// Unknown/invalid client or it's parameters.
 		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client", err)
-	case errors.Is(err, contract.ErrWeakPassword):
+	case errors.Is(err, contract.ErrWeakPassword), errors.Is(err, contract.ErrInvalidRegistration), errors.Is(err, contract.ErrInvalidContact):
 		// The policy's own wording is the user-facing reason.
 		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), err)
+	case errors.Is(err, contract.ErrUsernameTaken):
+		return newOAuthErrorWrapped(http.StatusConflict, ErrCodeInvalidRequest, "username is taken", err)
 	case errors.Is(err, contract.ErrUserAlreadyExists):
 		// Account registration conflict.
 		return newOAuthErrorWrapped(http.StatusConflict, ErrCodeInvalidRequest, "account already exists", err)
@@ -194,6 +206,8 @@ func NewOAuthErrorFrom(err error) error {
 		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeAccessDenied, "password change required", err)
 	case errors.Is(err, ErrFirstPartyRequired):
 		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeInsufficientScope, "first-party credential required", err)
+	case errors.Is(err, ErrInvalidSelection):
+		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidRequest, "invalid selection", err)
 	case errors.Is(err, mfa.ErrUnknownMethod):
 		return newOAuthErrorWrapped(http.StatusNotFound, ErrCodeInvalidRequest, "unknown mfa method", err)
 	case errors.Is(err, mfa.ErrNotEnrolled):
@@ -246,41 +260,43 @@ func (e *OAuthError) ErrorHeaders() iter.Seq2[string, string] {
 			return
 		}
 
-		var b strings.Builder
-
-		b.WriteString(tokenTypeBearer)
+		// RFC 6750: the scheme, then the auth-params separated by commas.
+		var params []string
 
 		if e.realm != "" {
-			b.WriteString(` realm="`)
-			b.WriteString(e.realm)
-			b.WriteByte('"')
+			params = append(params, `realm="`+e.realm+`"`)
 		}
 
 		if e.Code != "" {
-			b.WriteString(`, error="`)
-			b.WriteString(string(e.Code))
-			b.WriteByte('"')
+			params = append(params, `error="`+string(e.Code)+`"`)
 		}
 
 		if e.Description != "" {
-			b.WriteString(`, error_description="`)
-			b.WriteString(e.Description)
-			b.WriteByte('"')
+			params = append(params, `error_description="`+e.Description+`"`)
 		}
 
 		if e.uri != "" {
-			b.WriteString(`, error_uri="`)
-			b.WriteString(e.uri)
-			b.WriteByte('"')
+			params = append(params, `error_uri="`+e.uri+`"`)
 		}
 
 		if e.scope != "" {
-			b.WriteString(`, scope="`)
-			b.WriteString(e.scope)
-			b.WriteByte('"')
+			params = append(params, `scope="`+e.scope+`"`)
 		}
 
-		yield(http.HeaderWWWAuthenticate, b.String())
+		if e.acrValues != "" {
+			params = append(params, `acr_values="`+e.acrValues+`"`)
+		}
+
+		if e.maxAge > 0 {
+			params = append(params, "max_age="+strconv.Itoa(e.maxAge))
+		}
+
+		challenge := tokenTypeBearer
+		if len(params) > 0 {
+			challenge += " " + strings.Join(params, ", ")
+		}
+
+		yield(http.HeaderWWWAuthenticate, challenge)
 	}
 }
 

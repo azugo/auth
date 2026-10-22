@@ -58,6 +58,14 @@ func TestValidate(t *testing.T) {
 	short.Secret = "tooshort"
 	qt.Check(t, qt.IsNotNil(short.Validate(validation.New())))
 
+	fallback := *valid
+	fallback.FallbackSecrets = []string{"fedcba9876543210fedcba9876543210"}
+	qt.Check(t, qt.IsNil(fallback.Validate(validation.New())))
+
+	shortFallback := *valid
+	shortFallback.FallbackSecrets = []string{"fedcba9876543210fedcba9876543210", "tooshort"}
+	qt.Check(t, qt.IsNotNil(shortFallback.Validate(validation.New())))
+
 	badSameSite := *valid
 	badSameSite.SameSite = "bogus"
 	qt.Check(t, qt.IsNotNil(badSameSite.Validate(validation.New())))

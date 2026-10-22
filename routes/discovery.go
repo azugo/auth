@@ -28,9 +28,13 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 
 	// client_credentials issues signed JWT access tokens, so it is only available - and only
 	// advertised - with a key provider.
-	grantTypes := []string{client.GrantTypeAuthorizationCode, client.GrantTypePassword}
+	grantTypes := []string{client.GrantTypeAuthorizationCode}
 	if kp != nil {
-		grantTypes = []string{client.GrantTypeAuthorizationCode, "client_credentials", client.GrantTypePassword}
+		grantTypes = append(grantTypes, client.GrantTypeClientCredentials)
+	}
+
+	if _, ok := h.auth.Users().(auth.PasswordAuthenticator); ok {
+		grantTypes = append(grantTypes, client.GrantTypePassword)
 	}
 
 	// OIDC discovery document (RFC 8414 / OpenID Connect Discovery 1.0).
@@ -83,7 +87,7 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 			return
 		}
 
-		doc.ScopesSupported = []string{auth.ScopeOpenID, auth.ScopeProfile, auth.ScopeEmail}
+		doc.ScopesSupported = []string{auth.ScopeOpenID, auth.ScopeProfile, auth.ScopeEmail, auth.ScopePhone}
 		doc.IDTokenSigningAlgValuesSupported = set.SigningAlgorithms()
 	}
 

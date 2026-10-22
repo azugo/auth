@@ -105,8 +105,7 @@ func (s *cacheStore) Save(ctx context.Context, c *AuthorizationCode) error {
 func (s *cacheStore) Consume(ctx context.Context, code string) (*AuthorizationCode, error) {
 	rec, err := s.codes.Pop(ctx, code)
 	if err != nil {
-		var knf cache.KeyNotFoundError
-		if !errors.As(err, &knf) {
+		if _, ok := errors.AsType[cache.KeyNotFoundError](err); !ok {
 			return nil, err
 		}
 

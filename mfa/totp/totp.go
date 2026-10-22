@@ -113,7 +113,9 @@ type secret struct {
 
 // BeginEnroll generates a fresh seed, returning the otpauth URI and secret for the client.
 func (m *method) BeginEnroll(_ context.Context, userID string, info contract.UserInfo) (mfa.EnrollmentData, error) {
-	account := info.Email
+	email, _ := info.PreferredContact(contract.ChannelEmail)
+
+	account := email.Address
 	if account == "" {
 		account = info.Name
 	}

@@ -3,21 +3,26 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
+	"time"
 
 	"azugo.io/auth/client"
 	"azugo.io/auth/event"
+	"azugo.io/auth/reset"
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
 	"azugo.io/core/http"
+	"go.uber.org/zap"
 )
 
 // RegisterRequest carries a self-registration and the request-derived values.
 type RegisterRequest struct {
 	Credentials ClientCredentials
 	Username    string
-	Email       string
 	Password    string
+	// Contacts maps a channel to the address given for it.
+	Contacts map[string]string
 	// Extra is passed through to Registerer.Register uninterpreted.
 	Extra     map[string]any
 	ReturnTo  string
@@ -31,6 +36,11 @@ type RegisterResult struct {
 	UserID string
 	// Login is set when the client's RegistrationPolicy signs the new account in.
 	Login *LoginResult
+	// Accepted is the uniform answer given for an address on a verified channel.
+	Accepted bool
+	// Request is the contact verification request to present the delivered proof with.
+	Request     string
+	Interaction string
 }
 
 // PasswordChangeRequest carries a password change for the session behind Token.
@@ -72,11 +82,58 @@ func (a *Auth) Register(ctx context.Context, in RegisterRequest) (RegisterResult
 		return RegisterResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeUnauthorizedClient, "client is not allowed to sign in with a password")
 	}
 
-	if in.Password == "" || (in.Username == "" && in.Email == "") {
-		return RegisterResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "username or email and password are required")
+	if in.Password == "" {
+		return RegisterResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "password is required")
 	}
 
-	if err := a.passwords.Validate(ctx, in.Password, UserInfo{Email: in.Email, Claims: map[string]any{"preferred_username": in.Username}}); err != nil {
+	if len(in.Contacts) > 8 {
+		return RegisterResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "too many contacts")
+	}
+
+	for channel, address := range in.Contacts {
+		if len(channel) == 0 || len(channel) > 32 || strings.Trim(channel, "abcdefghijklmnopqrstuvwxyz0123456789_-") != "" {
+			return RegisterResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "invalid contact channel")
+		}
+
+		if len(address) > 4096 {
+			return RegisterResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "contact address is too long")
+		}
+	}
+
+	// The user provider receives every address in its canonical form.
+	contacts := make(map[string]string, len(in.Contacts))
+	identified := in.Username != ""
+
+	for channel, address := range in.Contacts {
+		if address = a.NormalizeAddress(channel, address); address != "" {
+			contacts[channel] = address
+			identified = true
+		}
+	}
+
+	in.Contacts = contacts
+
+	if !identified {
+		return RegisterResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "username or contact address is required")
+	}
+
+	// The first verified channel the registration gives an address for answers uniformly.
+	var contact *contactStep
+
+	for _, c := range a.contacts {
+		if in.Contacts[c.channel] != "" {
+			contact = c
+
+			break
+		}
+	}
+
+	given := UserInfo{Contacts: make(map[string][]Contact, len(in.Contacts)), Claims: map[string]any{"preferred_username": in.Username}}
+	for channel, address := range in.Contacts {
+		given.Contacts[channel] = []Contact{{Address: address}}
+	}
+
+	if err := a.passwords.Validate(ctx, in.Password, given); err != nil {
 		return RegisterResult{}, NewOAuthErrorFrom(err)
 	}
 
@@ -94,7 +151,55 @@ func (a *Auth) Register(ctx context.Context, in RegisterRequest) (RegisterResult
 		}
 	}
 
-	info, err := reg.Register(ctx, RegistrationRequest{Username: in.Username, Email: in.Email, Password: in.Password, Extra: in.Extra})
+	info, err := reg.Register(ctx, RegistrationRequest{Username: in.Username, Password: in.Password, Contacts: in.Contacts, Extra: in.Extra})
+
+	// Only the owner of the verified address learns whether the account was new: a new account
+	// gets the verification secret, the owner of a taken verified address a password reset.
+	if contact != nil {
+		// A decoy stands in wherever no verification is opened, so the answer is alike.
+		request, jerr := newJTI()
+		if jerr != nil {
+			return RegisterResult{}, NewOAuthErrorFrom(jerr)
+		}
+
+		switch {
+		case errors.Is(err, ErrUsernameTaken):
+			return RegisterResult{}, NewOAuthErrorFrom(err)
+		case errors.Is(err, ErrUserAlreadyExists):
+			channel := contact.channel
+
+			if taken, ok := errors.AsType[*ContactTakenError](err); ok {
+				channel = taken.Channel
+			}
+
+			// A conflict on a channel without verification is already answered openly there.
+			if a.contactStep(channel) == nil || in.Contacts[channel] == "" {
+				return RegisterResult{}, NewOAuthErrorFrom(err)
+			}
+
+			a.notifyExistingAccount(ctx, cl, channel, in.Contacts[channel], in.IP)
+		case err != nil:
+			return RegisterResult{}, NewOAuthErrorFrom(err)
+		default:
+			a.emit(ctx, event.Event{Type: event.TypeUserRegistered, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"username": in.Username}})
+
+			preferred, _ := info.PreferredContact(contact.channel)
+
+			address := preferred.Address
+			if address == "" {
+				address = in.Contacts[contact.channel]
+			}
+
+			if req, err := contact.open(ctx, info, address, cl.ID); err != nil {
+				a.Log(ctx).Error("failed to open contact verification", zap.String("user.id", info.ID), zap.String("channel", contact.channel), zap.Error(err))
+			} else {
+				request = req.ID
+			}
+		}
+
+		return RegisterResult{Accepted: true, Request: request, Interaction: reset.MethodInteraction(contact.method)}, nil
+	}
+
 	if err != nil {
 		return RegisterResult{}, NewOAuthErrorFrom(err)
 	}
@@ -118,6 +223,82 @@ func (a *Auth) Register(ctx context.Context, in RegisterRequest) (RegisterResult
 	}
 
 	return RegisterResult{UserID: info.ID, Login: &login}, nil
+}
+
+// notifyExistingAccount opens a password reset for the account already registered under address
+// through the first of the client's reset methods that can deliver to it.
+func (a *Auth) notifyExistingAccount(ctx context.Context, cl *client.Client, channel, address, ip string) {
+	if _, ok := a.users.(PasswordResetter); !ok || !cl.GrantTypeAllowed(client.GrantTypePassword) || !cl.AuthMethodAllowed(client.AuthMethodPassword) {
+		return
+	}
+
+	available, err := a.resetMethodsFor(ctx, cl)
+	if err != nil || len(available) == 0 {
+		return
+	}
+
+	verifier, _ := a.users.(ContactVerifier)
+
+	info, err := verifier.FindContact(ctx, channel, address)
+	if err != nil {
+		if !errors.Is(err, ErrUserNotFound) {
+			a.Log(ctx).Error("failed to find registered account", zap.Error(err))
+		}
+
+		return
+	}
+
+	id, err := newJTI()
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	req := &reset.Request{
+		ID:           id,
+		UserID:       info.ID,
+		Identifier:   address,
+		ClientID:     cl.ID,
+		Registration: true,
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(a.config.PasswordResetTTL),
+	}
+
+	for _, method := range available {
+		m, err := a.resetMethods.Get(ctx, method)
+		if err != nil {
+			a.Log(ctx).Error("failed to load password reset method", zap.String("method", method), zap.Error(err))
+
+			continue
+		}
+
+		if a.openResetChallenge(ctx, req, m, method, info); req.ChallengeID != "" {
+			break
+		}
+	}
+
+	if req.ChallengeID == "" {
+		return
+	}
+
+	if err := a.resets.Save(ctx, req); err != nil {
+		a.Log(ctx).Error("failed to save password reset request", zap.String("user.id", info.ID), zap.Error(err))
+
+		return
+	}
+
+	a.emit(ctx, event.Event{
+		Type:     event.TypePasswordResetRequested,
+		UserID:   info.ID,
+		ClientID: cl.ID,
+		IP:       ip,
+		Detail: map[string]any{
+			"identifier":   address,
+			"method":       req.Method,
+			"delivered":    true,
+			"registration": true,
+		},
+	})
 }
 
 // ChangePassword sets a new password for the session behind the Token.
@@ -167,7 +348,13 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
-	keys := throttleKeys("pwdchange:"+sc.sess.UserID, in.IP)
+	// Checked before the current password is guessed
+	if err := a.checkStepUp(ctx, sc.sess, ActionChangePassword); err != nil {
+		return LoginResult{}, err
+	}
+
+	identity := "pwdchange:" + sc.sess.UserID
+	keys := throttleKeys(identity, in.IP)
 
 	if err := a.checkThrottle(ctx, keys, sc.client.ID, in.IP); err != nil {
 		return LoginResult{}, err
@@ -175,20 +362,19 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 
 	if err := changer.ChangePassword(ctx, sc.sess.UserID, in.CurrentPassword, in.NewPassword); err != nil {
 		mapped := NewOAuthErrorFrom(err)
-
-		var oe *OAuthError
+		oe, isOAuth := errors.AsType[*OAuthError](mapped)
 
 		switch {
 		case errors.Is(err, ErrInvalidCredentials):
 			a.failThrottle(ctx, keys)
-		case errors.As(mapped, &oe) && oe.StatusCode() >= http.StatusInternalServerError:
+		case isOAuth && oe.StatusCode() >= http.StatusInternalServerError:
 			a.refundThrottle(ctx, keys)
 		}
 
 		return LoginResult{}, mapped
 	}
 
-	a.passThrottle(ctx, keys)
+	a.passThrottle(ctx, keys, identity)
 	a.emit(ctx, event.Event{Type: event.TypePasswordChanged, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP})
 
 	// Any other session may be the reason the password is being changed.
@@ -261,7 +447,7 @@ func (a *Auth) UpdateProfile(ctx context.Context, tok string, data map[string]an
 		return NewOAuthError(http.StatusNotFound, ErrCodeInvalidRequest, "profile management is not enabled")
 	}
 
-	info, _, err := a.IntrospectFirstParty(ctx, tok)
+	info, err := a.RequireStepUp(ctx, tok, ActionUpdateProfile)
 	if err != nil {
 		return err
 	}

@@ -154,7 +154,13 @@ func primaryMethod(sess *session.Session) string {
 
 // levelSatisfied reports whether session already meets required level.
 func levelSatisfied(lvl *contract.ACRLevelConfig, sess *session.Session) bool {
-	if len(lvl.AuthMethods) > 0 && !slices.Contains(lvl.AuthMethods, primaryMethod(sess)) {
+	return levelMet(lvl, primaryMethod(sess), sess.AMR, sess.MFAMethod)
+}
+
+// levelMet reports whether an authentication with primary (empty when it proved none), amr and
+// mfaMethod meets level.
+func levelMet(lvl *contract.ACRLevelConfig, primary string, amr []string, mfaMethod string) bool {
+	if len(lvl.AuthMethods) > 0 && !slices.Contains(lvl.AuthMethods, primary) {
 		return false
 	}
 
@@ -162,24 +168,31 @@ func levelSatisfied(lvl *contract.ACRLevelConfig, sess *session.Session) bool {
 		return true
 	}
 
-	if sess.MFAMethod != "" && (len(lvl.MFAMethods) == 0 || slices.Contains(lvl.MFAMethods, sess.MFAMethod)) {
+	if mfaMethod != "" && (len(lvl.MFAMethods) == 0 || slices.Contains(lvl.MFAMethods, mfaMethod)) {
 		return true
 	}
 
-	return intersects(sess.AMR, lvl.MFASatisfiedByAMR)
+	return intersects(amr, lvl.MFASatisfiedByAMR)
 }
 
-// satisfiedACR returns the highest configured level session meets.
-func (a *Auth) satisfiedACR(sess *session.Session) string {
+// highestLevel returns the highest configured level an authentication with primary, amr and
+// mfaMethod meets, or nil.
+func (a *Auth) highestLevel(primary string, amr []string, mfaMethod string) *contract.ACRLevelConfig {
 	var best *contract.ACRLevelConfig
 
 	for i := range a.config.ACRLevels {
 		lvl := &a.config.ACRLevels[i]
-		if levelSatisfied(lvl, sess) && (best == nil || lvl.Level > best.Level) {
+		if levelMet(lvl, primary, amr, mfaMethod) && (best == nil || lvl.Level > best.Level) {
 			best = lvl
 		}
 	}
 
+	return best
+}
+
+// satisfiedACR returns the highest configured level session meets.
+func (a *Auth) satisfiedACR(sess *session.Session) string {
+	best := a.highestLevel(primaryMethod(sess), sess.AMR, sess.MFAMethod)
 	if best == nil {
 		return ""
 	}

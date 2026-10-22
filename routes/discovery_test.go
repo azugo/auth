@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -101,7 +102,7 @@ func TestDiscoveryWithKeyProviderIncludesJWKSAndAlgorithms(t *testing.T) {
 
 	doc := decodeJSON[discoveryDoc](t, resp)
 	qt.Check(t, qt.Equals(doc.JWKSURI, "https://issuer.example/.well-known/jwks.json"))
-	qt.Check(t, qt.DeepEquals(doc.ScopesSupported, []string{"openid", "profile", "email"}))
+	qt.Check(t, qt.DeepEquals(doc.ScopesSupported, []string{"openid", "profile", "email", "phone"}))
 	qt.Check(t, qt.DeepEquals(doc.IDTokenSigningAlgValuesSupported, []string{"RS256"}))
 	qt.Check(t, qt.DeepEquals(doc.GrantTypesSupported, []string{"authorization_code", "client_credentials", client.GrantTypePassword}))
 }
@@ -266,4 +267,34 @@ func TestDiscoveryMountedIndividuallyStaysCorrectWithPinnedIssuer(t *testing.T) 
 	qt.Check(t, qt.Equals(doc.Issuer, "https://issuer.example"))
 	qt.Check(t, qt.Equals(doc.TokenEndpoint, "https://issuer.example/token"))
 	qt.Check(t, qt.Equals(doc.UserinfoEndpoint, "https://issuer.example/userinfo"))
+}
+
+// passwordlessUsers only loads users; the app has no local passwords.
+type passwordlessUsers struct{}
+
+func (passwordlessUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) {
+	return auth.UserInfo{ID: id}, nil
+}
+
+func TestDiscoveryOmitsPasswordGrantWithoutPasswords(t *testing.T) {
+	app := core.New()
+
+	conf := config.New()
+	qt.Assert(t, qt.IsNil(conf.Load(nil, conf, string(app.Env()))))
+	app.SetConfig(nil, conf)
+	t.Cleanup(app.Stop)
+
+	a, err := auth.New(app, &auth.Configuration{Secret: "0123456789abcdef0123456789abcdef", SameSite: "strict", Issuer: "https://issuer.example"},
+		passwordlessUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
+	qt.Assert(t, qt.IsNil(err))
+
+	testApp := newTestApp(t)
+	Bind(testApp, "/auth", a)
+
+	resp, err := testApp.TestClient().Get("/auth/.well-known/openid-configuration")
+	defer fasthttp.ReleaseResponse(resp)
+	qt.Assert(t, qt.IsNil(err))
+
+	doc := decodeJSON[discoveryDoc](t, resp)
+	qt.Check(t, qt.DeepEquals(doc.GrantTypesSupported, []string{"authorization_code"}))
 }

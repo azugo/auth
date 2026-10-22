@@ -28,8 +28,8 @@ func headers(e *OAuthError) map[string]string {
 func mustOAuth(t *testing.T, err error) *OAuthError {
 	t.Helper()
 
-	var oe *OAuthError
-	qt.Assert(t, qt.IsTrue(errors.As(err, &oe)))
+	oe, ok := errors.AsType[*OAuthError](err)
+	qt.Assert(t, qt.IsTrue(ok))
 
 	return oe
 }
@@ -115,6 +115,16 @@ func TestOAuthErrorWWWAuthenticateOn401(t *testing.T) {
 	qt.Assert(t, qt.IsTrue(present))
 	qt.Check(t, qt.Equals(got,
 		`Bearer realm="api", error="invalid_token", error_description="token expired", scope="read"`))
+}
+
+func TestOAuthErrorWWWAuthenticateWithoutRealm(t *testing.T) {
+	e := &OAuthError{Code: ErrCodeInsufficientUserAuthentication, Description: "re-authentication required", status: http.StatusUnauthorized, acrValues: "high", maxAge: 300}
+
+	// The auth-params follow the scheme after a space, never a comma.
+	qt.Check(t, qt.Equals(headers(e)[http.HeaderWWWAuthenticate],
+		`Bearer error="insufficient_user_authentication", error_description="re-authentication required", acr_values="high", max_age=300`))
+
+	qt.Check(t, qt.Equals(headers(&OAuthError{status: http.StatusUnauthorized})[http.HeaderWWWAuthenticate], "Bearer"))
 }
 
 func TestOAuthErrorNoWWWAuthenticateOffUnauthorized(t *testing.T) {

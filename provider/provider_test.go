@@ -210,17 +210,22 @@ func TestConfigRegistryPrewarm(t *testing.T) {
 
 func TestMapStandardClaims(t *testing.T) {
 	info, err := MapStandardClaims(context.Background(), "corp", map[string]any{
-		"sub": "s1", "name": "Alice", "email": "alice@example.com",
-		"scp":    "openid profile",
-		"groups": []any{"admins", "users"},
-		"dept":   "R&D",
-		"iss":    "https://idp.example", "exp": 123, "nonce": "n",
+		"sub": "s1", "name": "Alice", "email": "alice@example.com", "email_verified": true,
+		"phone_number": "+37120000000",
+		"scp":          "openid profile",
+		"groups":       []any{"admins", "users"},
+		"dept":         "R&D",
+		"iss":          "https://idp.example", "exp": 123, "nonce": "n",
 	})
 	qt.Assert(t, qt.IsNil(err))
 
 	qt.Check(t, qt.Equals(info.ID, "s1"))
 	qt.Check(t, qt.Equals(info.Name, "Alice"))
-	qt.Check(t, qt.Equals(info.Email, "alice@example.com"))
+	qt.Check(t, qt.DeepEquals(info.Contacts, map[string][]contract.Contact{
+		contract.ChannelEmail: {{Address: "alice@example.com", Verified: true, Primary: true}},
+		contract.ChannelPhone: {{Address: "+37120000000", Primary: true}},
+	}))
+	qt.Check(t, qt.Equals(info.Claims["email_verified"], any(true)))
 	qt.Check(t, qt.Equals(info.Claims["dept"], "R&D"))
 
 	// IdP scope-like claims never become local scope; they stay available as claims.
@@ -285,4 +290,16 @@ func TestMemoryIdentityStore(t *testing.T) {
 
 	_, err = s.Lookup(ctx, "corp", "s1")
 	qt.Check(t, qt.IsTrue(errors.Is(err, ErrLinkNotFound)))
+}
+
+func TestMapStandardClaimsAcceptsStringVerifiedFlags(t *testing.T) {
+	info, err := MapStandardClaims(context.Background(), "cognito", map[string]any{
+		"sub": "s1", "email": "alice@example.com", "email_verified": "true",
+		"phone_number": "+37120000000", "phone_number_verified": "false",
+	})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(info.Contacts[contract.ChannelEmail][0].Verified))
+	qt.Check(t, qt.IsFalse(info.Contacts[contract.ChannelPhone][0].Verified))
+	qt.Check(t, qt.Equals(info.Claims["email_verified"], any(true)))
+	qt.Check(t, qt.Equals(info.Claims["phone_number_verified"], any(false)))
 }
