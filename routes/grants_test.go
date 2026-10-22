@@ -100,6 +100,22 @@ func TestAuthorizeEndpointWithoutSessionIsLoginRequired(t *testing.T) {
 	qt.Check(t, qt.Equals(resp.StatusCode(), 401))
 }
 
+func TestAuthorizeEndpointReadsMaxAge(t *testing.T) {
+	portal, web := grantsTestClients()
+	a := newTestAuth(t, session.NewMemoryStore(), portal, web)
+
+	app := newTestApp(t)
+	Bind(app, "/auth", a)
+
+	tc := app.TestClient()
+	resp, err := tc.Get("/auth/authorize?response_type=code&client_id=web" +
+		"&redirect_uri=" + url.QueryEscape("https://web.example/callback") +
+		"&code_challenge=" + pkceChallenge + "&code_challenge_method=S256&max_age=soon")
+	defer fasthttp.ReleaseResponse(resp)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.StringContains(string(resp.Header.Peek("Location")), "error=invalid_request"))
+}
+
 func TestRevokeEndpointReturnsOKForUnknownToken(t *testing.T) {
 	portal, _ := grantsTestClients()
 	a := newTestAuth(t, session.NewMemoryStore(), portal)

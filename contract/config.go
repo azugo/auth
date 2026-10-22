@@ -55,7 +55,8 @@ type Configuration struct {
 	// ContactVerificationTTL is the lifetime of a contact verification request. Default 24h.
 	ContactVerificationTTL time.Duration `mapstructure:"contact_verification_ttl"`
 	// ClockSkew is the leeway allowed on external id_token time claims, inherited by every
-	// provider that does not set its own. Default 1m; keep it under 2m.
+	// provider that does not set its own, and on the max_age of an authorization request.
+	// Default 1m; keep it under 2m.
 	ClockSkew time.Duration `mapstructure:"clock_skew"`
 	// BaseURL pins the public base URL used to resolve the issuer and the default cookie
 	// path instead of deriving them from the incoming request (proxies, split origin).

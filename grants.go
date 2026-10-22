@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,8 @@ type AuthorizeRequest struct {
 	Claims              string
 	CodeChallenge       string
 	CodeChallengeMethod string
+	// MaxAge is the raw max_age parameter: the most seconds since the user last authenticated.
+	MaxAge string
 	// SessionToken is the presented session cookie establishing the user's identity.
 	SessionToken string
 }
@@ -78,8 +81,21 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 		return authorizeErrorRedirect(in, ErrCodeInvalidRequest, "code_challenge must be 43-128 unreserved characters"), nil
 	}
 
+	var maxAge int64
+
+	if in.MaxAge != "" {
+		if maxAge, err = strconv.ParseInt(in.MaxAge, 10, 32); err != nil || maxAge < 0 {
+			return authorizeErrorRedirect(in, ErrCodeInvalidRequest, "max_age must be a non-negative integer"), nil
+		}
+	}
+
 	info, sess, claims, err := a.introspect(ctx, in.SessionToken)
 	if err != nil || claims.Type != token.TypeSessionCookie {
+		return AuthorizeResult{}, NewOAuthErrorFrom(ErrLoginRequired)
+	}
+
+	// An authentication older than max_age needs a fresh login, with ClockSkew covering the login itself.
+	if in.MaxAge != "" && time.Since(sess.AuthenticatedAt()) > time.Duration(maxAge)*time.Second+a.config.ClockSkew {
 		return AuthorizeResult{}, NewOAuthErrorFrom(ErrLoginRequired)
 	}
 

@@ -127,8 +127,8 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
   policy, which also refuses a password containing the account's username, email or name.
   Defaults `8` / `128`. Replace the policy with the `auth.PasswordPolicy(...)` option.
 * `AUTH_CLOCK_SKEW` - Leeway allowed on external `id_token` time claims, inherited by every
-  provider that does not set `clock_skew` itself. Default `1m`; keep it under `2m`, and use `0`
-  to validate strictly.
+  provider that does not set `clock_skew` itself, and on the `max_age` of an authorization
+  request. Default `1m`; keep it under `2m`, and use `0` to validate strictly.
 * `AUTH_BASE_URL` - Public base URL used to resolve the issuer and default cookie path. Optional;
   derived from the request otherwise (needed behind a proxy or on a split origin).
 * `AUTH_ISSUER` - OIDC issuer identifier. Optional; derived from the request base URL when unset.

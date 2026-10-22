@@ -3,6 +3,7 @@ package routes
 import (
 	"example/portal/views"
 
+	"azugo.io/auth"
 	"azugo.io/auth/session"
 
 	"azugo.io/azugo"
@@ -47,7 +48,14 @@ func (r *router) sessionsPage(ctx *azugo.Context) {
 
 // revokeSession revokes one of the caller's own sessions and redirects back to the list.
 func (r *router) revokeSession(ctx *azugo.Context) {
-	if err := r.Auth().RevokeSession(ctx, ctx.User().ID(), ctx.Params.String("id")); err != nil {
+	info, err := r.Auth().RequireStepUp(ctx, r.Auth().ReadSessionToken(ctx), auth.ActionRevokeSession)
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
+	if err := r.Auth().RevokeSession(ctx, info.ID, ctx.Params.String("id")); err != nil {
 		ctx.Error(err)
 
 		return

@@ -52,6 +52,10 @@ func (h *Handler) authorizeCode(ctx *azugo.Context) {
 		req.CodeChallengeMethod = *v
 	}
 
+	if v := ctx.Query.StringOptional("max_age"); v != nil {
+		req.MaxAge = *v
+	}
+
 	res, err := h.auth.Authorize(ctx, req)
 	if err != nil {
 		ctx.Error(err)

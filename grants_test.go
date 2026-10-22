@@ -365,6 +365,48 @@ func TestAuthorizeRequiresLogin(t *testing.T) {
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeLoginRequired))
 }
 
+func TestAuthorizeHonorsMaxAge(t *testing.T) {
+	cfg := validConfig()
+	cfg.ClockSkew = time.Minute
+
+	a := newGrantsTestAuth(t, cfg, nil, portalClient(), codeClient())
+	cookie := login(t, a)
+
+	authorize := func(maxAge string) (AuthorizeResult, error) {
+		return a.Authorize(context.Background(), AuthorizeRequest{
+			ResponseType: "code", ClientID: "web", RedirectURI: "https://web.example/callback",
+			Scope: "openid", CodeChallenge: pkceChallenge, CodeChallengeMethod: "S256", MaxAge: maxAge, SessionToken: cookie,
+		})
+	}
+
+	// A fresh login meets even max_age=0 within the clock skew.
+	res, err := authorize("0")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.StringContains(res.Redirect, "code="))
+
+	res, err = authorize("-1")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.StringContains(res.Redirect, "error=invalid_request"))
+
+	_, sess, err := a.IntrospectToken(context.Background(), cookie)
+	qt.Assert(t, qt.IsNil(err))
+
+	sess.AuthTime = time.Now().Add(-time.Hour)
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(context.Background(), sess)))
+
+	// An older authentication needs a new login.
+	_, err = authorize("600")
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeLoginRequired))
+
+	res, err = authorize("7200")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.StringContains(res.Redirect, "code="))
+
+	res, err = authorize("")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.StringContains(res.Redirect, "code="))
+}
+
 func TestAuthorizeRejectsScopeBeyondSession(t *testing.T) {
 	a := newGrantsTestAuth(t, nil, nil, portalClient(), codeClient())
 	cookie := login(t, a)
