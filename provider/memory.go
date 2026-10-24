@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,8 +74,14 @@ func (m *memoryIdentityStore) Link(_ context.Context, l *IdentityLink) error {
 		l.LinkedAt = time.Now()
 	}
 
+	// The link's strings may alias a request buffer.
 	cp := *l
-	m.links[l.ID] = &cp
+	cp.ID = strings.Clone(l.ID)
+	cp.UserID = strings.Clone(l.UserID)
+	cp.Provider = strings.Clone(l.Provider)
+	cp.Subject = strings.Clone(l.Subject)
+	cp.Email = strings.Clone(l.Email)
+	m.links[cp.ID] = &cp
 
 	return nil
 }

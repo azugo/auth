@@ -54,10 +54,13 @@ type PasswordChangeRequest struct {
 	// KeepOtherSessions leaves the account's other sessions valid after a self-service change;
 	// by default they are revoked.
 	KeepOtherSessions bool
-	ReturnTo          string
-	BaseURL           string
-	MountPath         string
-	IP                string
+	// RevokeAPIKeys revokes the account's API keys after a password change; by default they stay
+	// valid.
+	RevokeAPIKeys bool
+	ReturnTo      string
+	BaseURL       string
+	MountPath     string
+	IP            string
 }
 
 // Register creates a new account through the Registerer under the client's
@@ -331,11 +334,34 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 			return LoginResult{}, NewOAuthErrorFrom(err)
 		}
 
-		if err := changer.SetPassword(ctx, sc.sess.UserID, in.NewPassword); err != nil {
+		var revoked []string
+
+		// The new password and the revocations it asks for are stored together.
+		if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
+			revoked = nil
+
+			if err := changer.SetPassword(ctx, sc.sess.UserID, in.NewPassword); err != nil {
+				return err
+			}
+
+			if !in.RevokeAPIKeys || a.apiKeys == nil {
+				return nil
+			}
+
+			var err error
+
+			revoked, err = a.apiKeys.RevokeAll(ctx, sc.sess.UserID)
+
+			return err
+		}); err != nil {
 			return LoginResult{}, NewOAuthErrorFrom(err)
 		}
 
 		a.emit(ctx, event.Event{Type: event.TypePasswordChanged, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: map[string]any{"forced": true}})
+
+		for _, id := range revoked {
+			a.emit(ctx, event.Event{Type: event.TypeAPIKeyRevoked, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: map[string]any{"key_id": id}})
+		}
 
 		return a.advanceSession(ctx, sc, in.ReturnTo, in.BaseURL, in.MountPath)
 	}
@@ -360,7 +386,37 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 		return LoginResult{}, err
 	}
 
-	if err := changer.ChangePassword(ctx, sc.sess.UserID, in.CurrentPassword, in.NewPassword); err != nil {
+	var (
+		sessions []string
+		revoked  []string
+	)
+
+	// The new password and the revocations it asks for are stored together.
+	err = a.Transaction.Run(ctx, func(ctx context.Context) error {
+		sessions = nil
+		revoked = nil
+
+		err := changer.ChangePassword(ctx, sc.sess.UserID, in.CurrentPassword, in.NewPassword)
+		if err != nil {
+			return err
+		}
+
+		// Any other session may be the reason the password is being changed.
+		if !in.KeepOtherSessions {
+			if sessions, err = a.revokeOtherSessions(ctx, sc.sess.UserID, sc.sess.ID); err != nil {
+				return err
+			}
+		}
+
+		if !in.RevokeAPIKeys || a.apiKeys == nil {
+			return nil
+		}
+
+		revoked, err = a.apiKeys.RevokeAll(ctx, sc.sess.UserID)
+
+		return err
+	})
+	if err != nil {
 		mapped := NewOAuthErrorFrom(err)
 		oe, isOAuth := errors.AsType[*OAuthError](mapped)
 
@@ -375,13 +431,15 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 	}
 
 	a.passThrottle(ctx, keys, identity)
+
+	for _, id := range sessions {
+		_ = deleteSynced(ctx, a.fedIDTokens, id)
+	}
+
 	a.emit(ctx, event.Event{Type: event.TypePasswordChanged, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP})
 
-	// Any other session may be the reason the password is being changed.
-	if !in.KeepOtherSessions {
-		if err := a.revokeOtherSessions(ctx, sc.sess.UserID, sc.sess.ID); err != nil {
-			return LoginResult{}, err
-		}
+	for _, id := range revoked {
+		a.emit(ctx, event.Event{Type: event.TypeAPIKeyRevoked, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: map[string]any{"key_id": id}})
 	}
 
 	res := LoginResult{Status: sc.sess.Status, ACR: sc.sess.ACR, AMR: sc.sess.AMR}
@@ -393,17 +451,19 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 	return res, nil
 }
 
-// revokeOtherSessions revokes every valid session of userID but current.
-func (a *Auth) revokeOtherSessions(ctx context.Context, userID, sessionID string) error {
+// revokeOtherSessions revokes every valid session of userID but current and returns their IDs.
+func (a *Auth) revokeOtherSessions(ctx context.Context, userID, sessionID string) ([]string, error) {
 	lister, ok := a.sessions.(session.Lister)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	sessions, _, err := lister.List(ctx, userID, nil, nil)
 	if err != nil {
-		return NewOAuthErrorFrom(err)
+		return nil, NewOAuthErrorFrom(err)
 	}
+
+	revoked := make([]string, 0, len(sessions))
 
 	for _, s := range sessions {
 		if s.ID == sessionID || !s.Valid() {
@@ -411,13 +471,13 @@ func (a *Auth) revokeOtherSessions(ctx context.Context, userID, sessionID string
 		}
 
 		if err := a.sessions.Revoke(ctx, s.ID); err != nil && !errors.Is(err, session.ErrNotFound) {
-			return NewOAuthErrorFrom(err)
+			return nil, NewOAuthErrorFrom(err)
 		}
 
-		_ = deleteSynced(ctx, a.fedIDTokens, s.ID)
+		revoked = append(revoked, s.ID)
 	}
 
-	return nil
+	return revoked, nil
 }
 
 // Profile returns the caller's profile data from the ProfileManager.

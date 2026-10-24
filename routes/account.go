@@ -23,6 +23,7 @@ type accountInput struct {
 	CurrentPassword   string            `json:"current_password"`
 	NewPassword       string            `json:"new_password"`
 	KeepOtherSessions bool              `json:"keep_other_sessions"`
+	RevokeAPIKeys     bool              `json:"revoke_api_keys"`
 	Identifier        string            `json:"identifier"`
 	Method            string            `json:"method"`
 	ResetToken        string            `json:"reset_token"`
@@ -92,9 +93,19 @@ func (h *Handler) readAccountInput(ctx *azugo.Context) (accountInput, auth.Clien
 		in.NewPassword = *v
 	}
 
-	if v := ctx.Form.StringOptional("keep_other_sessions"); v != nil {
-		in.KeepOtherSessions = *v != ""
+	keep, err := ctx.Form.BoolOptional("keep_other_sessions")
+	if err != nil {
+		return in, auth.ClientCredentials{}, err
 	}
+
+	in.KeepOtherSessions = keep != nil && *keep
+
+	revoke, err := ctx.Form.BoolOptional("revoke_api_keys")
+	if err != nil {
+		return in, auth.ClientCredentials{}, err
+	}
+
+	in.RevokeAPIKeys = revoke != nil && *revoke
 
 	if v := ctx.Form.StringOptional("identifier"); v != nil {
 		in.Identifier = *v
@@ -220,6 +231,7 @@ func (h *Handler) changePassword(ctx *azugo.Context) {
 		CurrentPassword:   in.CurrentPassword,
 		NewPassword:       in.NewPassword,
 		KeepOtherSessions: in.KeepOtherSessions,
+		RevokeAPIKeys:     in.RevokeAPIKeys,
 		ReturnTo:          in.ReturnTo,
 		BaseURL:           ctx.BaseURL(),
 		MountPath:         h.mountPrefix,

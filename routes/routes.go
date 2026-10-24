@@ -50,7 +50,7 @@ type SessionRoutes struct {
 	// Switch is set only when a login step implements auth.Switcher.
 	Switch azugo.RequestHandler // POST /session/switch
 	// Reauth and ReauthVerify are set when any action may require step-up: a step-up policy, an MFA
-	// store or contact management is configured.
+	// store, contact management or an API key store is configured.
 	Reauth       azugo.RequestHandler // POST /session/reauth
 	ReauthVerify azugo.RequestHandler // POST /session/reauth/verify
 }
@@ -89,6 +89,15 @@ type MFARoutes struct {
 	EnrollmentRevoke azugo.RequestHandler // DELETE /mfa/enroll/{method}/{id}
 }
 
+// APIKeyRoutes holds the API key adapters, set only when an API key store is configured and
+// mounted under APIKeysGroup.
+type APIKeyRoutes struct {
+	List   azugo.RequestHandler // GET /apikeys
+	Create azugo.RequestHandler // POST /apikeys
+	Revoke azugo.RequestHandler // DELETE /apikeys/{id}
+	Rotate azugo.RequestHandler // POST /apikeys/{id}/rotate
+}
+
 // Handler exposes the HTTP adapters over a constructed *auth.Auth as grouped fields.
 type Handler struct {
 	OIDC     OIDCRoutes
@@ -96,6 +105,7 @@ type Handler struct {
 	Session  SessionRoutes
 	Account  AccountRoutes
 	MFA      MFARoutes
+	APIKeys  APIKeyRoutes
 
 	auth *auth.Auth
 	// mountPrefix is the prefix Bind mounted this Handler under.
@@ -131,6 +141,8 @@ const (
 	LinkingGroup
 	// MFAGroup mounts the /mfa/* routes.
 	MFAGroup
+	// APIKeysGroup mounts the /apikeys routes.
+	APIKeysGroup
 )
 
 func (g Group) apply(o *bindOptions) {
@@ -260,6 +272,10 @@ func supportedGroups(a *auth.Auth) []Group {
 		groups = append(groups, MFAGroup)
 	}
 
+	if a.APIKeys() != nil {
+		groups = append(groups, APIKeysGroup)
+	}
+
 	return groups
 }
 
@@ -327,6 +343,13 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 		h.MFA.EnrollFinish = sameOriginCookie(h.mfaEnrollFinish)
 		h.MFA.EnrollRevoke = h.mfaEnrollRevoke
 		h.MFA.EnrollmentRevoke = h.mfaEnrollmentRevoke
+	}
+
+	if a.APIKeys() != nil {
+		h.APIKeys.List = h.listAPIKeys
+		h.APIKeys.Create = sameOriginCookie(h.createAPIKey)
+		h.APIKeys.Revoke = h.revokeAPIKey
+		h.APIKeys.Rotate = sameOriginCookie(h.rotateAPIKey)
 	}
 
 	h.Session.Get = h.getSession
@@ -513,6 +536,15 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 			g.Delete("/mfa/enroll/{method}", h.MFA.EnrollRevoke)
 			g.Delete("/mfa/enroll/{method}/{id}", h.MFA.EnrollmentRevoke)
 			g.Post("/mfa/callback/{method}", h.MFA.Callback)
+		case APIKeysGroup:
+			if h.APIKeys.List == nil {
+				continue
+			}
+
+			g.Get("/apikeys", h.APIKeys.List)
+			g.Post("/apikeys", h.APIKeys.Create)
+			g.Delete("/apikeys/{id}", h.APIKeys.Revoke)
+			g.Post("/apikeys/{id}/rotate", h.APIKeys.Rotate)
 		}
 	}
 

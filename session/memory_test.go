@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 	"time"
+	"unsafe"
 
 	"azugo.io/core/paginator"
 	"github.com/go-quicktest/qt"
@@ -199,4 +200,23 @@ func TestAuthenticatedAtFallsBackToCreatedAt(t *testing.T) {
 
 	s.AuthTime = created.Add(30 * time.Minute)
 	qt.Check(t, qt.IsTrue(s.AuthenticatedAt().Equal(s.AuthTime)))
+}
+
+func TestMemoryStoreOwnsItsStrings(t *testing.T) {
+	m := NewMemoryStore()
+	buf := []byte("tenant-step")
+	alias := unsafe.String(&buf[0], len(buf))
+
+	s := &Session{ID: alias, UserID: "u1", Status: StatusPendingStep, Step: alias, Context: map[string]any{"tenant": alias}, AMR: []string{alias}, ExpiresAt: time.Now().Add(time.Hour)}
+	qt.Assert(t, qt.IsNil(m.Create(context.Background(), s)))
+
+	// The request buffer is reused after the call.
+	copy(buf, "XXXXXXXXXXX")
+
+	got, err := m.Get(context.Background(), "tenant-step")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(got.ID, "tenant-step"))
+	qt.Check(t, qt.Equals(got.Step, "tenant-step"))
+	qt.Check(t, qt.Equals(got.Context["tenant"], any("tenant-step")))
+	qt.Check(t, qt.DeepEquals(got.AMR, []string{"tenant-step"}))
 }

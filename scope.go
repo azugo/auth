@@ -37,19 +37,31 @@ func scopeContains(scope, value string) bool {
 	return false
 }
 
-// grantedScope intersects the requested scope with the available scope.
+// grantedScope intersects the requested scope with the available scope, normalized and deduplicated.
 func grantedScope(requested, available string) (string, bool) {
 	if requested == "" {
 		return available, true
 	}
 
+	var b strings.Builder
+
 	for v := range strings.FieldsSeq(requested) {
 		if !scopeContains(available, v) {
 			return "", false
 		}
+
+		if scopeContains(b.String(), v) {
+			continue
+		}
+
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+
+		b.WriteString(v)
 	}
 
-	return requested, true
+	return b.String(), true
 }
 
 // clientScope narrows scope to the client's registered Scopes; a client without any keeps scope.

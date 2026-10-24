@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 	"time"
+	"unsafe"
 
 	"azugo.io/auth/contract"
 
@@ -137,4 +138,19 @@ func TestMemoryStore(t *testing.T) {
 func TestMethodHelpers(t *testing.T) {
 	qt.Check(t, qt.DeepEquals(MethodAMR(fakeMethod{}), []string{"mfa"}))
 	qt.Check(t, qt.Equals(MethodInteraction(fakeMethod{}), InteractionCode))
+}
+
+func TestMemoryStoreOwnsItsStrings(t *testing.T) {
+	s := NewMemoryStore()
+	buf := []byte("Phone")
+	alias := unsafe.String(&buf[0], len(buf))
+
+	qt.Assert(t, qt.IsNil(s.Enroll(context.Background(), &Enrollment{ID: "e1", UserID: "u1", Method: "totp", Label: alias})))
+
+	copy(buf, "XXXXX")
+
+	enrolled, err := s.List(context.Background(), "u1")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.HasLen(enrolled, 1))
+	qt.Check(t, qt.Equals(enrolled[0].Label, "Phone"))
 }

@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	aidanwoods.dev/go-paseto v1.6.0
-	azugo.io/azugo v0.40.1
+	azugo.io/azugo v0.40.2
 	azugo.io/core v0.40.1
 	github.com/go-quicktest/qt v1.102.0
 	github.com/goccy/go-json v0.11.2

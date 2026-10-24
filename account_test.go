@@ -12,6 +12,7 @@ import (
 
 	"azugo.io/auth/client"
 	"azugo.io/auth/contract"
+	"azugo.io/auth/event"
 	"azugo.io/auth/mfa"
 	"azugo.io/auth/reset"
 	"azugo.io/auth/session"
@@ -1119,4 +1120,49 @@ func TestProfileRoundTrip(t *testing.T) {
 
 	_, err = a.Profile(context.Background(), res.StepToken)
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
+}
+
+// failingRevokes lists sessions but fails revoking them.
+type failingRevokes struct {
+	session.Store
+	session.Lister
+}
+
+func (failingRevokes) Revoke(context.Context, string) error {
+	return errors.New("store unavailable")
+}
+
+func TestPasswordResetStoresInOneTransaction(t *testing.T) {
+	var (
+		resets int
+		txs    int
+	)
+
+	mem := session.NewMemoryStore()
+	store := &failingRevokes{Store: mem, Lister: mem.(session.Lister)}
+
+	a, users := newAccountTestAuthWithStore(t, validConfig(), store, mfaClient(client.MFAPolicyDisabled),
+		Transactor(TransactorFunc(func(ctx context.Context, fn func(ctx context.Context) error) error {
+			txs++
+
+			return fn(ctx)
+		})),
+		Events(event.SinkFunc(func(_ context.Context, e event.Event) {
+			if e.Type == event.TypePasswordReset {
+				resets++
+			}
+		})))
+
+	// A session the reset has to revoke.
+	loginAs(t, a, alice(""))
+
+	opened := requestReset(t, a, "alice@example.com", "")
+	txs = 0
+
+	_, err := confirmReset(a, opened.Token, map[string]any{"token": users.awaitDelivery(t)}, "brandnew1")
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeServerError))
+	qt.Check(t, qt.Equals(txs, 1))
+
+	// Nothing is announced for a reset the transactor rolled back.
+	qt.Check(t, qt.Equals(resets, 0))
 }

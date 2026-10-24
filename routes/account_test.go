@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func (s *accountStubUsers) ChangePassword(_ context.Context, _, currentPassword,
 		return auth.ErrInvalidCredentials
 	}
 
-	s.password = newPassword
+	s.password = strings.Clone(newPassword)
 
 	return nil
 }
@@ -95,7 +96,7 @@ func (s *accountStubUsers) SetPassword(_ context.Context, _, newPassword string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.password = newPassword
+	s.password = strings.Clone(newPassword)
 	s.info.RequiresPasswordChange = false
 
 	return nil
@@ -144,7 +145,7 @@ func (s *accountStubUsers) UpdateProfile(_ context.Context, _ string, data map[s
 	return nil
 }
 
-func accountTestAuth(t *testing.T, cl *client.Client) (*auth.Auth, *accountStubUsers) {
+func accountTestAuth(t *testing.T, cl *client.Client, opts ...auth.Option) (*auth.Auth, *accountStubUsers) {
 	t.Helper()
 
 	app := core.New()
@@ -166,7 +167,7 @@ func accountTestAuth(t *testing.T, cl *client.Client) (*auth.Auth, *accountStubU
 		delivered: make(chan string, 8),
 	}
 
-	a, err := auth.New(app, cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl), auth.PasswordResetRegistry(users.resetMethods()))
+	a, err := auth.New(app, cfg, users, session.NewMemoryStore(), client.NewMemoryRegistry(cl), append([]auth.Option{auth.PasswordResetRegistry(users.resetMethods())}, opts...)...)
 	qt.Assert(t, qt.IsNil(err))
 
 	return a, users

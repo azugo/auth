@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"azugo.io/auth/apikey"
 	"azugo.io/auth/client"
 	"azugo.io/auth/code"
 	"azugo.io/auth/contact"
@@ -107,6 +108,8 @@ type Auth struct {
 	extstate cache.Instance[externalState]
 	// Cache of the IdP id_token per session for federated-logout id_token_hint
 	fedIDTokens cache.Instance[string]
+
+	apiKeys apikey.Store // nil = API keys disabled
 
 	mfaStore   mfa.Store // nil = MFA disabled
 	mfaMethods mfa.Registry
@@ -208,6 +211,12 @@ func RelinkPolicy(p provider.RelinkAuthorizer) Option {
 // required refuses every login and optional is inert.
 func MFAStore(s mfa.Store) Option {
 	return func(a *Auth) { a.mfaStore = s }
+}
+
+// APIKeyStore enables API keys. Without it no /apikeys endpoint is mounted and API key tokens
+// are refused.
+func APIKeyStore(s apikey.Store) Option {
+	return func(a *Auth) { a.apiKeys = s }
 }
 
 // MFARegistry replaces the default Configuration.MFAMethods-backed method registry with a
@@ -565,6 +574,11 @@ func (a *Auth) Identities() provider.IdentityStore {
 // MFA returns the configured MFA enrollment store, or nil when MFA is disabled.
 func (a *Auth) MFA() mfa.Store {
 	return a.mfaStore
+}
+
+// APIKeys returns the configured API key store, or nil when API keys are disabled.
+func (a *Auth) APIKeys() apikey.Store {
+	return a.apiKeys
 }
 
 // PasswordResets returns the configured store of reset requests, or nil when the user provider

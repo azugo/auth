@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"azugo.io/auth/contract"
@@ -111,7 +112,8 @@ func (r *configRegistry) open(name string, entry *contract.ExternalProviderConfi
 	stored := effective
 	stored.Scopes = slices.Clone(effective.Scopes)
 	stored.Config = maps.Clone(effective.Config)
-	r.opened[name] = &openedProvider{config: stored, provider: p}
+	// name may alias the request buffer.
+	r.opened[strings.Clone(name)] = &openedProvider{config: stored, provider: p}
 
 	return p, nil
 }

@@ -142,6 +142,7 @@ type Filter struct {
 // Lister is an optional Store capability for listing of a user's sessions ordered by LastSeen
 // descending, narrowed by an optional filter and paging.
 type Lister interface {
-	// List returns userID's sessions matching filter ordered by LastSeen descending.
+	// List returns userID's sessions matching filter ordered by LastSeen descending; a nil page
+	// returns every matching session.
 	List(ctx context.Context, userID string, filter *Filter, page *paginator.Paginator) (sessions []*Session, pages *paginator.Paginator, err error)
 }

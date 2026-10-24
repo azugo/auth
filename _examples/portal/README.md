@@ -26,6 +26,24 @@ The accepted version is recorded per user and in the session context (`rules_ver
 the `id_token` and `/userinfo`); raising `RulesVersion` asks everyone again on their next
 sign-in. Acceptances are kept in memory, so a restart asks again too.
 
+## API keys
+
+Signed-in users manage API keys on `/apikeys`: a key takes a name, any subset of the caller's
+own scope (`admin` only sees the `admin` box) and an optional expiry, and its token is shown
+once. Keys are listed with their status and can be rotated, which issues a new token and stops
+the old one at once, or revoked. Creating or rotating a key needs a sign-in no older than five
+minutes, the library's default step-up; sign in again if the page refuses it. Changing the
+password offers to revoke every key as well.
+
+A key is a bearer token: the portal mounts `middleware.APIKey()`, so it authenticates any
+portal route, and `/api/me` answers with the caller and the scope the key carries:
+
+```sh
+curl -H "Authorization: Bearer <token>" http://localhost:8080/api/me
+```
+
+Keys are kept in memory and are gone after a restart.
+
 ## Two-factor authentication
 
 Signed-in users manage second factors on `/security`. TOTP shows a QR code for an

@@ -53,13 +53,11 @@ type AccessClaims struct {
 	Confirmation *Confirmation `json:"cnf,omitempty"` // set when DPoP-bound
 }
 
-// APIKeyClaims are the claims of API-key tokens (typ="ak"). They never expire unless
-// ExpiresAt is set.
+// APIKeyClaims are the claims of API-key tokens (typ="ak"). Their expiry is the stored key's.
 type APIKeyClaims struct {
-	Type      string `json:"typ"`
-	KeyID     string `json:"kid"` // looked up in apikey.Store
-	IssuedAt  int64  `json:"iat"`
-	ExpiresAt int64  `json:"exp"` // 0 = no expiry
+	Type   string `json:"typ"`
+	KeyID  string `json:"kid"` // looked up in apikey.Store
+	Secret string `json:"sec"` // matched against apikey.Key.Hash
 }
 
 type footer struct {
@@ -206,38 +204,74 @@ func (c *Codec) DecodeSessionCookie(raw string) (*AccessClaims, error) {
 
 // decodeAccessClaims opens a token as AccessClaims and requires its "typ" to be one of types.
 func (c *Codec) decodeAccessClaims(raw string, types ...string) (*AccessClaims, error) {
-	claims, err := c.decrypt(raw)
+	tc, err := c.open(raw)
 	if err != nil {
 		return nil, err
 	}
 
-	ac := &AccessClaims{}
-	if err := json.Unmarshal(claims, ac); err != nil {
-		return nil, err
-	}
-
-	if !slices.Contains(types, ac.Type) {
+	if !slices.Contains(types, tc.Type) {
 		return nil, ErrUnexpectedTokenType
 	}
 
-	return ac, nil
+	return &tc.AccessClaims, nil
+}
+
+// Decode opens a token once and decodes it as AccessClaims for an access or session-cookie
+// token, or as APIKeyClaims for an API key token; exactly one of them is returned.
+func (c *Codec) Decode(raw string) (*AccessClaims, *APIKeyClaims, error) {
+	tc, err := c.open(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	switch tc.Type {
+	case TypeAccessToken, TypeSessionCookie:
+		return &tc.AccessClaims, nil, nil
+	case TypeAPIKey:
+		return nil, tc.apiKey(), nil
+	default:
+		return nil, nil, ErrUnexpectedTokenType
+	}
 }
 
 // DecodeAPIKey opens a token and decodes it as APIKeyClaims.
 func (c *Codec) DecodeAPIKey(raw string) (*APIKeyClaims, error) {
+	tc, err := c.open(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	if tc.Type != TypeAPIKey {
+		return nil, ErrUnexpectedTokenType
+	}
+
+	return tc.apiKey(), nil
+}
+
+// tokenClaims holds the claims of every token type, so a token is unmarshaled once whatever its
+// "typ".
+type tokenClaims struct {
+	AccessClaims
+
+	KeyID  string `json:"kid"`
+	Secret string `json:"sec"`
+}
+
+func (tc *tokenClaims) apiKey() *APIKeyClaims {
+	return &APIKeyClaims{Type: tc.Type, KeyID: tc.KeyID, Secret: tc.Secret}
+}
+
+// open decrypts a token and unmarshals its claims.
+func (c *Codec) open(raw string) (*tokenClaims, error) {
 	claims, err := c.decrypt(raw)
 	if err != nil {
 		return nil, err
 	}
 
-	kc := &APIKeyClaims{}
-	if err := json.Unmarshal(claims, kc); err != nil {
+	tc := &tokenClaims{}
+	if err := json.Unmarshal(claims, tc); err != nil {
 		return nil, err
 	}
 
-	if kc.Type != TypeAPIKey {
-		return nil, ErrUnexpectedTokenType
-	}
-
-	return kc, nil
+	return tc, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,54 @@ type memoryStore struct {
 
 // memoryStore also implements the optional Lister capability.
 var _ Lister = (*memoryStore)(nil)
+
+// clone copies s without sharing its strings, which may alias a request buffer.
+func clone(s *Session) *Session {
+	c := *s
+	c.ID = strings.Clone(s.ID)
+	c.UserID = strings.Clone(s.UserID)
+	c.ClientID = strings.Clone(s.ClientID)
+	c.Scope = strings.Clone(s.Scope)
+	c.Status = Status(strings.Clone(string(s.Status)))
+	c.Step = strings.Clone(s.Step)
+	c.MFAMethod = strings.Clone(s.MFAMethod)
+	c.MFAEnrollmentID = strings.Clone(s.MFAEnrollmentID)
+	c.AuthProvider = strings.Clone(s.AuthProvider)
+	c.ACR = strings.Clone(s.ACR)
+	c.AuthACR = strings.Clone(s.AuthACR)
+	c.AMR = cloneStrings(s.AMR)
+	c.AuthMethods = cloneStrings(s.AuthMethods)
+
+	if s.Context != nil {
+		c.Context = make(map[string]any, len(s.Context))
+
+		for k, v := range s.Context {
+			switch t := v.(type) {
+			case string:
+				v = strings.Clone(t)
+			case []string:
+				v = cloneStrings(t)
+			}
+
+			c.Context[strings.Clone(k)] = v
+		}
+	}
+
+	return &c
+}
+
+func cloneStrings(ss []string) []string {
+	if ss == nil {
+		return nil
+	}
+
+	out := make([]string, len(ss))
+	for i, v := range ss {
+		out[i] = strings.Clone(v)
+	}
+
+	return out
+}
 
 // NewMemoryStore creates an empty in-memory session Store.
 //
@@ -49,8 +98,8 @@ func (m *memoryStore) Create(_ context.Context, s *Session) error {
 		return errors.New("session already expired")
 	}
 
-	cp := *s
-	m.sessions[s.ID] = &cp
+	cp := clone(s)
+	m.sessions[cp.ID] = cp
 
 	return nil
 }
@@ -79,8 +128,8 @@ func (m *memoryStore) Update(_ context.Context, s *Session) error {
 		return ErrNotFound
 	}
 
-	cp := *s
-	m.sessions[s.ID] = &cp
+	cp := clone(s)
+	m.sessions[cp.ID] = cp
 
 	return nil
 }

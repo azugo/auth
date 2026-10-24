@@ -90,3 +90,33 @@ func TestAPIKeyTokenTypeDiscrimination(t *testing.T) {
 	_, err = c.DecodeAccess(tok)
 	qt.Check(t, qt.ErrorIs(err, ErrUnexpectedTokenType))
 }
+
+func TestDecodeDispatchesOnType(t *testing.T) {
+	c := codecFor(testSecret('a'))
+
+	key, err := c.Encrypt(APIKeyClaims{Type: TypeAPIKey, KeyID: "key-1", Secret: "s"})
+	qt.Assert(t, qt.IsNil(err))
+
+	access, kc, err := c.Decode(key)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsNil(access))
+	qt.Assert(t, qt.IsNotNil(kc))
+	qt.Check(t, qt.Equals(kc.Secret, "s"))
+
+	for _, typ := range []string{TypeAccessToken, TypeSessionCookie} {
+		tok, err := c.Encrypt(AccessClaims{Type: typ, SessionID: "s1"})
+		qt.Assert(t, qt.IsNil(err))
+
+		access, kc, err := c.Decode(tok)
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.IsNil(kc))
+		qt.Assert(t, qt.IsNotNil(access))
+		qt.Check(t, qt.Equals(access.SessionID, "s1"))
+	}
+
+	step, err := c.Encrypt(AccessClaims{Type: TypeStepToken, SessionID: "s1"})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, _, err = c.Decode(step)
+	qt.Check(t, qt.ErrorIs(err, ErrUnexpectedTokenType))
+}

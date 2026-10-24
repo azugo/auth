@@ -1,0 +1,94 @@
+package views
+
+import (
+	"time"
+
+	"azugo.io/auth/apikey"
+)
+
+// NewAPIKey is a key token shown once, after creation or rotation.
+type NewAPIKey struct {
+	Name  string
+	Token string
+}
+
+templ APIKeys(scopes []string, keys []*apikey.Key, created *NewAPIKey, errorMessage string) {
+	@layout("API keys") {
+		<p><a href="/">Back to home</a></p>
+		if created != nil {
+			<p>Copy the token for <strong>{ created.Name }</strong> now; it is not shown again.</p>
+			<p><code style="word-break: break-all">{ created.Token }</code></p>
+		}
+		<h2>Create a key</h2>
+		<form method="post" action="/apikeys">
+			<label for="name">Name</label>
+			<input id="name" name="name" placeholder="CI deploy" required/>
+			<fieldset>
+				<legend>Scope</legend>
+				for _, s := range scopes {
+					<label><input type="checkbox" name="scope" value={ s } checked/> { s }</label>
+				}
+			</fieldset>
+			<label for="expires">Expires</label>
+			<select id="expires" name="expires">
+				<option value="">Never</option>
+				<option value="30">In 30 days</option>
+				<option value="90">In 90 days</option>
+				<option value="365">In a year</option>
+			</select>
+			@fieldError(errorMessage)
+			<button type="submit">Create</button>
+		</form>
+		<h2>Your keys</h2>
+		if len(keys) == 0 {
+			<p>No API keys.</p>
+		} else {
+			<table>
+				<tr>
+					<th>Name</th>
+					<th>Scope</th>
+					<th>Created</th>
+					<th>Expires</th>
+					<th>Status</th>
+					<th></th>
+				</tr>
+				for _, k := range keys {
+					<tr>
+						<td>{ k.Name }</td>
+						<td>{ k.Scope }</td>
+						<td>{ k.CreatedAt.Format(time.RFC3339) }</td>
+						<td>
+							if k.ExpiresAt != nil {
+								{ k.ExpiresAt.Format(time.RFC3339) }
+							} else {
+								Never
+							}
+						</td>
+						<td>
+							if k.RevokedAt != nil {
+								Revoked
+							} else if !k.Valid() {
+								Expired
+							} else {
+								Active
+								if k.RotatedAt != nil {
+									<small>rotated { k.RotatedAt.Format("2006-01-02 15:04") }</small>
+								}
+							}
+						</td>
+						<td>
+							if k.Valid() {
+								<form method="post" action={ templ.SafeURL("/apikeys/" + k.ID + "/rotate") }>
+									<button type="submit">Rotate</button>
+								</form>
+								<form method="post" action={ templ.SafeURL("/apikeys/" + k.ID + "/revoke") }>
+									<button type="submit">Revoke</button>
+								</form>
+							}
+						</td>
+					</tr>
+				}
+			</table>
+		}
+	}
+}

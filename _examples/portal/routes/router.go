@@ -24,7 +24,8 @@ func Init(a *portal.App) error {
 
 	a.Get("/healthz", healthz.Handler())
 
-	a.Use(middleware.Auth(a.Auth(), middleware.Cookie()))
+	// Pages sign in with the session cookie; API keys are accepted as bearer tokens.
+	a.Use(middleware.Auth(a.Auth(), middleware.Cookie(), middleware.APIKey()))
 
 	a.Get("/", r.home)
 	a.Get("/error", r.errorRedirected)
@@ -54,6 +55,18 @@ func Init(a *portal.App) error {
 	security.Post("/mfa/{method}/enroll", r.mfaEnroll)
 	security.Post("/mfa/{method}/finish", r.mfaEnrollFinish)
 	security.Post("/mfa/{method}/{id}/revoke", r.mfaRevoke)
+
+	apikeys := a.Group("/apikeys")
+	apikeys.Use(middleware.RequireAuth(middleware.RedirectTo("/login"), middleware.ReturnTo()))
+	apikeys.Use(routes.SecurityHeaders)
+	apikeys.Get("", r.apiKeysPage)
+	apikeys.Post("", r.createAPIKey)
+	apikeys.Post("/{id}/rotate", r.rotateAPIKey)
+	apikeys.Post("/{id}/revoke", r.revokeAPIKey)
+
+	api := a.Group("/api")
+	api.Use(middleware.RequireAuth())
+	api.Get("/me", r.me)
 
 	return nil
 }

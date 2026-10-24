@@ -46,8 +46,12 @@ func (r *router) changePassword(ctx *azugo.Context) {
 		req.NewPassword = *v
 	}
 
-	if v := ctx.Form.StringOptional("keep_other_sessions"); v != nil {
-		req.KeepOtherSessions = *v != ""
+	if v, err := ctx.Form.BoolOptional("keep_other_sessions"); err == nil && v != nil {
+		req.KeepOtherSessions = *v
+	}
+
+	if v, err := ctx.Form.BoolOptional("revoke_api_keys"); err == nil && v != nil {
+		req.RevokeAPIKeys = *v
 	}
 
 	if v := ctx.Form.StringOptional("confirm_password"); v == nil || *v != req.NewPassword {

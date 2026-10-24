@@ -19,6 +19,7 @@ type AuthOption interface {
 
 type authOptions struct {
 	useCookie bool
+	useAPIKey bool
 	audiences []string
 }
 
@@ -31,6 +32,17 @@ type cookieOption struct{}
 
 func (cookieOption) apply(o *authOptions) {
 	o.useCookie = true
+}
+
+// APIKey enables API key tokens as a credential source when the Auth has an API key store.
+func APIKey() AuthOption {
+	return apiKeyOption{}
+}
+
+type apiKeyOption struct{}
+
+func (apiKeyOption) apply(o *authOptions) {
+	o.useAPIKey = true
 }
 
 // Audience restricts Auth to credentials issued to one of the given client IDs.
@@ -53,13 +65,14 @@ func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 
 	return func(next azugo.RequestHandler) azugo.RequestHandler {
 		return func(ctx *azugo.Context) {
-			tok, ok := strings.CutPrefix(ctx.Header.Get(http.HeaderAuthorization), "Bearer ")
-			if !ok {
+			tok, bearer := strings.CutPrefix(ctx.Header.Get(http.HeaderAuthorization), "Bearer ")
+			if !bearer {
 				tok = ""
 			}
 
 			if tok == "" && o.useCookie {
 				tok = ctx.Cookie.Get(a.Config().CookieName)
+				bearer = false
 			}
 
 			// Opaque PASETO tokens validate through the session-store introspection, JWT
@@ -70,6 +83,9 @@ func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 			)
 
 			switch {
+			// API keys are bearer credentials only.
+			case o.useAPIKey && bearer && strings.HasPrefix(tok, "v4.local."):
+				info, err = a.IntrospectWithAPIKey(ctx, tok)
 			case strings.HasPrefix(tok, "v4.local."):
 				info, _, err = a.IntrospectToken(ctx, tok)
 			case tok != "":

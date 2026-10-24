@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,8 +25,13 @@ func (m *memoryStore) index(userID, id string) int {
 	return slices.IndexFunc(m.enrollments[userID], func(e *Enrollment) bool { return e.ID == id })
 }
 
+// clone copies e without sharing its strings, which may alias a request buffer.
 func clone(e *Enrollment) *Enrollment {
 	c := *e
+	c.ID = strings.Clone(e.ID)
+	c.UserID = strings.Clone(e.UserID)
+	c.Method = strings.Clone(e.Method)
+	c.Label = strings.Clone(e.Label)
 	c.Secret = slices.Clone(e.Secret)
 
 	return &c

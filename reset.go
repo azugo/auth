@@ -439,15 +439,30 @@ func (a *Auth) ResetPassword(ctx context.Context, in PasswordResetConfirmRequest
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
-	if err := resetter.ResetPassword(ctx, info.ID, in.NewPassword); err != nil {
+	var sessions []string
+
+	// The new password and the revocations it implies are stored together.
+	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
+		sessions = nil
+
+		if err := resetter.ResetPassword(ctx, info.ID, in.NewPassword); err != nil {
+			return err
+		}
+
+		// Whoever held the old password may hold a session too, a parked step included.
+		var err error
+
+		sessions, err = a.revokeOtherSessions(ctx, info.ID, "")
+
+		return err
+	}); err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
 	a.emit(ctx, event.Event{Type: event.TypePasswordReset, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"method": req.Method}})
 
-	// Whoever held the old password may hold a session too, a parked step included.
-	if err := a.revokeOtherSessions(ctx, info.ID, ""); err != nil {
-		return LoginResult{}, err
+	for _, id := range sessions {
+		_ = deleteSynced(ctx, a.fedIDTokens, id)
 	}
 
 	sess := &session.Session{

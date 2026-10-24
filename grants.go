@@ -85,7 +85,7 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 
 	if in.MaxAge != "" {
 		if maxAge, err = strconv.ParseInt(in.MaxAge, 10, 32); err != nil || maxAge < 0 {
-			return authorizeErrorRedirect(in, ErrCodeInvalidRequest, "max_age must be a non-negative integer"), nil
+			return authorizeErrorRedirect(in, ErrCodeInvalidRequest, "max_age must be a non-negative integer"), nil //nolint:nilerr
 		}
 	}
 

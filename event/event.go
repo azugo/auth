@@ -33,6 +33,9 @@ const (
 	TypeContactRemoved         = "contact.removed"
 	TypeContactPrimary         = "contact.primary"
 	TypeSessionReauthenticated = "session.reauthenticated"
+	TypeAPIKeyCreated          = "apikey.created"
+	TypeAPIKeyRevoked          = "apikey.revoked"
+	TypeAPIKeyRotated          = "apikey.rotated"
 )
 
 // Event is one security-relevant occurrence for audit/SIEM.

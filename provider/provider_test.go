@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 	"time"
+	"unsafe"
 
 	"azugo.io/auth/contract"
 
@@ -302,4 +303,38 @@ func TestMapStandardClaimsAcceptsStringVerifiedFlags(t *testing.T) {
 	qt.Check(t, qt.IsFalse(info.Contacts[contract.ChannelPhone][0].Verified))
 	qt.Check(t, qt.Equals(info.Claims["email_verified"], any(true)))
 	qt.Check(t, qt.Equals(info.Claims["phone_number_verified"], any(false)))
+}
+
+func TestConfigRegistryOwnsRequestedNames(t *testing.T) {
+	before := testDriver.opened
+	cfg := &contract.Configuration{Providers: []contract.ExternalProviderConfig{
+		{Name: "corp", Driver: "stub", ClientID: "c1", RedirectURL: "https://app.example/cb"},
+	}}
+	r := NewConfigRegistry(cfg)
+
+	buf := []byte("corp")
+
+	_, _, err := r.Get(context.Background(), unsafe.String(&buf[0], len(buf)))
+	qt.Assert(t, qt.IsNil(err))
+
+	// The request buffer is reused; the cached provider is still found under its name.
+	copy(buf, "XXXX")
+
+	_, _, err = r.Get(context.Background(), "corp")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(testDriver.opened, before+1))
+}
+
+func TestMemoryIdentityStoreOwnsItsStrings(t *testing.T) {
+	s := NewMemoryIdentityStore()
+	buf := []byte("corp")
+	alias := unsafe.String(&buf[0], len(buf))
+
+	qt.Assert(t, qt.IsNil(s.Link(context.Background(), &IdentityLink{UserID: "u1", Provider: alias, Subject: "sub-1"})))
+
+	copy(buf, "XXXX")
+
+	l, err := s.Lookup(context.Background(), "corp", "sub-1")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(l.Provider, "corp"))
 }

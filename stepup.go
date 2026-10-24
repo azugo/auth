@@ -17,9 +17,9 @@ import (
 )
 
 // Sensitive account actions the library asks a StepUpPolicy about.
-// ActionEnrollMFA and ActionRevokeMFA default to a second factor within the last 5 minutes when
-// the account had a factor before the session; enrolling a first factor defaults to any
-// authentication within the last 5 minutes.
+// ActionEnrollMFA, ActionRevokeMFA, the contact actions, ActionCreateAPIKey and ActionRotateAPIKey default to a second
+// factor within the last 5 minutes when the account had a factor before the session; otherwise,
+// except for ActionRevokeMFA, to any authentication within the last 5 minutes.
 const (
 	ActionAddContact     = "contact.add"
 	ActionRemoveContact  = "contact.remove"
@@ -31,6 +31,9 @@ const (
 	ActionRevokeSession  = "session.revoke"
 	ActionUpdateProfile  = "profile.update"
 	ActionSwitchSession  = "session.switch"
+	ActionCreateAPIKey   = "apikey.create"
+	ActionRevokeAPIKey   = "apikey.revoke"
+	ActionRotateAPIKey   = "apikey.rotate"
 )
 
 // reauthPassword is the re-authentication method name of the password.
@@ -119,16 +122,16 @@ func (a *Auth) StepUpPolicy() StepUpPolicy {
 	return a.stepUp
 }
 
-// StepUpEnabled reports whether any action may require step-up: a policy is configured, or MFA or
-// contact management is enabled and its library defaults apply.
+// StepUpEnabled reports whether any action may require step-up: a policy is configured, or MFA,
+// contact management or API keys are enabled and their library defaults apply.
 func (a *Auth) StepUpEnabled() bool {
 	_, contacts := a.users.(ContactManager)
 
-	return a.stepUp != nil || a.mfaStore != nil || len(a.contacts) > 0 || contacts
+	return a.stepUp != nil || a.mfaStore != nil || len(a.contacts) > 0 || contacts || a.apiKeys != nil
 }
 
 // defaultStepUpActions are the actions the library guards when the policy leaves them.
-var defaultStepUpActions = []string{ActionEnrollMFA, ActionRevokeMFA, ActionAddContact, ActionRemoveContact, ActionPrimaryContact}
+var defaultStepUpActions = []string{ActionEnrollMFA, ActionRevokeMFA, ActionAddContact, ActionRemoveContact, ActionPrimaryContact, ActionCreateAPIKey, ActionRotateAPIKey}
 
 // stepUpNeeded resolves what action needs from sess, the app's policy else the library default
 // judged on the account's enrollments, and reports whether sessions latest authentication falls

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"azugo.io/auth/contract"
@@ -104,6 +105,9 @@ func (r *configRegistry) entry(name string) (*contract.MFAMethodConfig, error) {
 	if _, err := driver(name); err != nil {
 		return nil, ErrUnknownMethod
 	}
+
+	// name may alias the request buffer, and the registry keeps it.
+	name = strings.Clone(name)
 
 	return &contract.MFAMethodConfig{Name: name, Driver: name}, nil
 }

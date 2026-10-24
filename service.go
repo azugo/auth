@@ -296,6 +296,11 @@ func (a *Auth) introspect(ctx context.Context, tok string) (UserInfo, *session.S
 		return UserInfo{}, nil, nil, NewOAuthErrorFrom(err)
 	}
 
+	return a.introspectClaims(ctx, claims)
+}
+
+// introspectClaims resolves the active session and user behind decoded access claims.
+func (a *Auth) introspectClaims(ctx context.Context, claims *token.AccessClaims) (UserInfo, *session.Session, *token.AccessClaims, error) {
 	if time.Now().Unix() >= claims.ExpiresAt {
 		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}

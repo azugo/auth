@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"azugo.io/auth/contract"
@@ -178,6 +179,8 @@ func (r *configRegistry) entry(name string) (*contract.ResetMethodConfig, error)
 	if _, err := driver(name); err != nil {
 		return nil, ErrUnknownMethod
 	}
+
+	name = strings.Clone(name)
 
 	return &contract.ResetMethodConfig{Name: name, Driver: name}, nil
 }

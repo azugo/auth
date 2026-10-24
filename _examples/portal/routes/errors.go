@@ -60,9 +60,10 @@ func errorMessage(err error, invalid string) string {
 	return oe.Description
 }
 
-// errorPage is the router's ErrorHandler: it renders the generic error page for portal pages.
+// errorPage is the router's ErrorHandler: it renders the generic error page for portal pages;
+// the auth and API endpoints keep their JSON errors.
 func (r *router) errorPage(ctx *azugo.Context, err error) bool {
-	if err == nil || strings.HasPrefix(ctx.Path(), "/auth/") || ctx.AcceptsExplicit(http.ContentTypeJSON) {
+	if err == nil || strings.HasPrefix(ctx.Path(), "/auth/") || strings.HasPrefix(ctx.Path(), "/api/") || ctx.AcceptsExplicit(http.ContentTypeJSON) {
 		return false
 	}
 
@@ -111,6 +112,12 @@ func (r *router) errorRedirected(ctx *azugo.Context) {
 
 // notFound renders the error page for unknown routes.
 func (r *router) notFound(ctx *azugo.Context) {
+	if strings.HasPrefix(ctx.Path(), "/api/") {
+		ctx.Error(http.NotFoundError{})
+
+		return
+	}
+
 	ctx.StatusCode(http.StatusNotFound)
 	templ.Render(ctx, views.Error(http.StatusMessage(http.StatusNotFound), "The page you asked for does not exist.", r.backURL(ctx)))
 }

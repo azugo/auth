@@ -3,6 +3,7 @@ package portal
 
 import (
 	"azugo.io/auth"
+	"azugo.io/auth/apikey"
 	"azugo.io/auth/client"
 	"azugo.io/auth/mfa"
 	_ "azugo.io/auth/mfa/recovery" // registers the "recovery" (backup codes) MFA driver
@@ -43,7 +44,7 @@ func New(cmd *cobra.Command, version string) (*App, error) {
 		Public:                  true,
 		AllowNoPrompt:           true,
 		GrantTypes:              []string{client.GrantTypePassword},
-		Scopes:                  []string{"openid", "profile"},
+		Scopes:                  []string{"openid", "profile", "admin"},
 		AllowedAuthMethods:      []string{client.AuthMethodPassword},
 		ResponseMode:            client.ResponseModeRedirect,
 		TokenEndpointAuthMethod: client.TokenEndpointAuthNone,
@@ -60,8 +61,15 @@ func New(cmd *cobra.Command, version string) (*App, error) {
 		})
 	}
 
-	au, err := auth.New(a.App, config.Auth, NewDemoUsers(), session.NewMemoryStore(), clients,
-		auth.CookieScopeToBasePath(), auth.MFAStore(mfa.NewMemoryStore()), auth.LoginSteps(NewRules()))
+	au, err := auth.New(a.App, config.Auth,
+		NewDemoUsers(),
+		session.NewMemoryStore(),
+		clients,
+		auth.CookieScopeToBasePath(),
+		auth.MFAStore(mfa.NewMemoryStore()),
+		auth.APIKeyStore(apikey.NewMemoryStore()),
+		auth.LoginSteps(NewRules()),
+	)
 	if err != nil {
 		return nil, err
 	}

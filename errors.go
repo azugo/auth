@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"azugo.io/auth/apikey"
 	"azugo.io/auth/client"
 	"azugo.io/auth/contract"
 	"azugo.io/auth/mfa"
@@ -182,7 +183,8 @@ func NewOAuthErrorFrom(err error) error {
 	case errors.Is(err, client.ErrNotFound):
 		// Unknown/invalid client or it's parameters.
 		return newOAuthErrorWrapped(http.StatusUnauthorized, ErrCodeInvalidClient, "invalid client", err)
-	case errors.Is(err, contract.ErrWeakPassword), errors.Is(err, contract.ErrInvalidRegistration), errors.Is(err, contract.ErrInvalidContact):
+	case errors.Is(err, contract.ErrWeakPassword), errors.Is(err, contract.ErrInvalidRegistration), errors.Is(err, contract.ErrInvalidContact),
+		errors.Is(err, apikey.ErrInvalidKey):
 		// The policy's own wording is the user-facing reason.
 		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), err)
 	case errors.Is(err, contract.ErrUsernameTaken):
@@ -208,6 +210,8 @@ func NewOAuthErrorFrom(err error) error {
 		return newOAuthErrorWrapped(http.StatusForbidden, ErrCodeInsufficientScope, "first-party credential required", err)
 	case errors.Is(err, ErrInvalidSelection):
 		return newOAuthErrorWrapped(http.StatusBadRequest, ErrCodeInvalidRequest, "invalid selection", err)
+	case errors.Is(err, apikey.ErrNotFound):
+		return newOAuthErrorWrapped(http.StatusNotFound, ErrCodeInvalidRequest, "api key not found", err)
 	case errors.Is(err, mfa.ErrUnknownMethod):
 		return newOAuthErrorWrapped(http.StatusNotFound, ErrCodeInvalidRequest, "unknown mfa method", err)
 	case errors.Is(err, mfa.ErrNotEnrolled):
