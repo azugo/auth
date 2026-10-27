@@ -10,6 +10,7 @@ import (
 	"azugo.io/auth/apikey"
 	"azugo.io/auth/client"
 	"azugo.io/auth/contract"
+	"azugo.io/auth/dpop"
 	"azugo.io/auth/mfa"
 	"azugo.io/auth/provider"
 	"azugo.io/auth/session"
@@ -101,6 +102,10 @@ type OAuthError struct {
 	// acrValues and maxAge are the RFC 9470 step-up challenge parameters.
 	acrValues string
 	maxAge    int
+	// dpop makes the challenge use the RFC 9449 DPoP scheme.
+	dpop bool
+	// dpopNonce is the server nonce sent in the DPoP-Nonce header.
+	dpopNonce string
 }
 
 // OAuthErrorOption customizes an OAuthError at construction.
@@ -161,6 +166,16 @@ func NewOAuthAuthenticateError(code ErrorCode, description, realm, scope string,
 	}
 
 	return e
+}
+
+// NewDPoPError creates a 401 Unauthorized OAuthError that emits a WWW-Authenticate: DPoP challenge.
+func NewDPoPError(code ErrorCode, description string) error {
+	return &OAuthError{
+		Code:        code,
+		Description: description,
+		status:      http.StatusUnauthorized,
+		dpop:        true,
+	}
 }
 
 // NewOAuthErrorFrom maps a authentication specifc errors to OAuth 2.0 error and status code.
@@ -251,11 +266,18 @@ func (e *OAuthError) SafeError() string {
 	return e.Description
 }
 
-// ErrorHeaders sets the WWW-Authenticate: Bearer header and, when throttled, Retry-After.
+// ErrorHeaders sets the WWW-Authenticate header, Retry-After when throttled and DPoP-Nonce when a
+// proof lacked the server nonce.
 func (e *OAuthError) ErrorHeaders() iter.Seq2[string, string] {
 	return func(yield func(string, string) bool) {
 		if e.RetryAfter > 0 {
 			if !yield(http.HeaderRetryAfter, strconv.Itoa(int(e.RetryAfter.Seconds()+0.999))) {
+				return
+			}
+		}
+
+		if e.dpopNonce != "" {
+			if !yield(dpop.NonceHeaderName, e.dpopNonce) {
 				return
 			}
 		}
@@ -296,6 +318,12 @@ func (e *OAuthError) ErrorHeaders() iter.Seq2[string, string] {
 		}
 
 		challenge := tokenTypeBearer
+		if e.dpop {
+			challenge = tokenTypeDPoP
+
+			params = append(params, `algs="`+strings.Join(dpop.Algorithms, " ")+`"`)
+		}
+
 		if len(params) > 0 {
 			challenge += " " + strings.Join(params, ", ")
 		}

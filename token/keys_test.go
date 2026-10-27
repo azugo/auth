@@ -225,7 +225,7 @@ func TestJWKSFromSkipsKeysWithoutJWKRepresentation(t *testing.T) {
 
 	set.Secondary = append(set.Secondary, VerificationKey{ID: "ed", Public: edPub})
 
-	// The unrepresentable key is dropped rather than published as an empty entry.
+	// A key tokens are never verified with is dropped rather than published.
 	jwks := JWKSFrom(set)
 	qt.Assert(t, qt.HasLen(jwks.Keys, 1))
 	qt.Check(t, qt.Equals(jwks.Keys[0].Kid, "k1"))
@@ -258,7 +258,7 @@ func TestJWKSFromECDSA(t *testing.T) {
 	qt.Check(t, qt.Equals(new(big.Int).SetBytes(y).Cmp(key.Y), 0))
 }
 
-// TestJWKThumbprintMatchesRFC7638Vector verifies jwkThumbprint against RFC 7638 Appendix A's
+// TestJWKThumbprintMatchesRFC7638Vector verifies Thumbprint against RFC 7638 Appendix A's
 // own worked example, the strongest available proof of canonicalization correctness.
 func TestJWKThumbprintMatchesRFC7638Vector(t *testing.T) {
 	const n = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tS" +
@@ -279,9 +279,20 @@ func TestJWKThumbprintMatchesRFC7638Vector(t *testing.T) {
 		E: int(new(big.Int).SetBytes(eBytes).Int64()),
 	}
 
-	got, err := jwkThumbprint(pub)
+	got, err := Thumbprint(pub)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(got, wantThumbprint))
+}
+
+// TestThumbprintMatchesRFC8037Vector verifies Thumbprint against RFC 8037 Appendix A.3's Ed25519
+// key.
+func TestThumbprintMatchesRFC8037Vector(t *testing.T) {
+	x, err := base64.RawURLEncoding.DecodeString("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo")
+	qt.Assert(t, qt.IsNil(err))
+
+	got, err := Thumbprint(ed25519.PublicKey(x))
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(got, "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"))
 }
 
 func TestConfigKeyProviderDerivesIDFromThumbprintWhenOmitted(t *testing.T) {
@@ -295,7 +306,7 @@ func TestConfigKeyProviderDerivesIDFromThumbprintWhenOmitted(t *testing.T) {
 	set, err := kp.KeySet(t.Context())
 	qt.Assert(t, qt.IsNil(err))
 
-	want, err := jwkThumbprint(set.Primary.Public)
+	want, err := Thumbprint(set.Primary.Public)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(set.Primary.ID, want))
 	qt.Check(t, qt.IsTrue(set.Primary.ID != ""))
@@ -351,7 +362,7 @@ func TestConfigKeyProviderSecondaryOnlyNeedsPublicKey(t *testing.T) {
 	qt.Check(t, qt.Equals(rsaVK.Algorithm, ""))
 	qt.Check(t, qt.IsTrue(rsaVK.ID != ""))
 
-	wantRSAID, err := jwkThumbprint(rsaVK.Public)
+	wantRSAID, err := Thumbprint(rsaVK.Public)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(rsaVK.ID, wantRSAID))
 

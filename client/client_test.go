@@ -26,3 +26,11 @@ func TestClientGrantTypeAllowed(t *testing.T) {
 	none := &Client{}
 	qt.Check(t, qt.IsFalse(none.GrantTypeAllowed(GrantTypePassword)))
 }
+
+func TestClientDPoPRequired(t *testing.T) {
+	qt.Check(t, qt.IsFalse((&Client{}).DPoPRequired()))
+	qt.Check(t, qt.IsTrue((&Client{DPoPPolicy: DPoPPolicyRequired}).DPoPRequired()))
+	qt.Check(t, qt.IsTrue((&Client{DPoPPolicy: DPoPPolicyNonce}).DPoPRequired()))
+	// An unknown policy fails closed.
+	qt.Check(t, qt.IsTrue((&Client{DPoPPolicy: "typo"}).DPoPRequired()))
+}

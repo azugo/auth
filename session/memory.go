@@ -35,6 +35,7 @@ func clone(s *Session) *Session {
 	c.AuthProvider = strings.Clone(s.AuthProvider)
 	c.ACR = strings.Clone(s.ACR)
 	c.AuthACR = strings.Clone(s.AuthACR)
+	c.DPoPJKT = strings.Clone(s.DPoPJKT)
 	c.AMR = cloneStrings(s.AMR)
 	c.AuthMethods = cloneStrings(s.AuthMethods)
 

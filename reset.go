@@ -46,6 +46,7 @@ type PasswordResetConfirmRequest struct {
 	// for an approved asynchronous method.
 	Response    map[string]any
 	NewPassword string
+	DPoP        *DPoPProof
 	ReturnTo    string
 	BaseURL     string
 	MountPath   string
@@ -374,6 +375,13 @@ func (a *Auth) ResetPassword(ctx context.Context, in PasswordResetConfirmRequest
 		return LoginResult{}, err
 	}
 
+	jkt, err := a.verifyDPoP(ctx, cl, in.DPoP)
+	if err != nil {
+		a.refundThrottle(ctx, keys)
+
+		return LoginResult{}, err
+	}
+
 	m, err := a.resetMethods.Get(ctx, req.Method)
 	if err != nil {
 		a.refundThrottle(ctx, keys)
@@ -472,5 +480,5 @@ func (a *Auth) ResetPassword(ctx context.Context, in PasswordResetConfirmRequest
 		AMR:      mergeAMR([]string{amrPassword}, info.AMR),
 	}
 
-	return a.startSession(ctx, sess, cl, acrRequest{}, in.ReturnTo, in.BaseURL, in.MountPath)
+	return a.startSession(ctx, sess, cl, jkt, acrRequest{}, in.ReturnTo, in.BaseURL, in.MountPath)
 }

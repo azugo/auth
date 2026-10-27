@@ -64,6 +64,16 @@ const (
 	MFAPolicyRequired MFAPolicy = "required" // MFA always required; onboarding if not enrolled
 )
 
+// DPoPPolicy declares how a client's access tokens are bound to its DPoP key (RFC 9449).
+type DPoPPolicy string
+
+// DPoPPolicy values.
+const (
+	DPoPPolicyOptional DPoPPolicy = ""         // a DPoP proof binds the token when sent (default)
+	DPoPPolicyRequired DPoPPolicy = "required" // a DPoP proof is mandatory
+	DPoPPolicyNonce    DPoPPolicy = "nonce"    // a DPoP proof with a current server nonce is mandatory
+)
+
 // RegistrationPolicy declares whether a client may self-register users and what follows.
 type RegistrationPolicy string
 
@@ -88,10 +98,8 @@ type Client struct {
 	// TODO: not implemented yet.
 	AllowNoPrompt bool
 	RequirePKCE   bool // true for public clients
-	// RequireDPoP makes a DPoP proof mandatory at /token and binds cnf.jkt into issued tokens.
-	// TODO: not implemented yet, so a token stays a bearer token.
-	RequireDPoP  bool
-	ResponseMode ResponseMode
+	DPoPPolicy    DPoPPolicy
+	ResponseMode  ResponseMode
 	// StepRedirectURI is the local path a ResponseModeRedirect client is sent to while a login
 	// step (MFA, password change, app gate) is pending.
 	StepRedirectURI         string
@@ -161,4 +169,9 @@ func (c *Client) Confidential() bool {
 // Registry provides OAuth client metadata.
 type Registry interface {
 	GetClient(ctx context.Context, clientID string) (*Client, error)
+}
+
+// DPoPRequired reports whether the client gets only DPoP-bound tokens; an unknown policy fails closed.
+func (c *Client) DPoPRequired() bool {
+	return c.DPoPPolicy != DPoPPolicyOptional
 }

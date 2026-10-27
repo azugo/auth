@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"net/url"
 	"slices"
@@ -37,6 +39,8 @@ type AuthorizeRequest struct {
 	CodeChallengeMethod string
 	// MaxAge is the raw max_age parameter: the most seconds since the user last authenticated.
 	MaxAge string
+	// DPoPJKT is the dpop_jkt parameter binding the code to a DPoP key (RFC 9449 §10).
+	DPoPJKT string
 	// SessionToken is the presented session cookie establishing the user's identity.
 	SessionToken string
 }
@@ -79,6 +83,12 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 
 	if in.CodeChallenge != "" && !validPKCEValue(in.CodeChallenge) {
 		return authorizeErrorRedirect(in, ErrCodeInvalidRequest, "code_challenge must be 43-128 unreserved characters"), nil
+	}
+
+	if in.DPoPJKT != "" {
+		if raw, err := base64.RawURLEncoding.DecodeString(in.DPoPJKT); err != nil || len(raw) != sha256.Size {
+			return authorizeErrorRedirect(in, ErrCodeInvalidRequest, "dpop_jkt must be a SHA-256 JWK thumbprint"), nil //nolint:nilerr
+		}
 	}
 
 	var maxAge int64
@@ -143,6 +153,7 @@ func (a *Auth) Authorize(ctx context.Context, in AuthorizeRequest) (AuthorizeRes
 		ACREssential:        acr.Essential,
 		CodeChallenge:       in.CodeChallenge,
 		CodeChallengeMethod: in.CodeChallengeMethod,
+		DPoPJKT:             in.DPoPJKT,
 		ExpiresAt:           time.Now().Add(a.config.CodeTTL),
 	}
 
@@ -166,6 +177,8 @@ type TokenResult struct {
 	ExpiresIn   int    `json:"expires_in"`
 	IDToken     string `json:"id_token,omitempty"`
 	Scope       string `json:"scope,omitempty"`
+	// DPoPNonce is the server nonce for the client's next DPoP proof, sent as the DPoP-Nonce header.
+	DPoPNonce string `json:"-"`
 }
 
 // AuthorizationCodeGrantRequest carries an authorization_code redemption.
@@ -174,9 +187,11 @@ type AuthorizationCodeGrantRequest struct {
 	Code         string
 	RedirectURI  string
 	CodeVerifier string
-	BaseURL      string
-	MountPath    string
-	IP           string
+	// DPoP is the proof binding the issued access token to the client's key.
+	DPoP      *DPoPProof
+	BaseURL   string
+	MountPath string
+	IP        string
 }
 
 // AuthorizationCodeGrant redeems a single-use authorization code for tokens. A replayed code
@@ -189,6 +204,12 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 
 	if !cl.GrantTypeAllowed(client.GrantTypeAuthorizationCode) {
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeUnauthorizedClient, "client is not allowed to use the authorization_code grant")
+	}
+
+	// Checked before the code is consumed, so a client asked for a nonce can retry with it.
+	jkt, err := a.verifyDPoP(ctx, cl, in.DPoP)
+	if err != nil {
+		return TokenResult{}, err
 	}
 
 	rec, err := a.codes.Consume(ctx, in.Code)
@@ -224,6 +245,10 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "redirect_uri does not match the authorization request")
 	}
 
+	if rec.DPoPJKT != "" && jkt != rec.DPoPJKT {
+		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "DPoP proof key does not match dpop_jkt")
+	}
+
 	if rec.CodeChallenge != "" {
 		if in.CodeVerifier == "" {
 			return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "code_verifier is required")
@@ -248,7 +273,7 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidGrant, "session does not meet the required authentication context")
 	}
 
-	at, atID, err := a.issueAccessToken(ctx, sess, cl, rec.Scope, client.GrantTypeAuthorizationCode, in.BaseURL, in.MountPath)
+	at, atID, err := a.issueAccessToken(ctx, sess, cl, rec.Scope, client.GrantTypeAuthorizationCode, jkt, in.BaseURL, in.MountPath)
 	if err != nil {
 		return TokenResult{}, err
 	}
@@ -259,9 +284,10 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 
 	res := TokenResult{
 		AccessToken: at,
-		TokenType:   tokenTypeBearer,
+		TokenType:   tokenType(jkt),
 		ExpiresIn:   int(a.config.AccessTokenTTL.Seconds()),
 		Scope:       rec.Scope,
+		DPoPNonce:   a.clientDPoPNonce(cl),
 	}
 
 	if a.keys != nil && scopeContains(rec.Scope, ScopeOpenID) {
@@ -282,9 +308,11 @@ func (a *Auth) AuthorizationCodeGrant(ctx context.Context, in AuthorizationCodeG
 type ClientCredentialsGrantRequest struct {
 	Credentials ClientCredentials
 	Scope       string
-	BaseURL     string
-	MountPath   string
-	IP          string
+	// DPoP is the proof binding the issued access token to the client's key.
+	DPoP      *DPoPProof
+	BaseURL   string
+	MountPath string
+	IP        string
 }
 
 // ClientCredentialsGrant issues a JWT access token to a confidential client without a user or
@@ -316,7 +344,19 @@ func (a *Auth) ClientCredentialsGrant(ctx context.Context, in ClientCredentialsG
 		return TokenResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidScope, "requested scope exceeds the registered scope")
 	}
 
-	at, _, err := a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: cl.ID, Scope: scope, GrantType: client.GrantTypeClientCredentials}, in.BaseURL, in.MountPath)
+	jkt, err := a.verifyDPoP(ctx, cl, in.DPoP)
+	if err != nil {
+		return TokenResult{}, err
+	}
+
+	at, _, err := a.signAccessToken(ctx, cl,
+		token.AccessTokenClaims{
+			Subject:   cl.ID,
+			Scope:     scope,
+			GrantType: client.GrantTypeClientCredentials,
+			JKT:       jkt,
+		},
+		in.BaseURL, in.MountPath)
 	if err != nil {
 		return TokenResult{}, err
 	}
@@ -325,20 +365,31 @@ func (a *Auth) ClientCredentialsGrant(ctx context.Context, in ClientCredentialsG
 
 	return TokenResult{
 		AccessToken: at,
-		TokenType:   tokenTypeBearer,
+		TokenType:   tokenType(jkt),
 		ExpiresIn:   int(a.config.AccessTokenTTL.Seconds()),
 		Scope:       scope,
+		DPoPNonce:   a.clientDPoPNonce(cl),
 	}, nil
 }
 
-// issueAccessToken mints the access token for session, returning the token and its JTI.
-func (a *Auth) issueAccessToken(ctx context.Context, sess *session.Session, cl *client.Client, scope, grantType, baseURL, mountPath string) (string, string, error) {
+// issueAccessToken mints the access token for session, bound to the DPoP key jkt when set,
+// returning the token and its JTI.
+func (a *Auth) issueAccessToken(ctx context.Context, sess *session.Session, cl *client.Client, scope, grantType, jkt, baseURL, mountPath string) (string, string, error) {
 	if cl.AccessTokenType == client.AccessTokenTypeJWT {
 		if a.keys == nil {
 			return "", "", NewOAuthError(http.StatusInternalServerError, ErrCodeServerError, "no key provider configured")
 		}
 
-		return a.signAccessToken(ctx, cl, token.AccessTokenClaims{Subject: sess.UserID, Scope: scope, ACR: sess.AuthenticatedACR(), AMR: sess.AuthenticatedMethods(), GrantType: grantType}, baseURL, mountPath)
+		return a.signAccessToken(ctx, cl,
+			token.AccessTokenClaims{
+				Subject:   sess.UserID,
+				Scope:     scope,
+				ACR:       sess.AuthenticatedACR(),
+				AMR:       sess.AuthenticatedMethods(),
+				GrantType: grantType,
+				JKT:       jkt,
+			},
+			baseURL, mountPath)
 	}
 
 	now := time.Now()
@@ -353,13 +404,14 @@ func (a *Auth) issueAccessToken(ctx context.Context, sess *session.Session, cl *
 	}
 
 	at, err := a.codec.Encrypt(token.AccessClaims{
-		Type:      token.TypeAccessToken,
-		SessionID: sess.ID,
-		TokenID:   atJTI,
-		ClientID:  cl.ID,
-		Scope:     scope,
-		IssuedAt:  now.Unix(),
-		ExpiresAt: now.Add(a.config.AccessTokenTTL).Unix(),
+		Type:         token.TypeAccessToken,
+		SessionID:    sess.ID,
+		TokenID:      atJTI,
+		ClientID:     cl.ID,
+		Scope:        scope,
+		IssuedAt:     now.Unix(),
+		ExpiresAt:    now.Add(a.config.AccessTokenTTL).Unix(),
+		Confirmation: confirmation(jkt),
 	})
 	if err != nil {
 		return "", "", NewOAuthErrorFrom(err)

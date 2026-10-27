@@ -260,7 +260,10 @@ func TestOwnerClaimsASquattedAddress(t *testing.T) {
 		qt.Assert(t, qt.IsNil(err))
 		qt.Assert(t, qt.IsTrue(reg.Accepted))
 
-		return users.lastRequest("u-" + username), users.awaitDelivery(t)
+		// The request ID is recorded by the delivery, so it is read once that has happened.
+		code := users.awaitDelivery(t)
+
+		return users.lastRequest("u-" + username), code
 	}
 
 	// An unverified squatter does not block the owner, who gets a code of their own.

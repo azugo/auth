@@ -7,6 +7,7 @@ import (
 
 	"azugo.io/auth"
 	"azugo.io/auth/client"
+	"azugo.io/auth/dpop"
 
 	"azugo.io/azugo"
 	"azugo.io/core/http"
@@ -21,13 +22,20 @@ func (h *Handler) token(ctx *azugo.Context) {
 		return
 	}
 
+	proof, err := h.auth.ReadDPoPProof(ctx)
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	switch grantType {
 	case client.GrantTypePassword:
-		h.passwordGrant(ctx)
+		h.passwordGrant(ctx, proof)
 	case client.GrantTypeAuthorizationCode:
-		h.authorizationCodeGrant(ctx)
+		h.authorizationCodeGrant(ctx, proof)
 	case client.GrantTypeClientCredentials:
-		h.clientCredentialsGrant(ctx)
+		h.clientCredentialsGrant(ctx, proof)
 	default:
 		ctx.Error(auth.NewOAuthErrorFrom(auth.ErrUnsupportedGrantType))
 	}
@@ -93,7 +101,7 @@ func (h *Handler) clientCredentials(ctx *azugo.Context) (auth.ClientCredentials,
 }
 
 // passwordGrant handles the password grant_type.
-func (h *Handler) passwordGrant(ctx *azugo.Context) {
+func (h *Handler) passwordGrant(ctx *azugo.Context, proof *auth.DPoPProof) {
 	creds, err := h.clientCredentials(ctx)
 	if err != nil {
 		ctx.Error(err)
@@ -119,6 +127,7 @@ func (h *Handler) passwordGrant(ctx *azugo.Context) {
 		Credentials: creds,
 		Username:    username,
 		Password:    password,
+		DPoP:        proof,
 		BaseURL:     ctx.BaseURL(),
 		MountPath:   h.mountPrefix,
 		IP:          ctx.IP().String(),
@@ -147,7 +156,7 @@ func (h *Handler) passwordGrant(ctx *azugo.Context) {
 }
 
 // authorizationCodeGrant handles the authorization_code grant_type.
-func (h *Handler) authorizationCodeGrant(ctx *azugo.Context) {
+func (h *Handler) authorizationCodeGrant(ctx *azugo.Context, proof *auth.DPoPProof) {
 	codeVal, err := ctx.Form.String("code")
 	if err != nil {
 		ctx.Error(err)
@@ -165,6 +174,7 @@ func (h *Handler) authorizationCodeGrant(ctx *azugo.Context) {
 	req := auth.AuthorizationCodeGrantRequest{
 		Credentials: creds,
 		Code:        codeVal,
+		DPoP:        proof,
 		BaseURL:     ctx.BaseURL(),
 		MountPath:   h.mountPrefix,
 		IP:          ctx.IP().String(),
@@ -185,11 +195,11 @@ func (h *Handler) authorizationCodeGrant(ctx *azugo.Context) {
 		return
 	}
 
-	ctx.JSON(&res)
+	writeTokenResult(ctx, res)
 }
 
 // clientCredentialsGrant handles the client_credentials grant_type.
-func (h *Handler) clientCredentialsGrant(ctx *azugo.Context) {
+func (h *Handler) clientCredentialsGrant(ctx *azugo.Context, proof *auth.DPoPProof) {
 	creds, err := h.clientCredentials(ctx)
 	if err != nil {
 		ctx.Error(err)
@@ -205,6 +215,7 @@ func (h *Handler) clientCredentialsGrant(ctx *azugo.Context) {
 	res, err := h.auth.ClientCredentialsGrant(ctx, auth.ClientCredentialsGrantRequest{
 		Credentials: creds,
 		Scope:       scope,
+		DPoP:        proof,
 		BaseURL:     ctx.BaseURL(),
 		MountPath:   h.mountPrefix,
 		IP:          ctx.IP().String(),
@@ -213,6 +224,15 @@ func (h *Handler) clientCredentialsGrant(ctx *azugo.Context) {
 		ctx.Error(err)
 
 		return
+	}
+
+	writeTokenResult(ctx, res)
+}
+
+// writeTokenResult writes the access token response with its DPoP-Nonce header.
+func writeTokenResult(ctx *azugo.Context, res auth.TokenResult) {
+	if res.DPoPNonce != "" {
+		ctx.Header.Set(dpop.NonceHeaderName, res.DPoPNonce)
 	}
 
 	ctx.JSON(&res)

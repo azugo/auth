@@ -56,6 +56,10 @@ func (h *Handler) authorizeCode(ctx *azugo.Context) {
 		req.MaxAge = *v
 	}
 
+	if v := ctx.Query.StringOptional("dpop_jkt"); v != nil {
+		req.DPoPJKT = *v
+	}
+
 	res, err := h.auth.Authorize(ctx, req)
 	if err != nil {
 		ctx.Error(err)
@@ -74,8 +78,16 @@ func (h *Handler) authorize(ctx *azugo.Context) {
 		returnTo = *v
 	}
 
+	proof, err := h.auth.ReadDPoPProof(ctx)
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	res, err := h.auth.Refresh(ctx, auth.RefreshRequest{
 		Token:     ctx.Cookie.Get(h.auth.Config().CookieName),
+		DPoP:      proof,
 		ReturnTo:  returnTo,
 		BaseURL:   ctx.BaseURL(),
 		MountPath: h.mountPrefix,

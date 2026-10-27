@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -235,7 +236,7 @@ func resolveIDAndAlgorithm(kc contract.KeyConfig, pub crypto.PublicKey, forSigni
 
 	id := kc.ID
 	if id == "" {
-		thumbprint, err := jwkThumbprint(pub)
+		thumbprint, err := Thumbprint(pub)
 		if err != nil {
 			return "", "", err
 		}
@@ -360,6 +361,11 @@ func JWKSFrom(set *KeySet) JWKS {
 }
 
 func jwkFor(kid, alg string, pub crypto.PublicKey) (JWK, error) {
+	// Tokens are verified with RS* and ES* only, so an Ed25519 key is not published.
+	if _, ok := pub.(ed25519.PublicKey); ok {
+		return JWK{}, errors.New("EdDSA keys are not published")
+	}
+
 	fields, err := publicKeyFields(pub)
 	if err != nil {
 		return JWK{}, err
@@ -409,12 +415,19 @@ func publicKeyFields(pub crypto.PublicKey) (jwkPublicFields, error) {
 			X:   base64.RawURLEncoding.EncodeToString(x),
 			Y:   base64.RawURLEncoding.EncodeToString(y),
 		}, nil
+	case ed25519.PublicKey:
+		return jwkPublicFields{
+			Kty: "OKP",
+			Crv: "Ed25519",
+			X:   base64.RawURLEncoding.EncodeToString(k),
+		}, nil
 	default:
 		return jwkPublicFields{}, fmt.Errorf("unsupported public key type %T", pub)
 	}
 }
 
-func jwkThumbprint(pub crypto.PublicKey) (string, error) {
+// Thumbprint returns the RFC 7638 SHA-256 thumbprint of an RSA, ECDSA or Ed25519 public key.
+func Thumbprint(pub crypto.PublicKey) (string, error) {
 	fields, err := publicKeyFields(pub)
 	if err != nil {
 		return "", err
@@ -430,6 +443,9 @@ func jwkThumbprint(pub crypto.PublicKey) (string, error) {
 		m["crv"] = fields.Crv
 		m["x"] = fields.X
 		m["y"] = fields.Y
+	case "OKP":
+		m["crv"] = fields.Crv
+		m["x"] = fields.X
 	}
 
 	canonical, err := json.Marshal(m)

@@ -5,14 +5,13 @@ import (
 	"cmp"
 
 	"azugo.io/auth"
+	"azugo.io/auth/dpop"
+	"azugo.io/auth/middleware"
 	"azugo.io/auth/session"
 
 	"azugo.io/azugo"
 	"azugo.io/core/http"
 )
-
-// tokenTypeBearer is the RFC 6750 token_type value.
-const tokenTypeBearer = "Bearer"
 
 // OIDCRoutes holds the always-mounted protocol adapters.
 type OIDCRoutes struct {
@@ -407,18 +406,6 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 	return h
 }
 
-// SecurityHeaders is a middleware that marks responses as non-cacheable (RFC 6749 §5.1) and
-// disables content-type sniffing.
-func SecurityHeaders(next azugo.RequestHandler) azugo.RequestHandler {
-	return func(ctx *azugo.Context) {
-		ctx.Header.Set(http.HeaderCacheControl, "no-store")
-		ctx.Header.Set(http.HeaderPragma, "no-cache")
-		ctx.Header.Set(http.HeaderXContentTypeOptions, "nosniff")
-
-		next(ctx)
-	}
-}
-
 // Bind mounts routes under prefix on router.
 func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler {
 	var o bindOptions
@@ -441,7 +428,8 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 		g.Get("/.well-known/jwks.json", h.OIDC.JWKS)
 	}
 
-	g.Use(SecurityHeaders)
+	g.Use(middleware.SecurityHeaders)
+	g.Use(middleware.DPoP(a))
 
 	g.Get("/authorize", h.OIDC.AuthorizeCode)
 	g.Post("/authorize", h.OIDC.Authorize)
@@ -556,6 +544,10 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 func (h *Handler) writeLoginResult(ctx *azugo.Context, res auth.LoginResult) {
 	h.auth.WriteCookie(ctx, res.Cookie)
 
+	if res.DPoPNonce != "" {
+		ctx.Header.Set(dpop.NonceHeaderName, res.DPoPNonce)
+	}
+
 	if res.Status != session.StatusActive {
 		if res.ReturnTo != "" {
 			ctx.Redirect(res.ReturnTo)
@@ -593,7 +585,7 @@ func (h *Handler) writeLoginResult(ctx *azugo.Context, res auth.LoginResult) {
 			TokenType   string `json:"token_type"`
 			ExpiresIn   int    `json:"expires_in"`
 			IDToken     string `json:"id_token,omitempty"`
-		}{AccessToken: res.AccessToken, TokenType: tokenTypeBearer, ExpiresIn: res.ExpiresIn, IDToken: res.IDToken})
+		}{AccessToken: res.AccessToken, TokenType: res.TokenType, ExpiresIn: res.ExpiresIn, IDToken: res.IDToken})
 	case res.ReturnTo != "":
 		ctx.Redirect(res.ReturnTo)
 	default:

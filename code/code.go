@@ -38,7 +38,9 @@ type AuthorizationCode struct {
 	// CodeChallenge is the PKCE S256 challenge; "" when the client did not use PKCE.
 	CodeChallenge       string
 	CodeChallengeMethod string
-	ExpiresAt           time.Time
+	// DPoPJKT is the dpop_jkt the code is bound to: redemption needs a DPoP proof by that key.
+	DPoPJKT   string
+	ExpiresAt time.Time
 	// IssuedTokenID and IssuedTokenExpiresAt identify the JWT access token issued at
 	// redemption so a replay can revoke it. Populated only on the ErrReplayed record.
 	IssuedTokenID        string

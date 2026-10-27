@@ -24,7 +24,9 @@ type RegisterRequest struct {
 	// Contacts maps a channel to the address given for it.
 	Contacts map[string]string
 	// Extra is passed through to Registerer.Register uninterpreted.
-	Extra     map[string]any
+	Extra map[string]any
+	// DPoP is the proof binding the tokens of a sign-in registration, nil without one.
+	DPoP      *DPoPProof
 	ReturnTo  string
 	BaseURL   string
 	MountPath string
@@ -154,6 +156,22 @@ func (a *Auth) Register(ctx context.Context, in RegisterRequest) (RegisterResult
 		}
 	}
 
+	// A sign-in client's proof is checked before the account exists, under the throttle.
+	var jkt string
+
+	if cl.RegistrationPolicy == client.RegistrationPolicySignIn {
+		var err error
+
+		jkt, err = a.verifyDPoP(ctx, cl, in.DPoP)
+		if err != nil {
+			if in.IP != "" {
+				_ = a.registrations.Refund(ctx, in.IP)
+			}
+
+			return RegisterResult{}, err
+		}
+	}
+
 	info, err := reg.Register(ctx, RegistrationRequest{Username: in.Username, Password: in.Password, Contacts: in.Contacts, Extra: in.Extra})
 
 	// Only the owner of the verified address learns whether the account was new: a new account
@@ -220,7 +238,7 @@ func (a *Auth) Register(ctx context.Context, in RegisterRequest) (RegisterResult
 		AMR:      mergeAMR([]string{amrPassword}, info.AMR),
 	}
 
-	login, err := a.startSession(ctx, sess, cl, acrRequest{}, in.ReturnTo, in.BaseURL, in.MountPath)
+	login, err := a.startSession(ctx, sess, cl, jkt, acrRequest{}, in.ReturnTo, in.BaseURL, in.MountPath)
 	if err != nil {
 		return RegisterResult{}, err
 	}

@@ -88,11 +88,26 @@ issuer identifier (`aud`).
   `routes.MountPrefix` and/or `routes.TokenEndpoint`/`UserinfoEndpoint`/`JWKSEndpoint` so the
   discovery document still reports correct URLs.
 * `azugo.io/auth/middleware` - `middleware.Auth(a, ...)` resolves `ctx.User()` from the
-  `Authorization` header (and, with `middleware.Cookie()`, the session cookie); a resource
+  `Authorization` header (and, with `middleware.Cookie()`, the session cookie) and answers a
+  credential failing its DPoP binding with the RFC 9449 `WWW-Authenticate: DPoP` challenge;
+  `middleware.DPoP(a)` does just the latter for handlers that read the token themselves through
+  `a.ReadSessionToken(ctx)`, which extracts the credential without checking its binding
+  (`routes.Bind` mounts it; a `Handler` mounted manually needs it in front; an app that also
+  mounts `middleware.Auth` with `Use` calls `routes.Bind` first, since `Use` wraps only the routes
+  registered after it and two verifiers would see the single-use proof twice); a resource
   server serving specific clients should pass `middleware.Audience(...)` so tokens issued to
-  other clients are not accepted (`middleware.IntrospectionAudience(...)` for `Introspection`);
+  other clients are not accepted (`middleware.IntrospectionAudience(...)` for
+  `middleware.Introspection(a, ...)`, which checks DPoP proofs;
   `middleware.RequireAuth(...)` halts the chain for an anonymous request, optionally redirecting
   (`middleware.RedirectTo`, `middleware.ReturnTo`) instead of returning a JSON 401.
+
+A handler of your own that calls the services verifies the DPoP binding once per request the same
+way: `middleware.Auth` or `middleware.DPoP` in front and `a.ReadSessionToken(ctx)` inside, or no
+middleware and a single `a.ReadAccessToken(ctx)` inside, answering its error with `ctx.Error`. The
+token-consuming services (`IntrospectToken`, `UserInfoClaims`, `RequireStepUp`, ...) take the
+token as given, so one read straight from the `Authorization` header skips the check; the issuing
+ones (`Login`, `Refresh`, the grants, `Register`, `ResetPassword`) verify the proof passed as
+`DPoP`, read with `a.ReadDPoPProof(ctx)`.
 
 See `_examples/portal` for a complete server-side-rendered app wiring all of the above together.
 
@@ -129,6 +144,9 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 * `AUTH_CLOCK_SKEW` - Leeway allowed on external `id_token` time claims, inherited by every
   provider that does not set `clock_skew` itself, and on the `max_age` of an authorization
   request. Default `1m`; keep it under `2m`, and use `0` to validate strictly.
+* `AUTH_DPOP_PROOF_WINDOW` - How far a DPoP proof's `iat` may lie from the current time, past or
+  future. Default `1m`; keep it under `2m`. A client with the nonce DPoP policy is bounded by
+  `AUTH_DPOP_NONCE_WINDOW` (default `1m`) instead.
 * `AUTH_BASE_URL` - Public base URL used to resolve the issuer and default cookie path. Optional;
   derived from the request otherwise (needed behind a proxy or on a split origin).
 * `AUTH_ISSUER` - OIDC issuer identifier. Optional; derived from the request base URL when unset.

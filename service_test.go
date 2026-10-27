@@ -542,7 +542,7 @@ func thirdPartyAccessToken(t *testing.T, a *Auth, cookie string) string {
 	sess, err := a.sessions.Get(context.Background(), claims.SessionID)
 	qt.Assert(t, qt.IsNil(err))
 
-	at, _, err := a.issueAccessToken(context.Background(), sess, &client.Client{ID: "other"}, "openid", "", "", "")
+	at, _, err := a.issueAccessToken(context.Background(), sess, &client.Client{ID: "other"}, "openid", "", "", "", "")
 	qt.Assert(t, qt.IsNil(err))
 
 	return at

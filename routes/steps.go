@@ -2,9 +2,9 @@ package routes
 
 import (
 	"bytes"
-	"strings"
 
 	"azugo.io/auth"
+	"azugo.io/auth/dpop"
 
 	"azugo.io/azugo"
 	"azugo.io/core/http"
@@ -26,10 +26,10 @@ func returnTo(ctx *azugo.Context) string {
 }
 
 // sameOriginCookie refuses a request authenticated by the session cookie that a page of another
-// origin sent; a bearer token is sent deliberately and passes.
+// origin sent; a Bearer or DPoP token is sent deliberately and passes.
 func sameOriginCookie(next azugo.RequestHandler) azugo.RequestHandler {
 	return func(ctx *azugo.Context) {
-		if tok, ok := strings.CutPrefix(ctx.Header.Get(http.HeaderAuthorization), "Bearer "); (!ok || tok == "") && !sameOrigin(ctx) {
+		if tok, _ := dpop.Credential(ctx.Header.Get(http.HeaderAuthorization)); tok == "" && !sameOrigin(ctx) {
 			ctx.Error(auth.NewOAuthError(http.StatusForbidden, auth.ErrCodeAccessDenied, "cross-site request"))
 
 			return

@@ -55,6 +55,8 @@ type Session struct {
 	AuthACR string
 	// AuthMFA reports that the last authentication passed a second factor.
 	AuthMFA bool
+	// DPoPJKT is the DPoP key thumbprint the session's access tokens are bound to ("" = unbound).
+	DPoPJKT string
 	// Context carries application-defined selections bound to the session - the active tenant,
 	// the selected role(s), an accepted agreement version, etc.
 	Context   map[string]any

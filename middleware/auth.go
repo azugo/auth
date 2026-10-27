@@ -9,7 +9,6 @@ import (
 	"azugo.io/auth/token"
 
 	"azugo.io/azugo"
-	"azugo.io/core/http"
 )
 
 // AuthOption configures Auth.
@@ -56,7 +55,8 @@ func (o audience) apply(opts *authOptions) {
 	opts.audiences = o
 }
 
-// Auth resolves the current user from the Authorization if present.
+// Auth resolves the current user from the Authorization if present; a credential failing its
+// DPoP binding is answered with the RFC 9449 challenge.
 func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 	var o authOptions
 	for _, opt := range opts {
@@ -65,26 +65,25 @@ func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 
 	return func(next azugo.RequestHandler) azugo.RequestHandler {
 		return func(ctx *azugo.Context) {
-			tok, bearer := strings.CutPrefix(ctx.Header.Get(http.HeaderAuthorization), "Bearer ")
-			if !bearer {
-				tok = ""
-			}
+			tok, err := a.ReadAccessToken(ctx)
+			header := tok != ""
 
-			if tok == "" && o.useCookie {
-				tok = ctx.Cookie.Get(a.Config().CookieName)
-				bearer = false
+			if err == nil && tok == "" && o.useCookie {
+				tok = a.ReadSessionCookie(ctx)
 			}
 
 			// Opaque PASETO tokens validate through the session-store introspection, JWT
 			// bearer tokens by signature + revocation deny-list.
-			var (
-				info auth.UserInfo
-				err  error
-			)
+			var info auth.UserInfo
 
 			switch {
-			// API keys are bearer credentials only.
-			case o.useAPIKey && bearer && strings.HasPrefix(tok, "v4.local."):
+			case err != nil:
+				// A credential failing its DPoP binding is answered with the RFC 9449 challenge.
+				ctx.Error(err)
+
+				return
+			// API keys are Authorization header credentials only.
+			case o.useAPIKey && header && strings.HasPrefix(tok, "v4.local."):
 				info, err = a.IntrospectWithAPIKey(ctx, tok)
 			case strings.HasPrefix(tok, "v4.local."):
 				info, _, err = a.IntrospectToken(ctx, tok)

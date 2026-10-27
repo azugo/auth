@@ -3,11 +3,11 @@ package middleware
 import (
 	"net/url"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
 	"azugo.io/auth"
+	"azugo.io/auth/dpop"
 
 	"azugo.io/azugo"
 	"azugo.io/core/cache"
@@ -56,9 +56,11 @@ func NoIntrospectionCache() IntrospectionOption {
 	return IntrospectionCacheTTL(0)
 }
 
-// Introspection builds an Auth middleware for a detached resource server: opaque Bearer
-// tokens are validated by POSTing them to the auth server's RFC 7662 introspection endpoint.
-func Introspection(endpoint string, creds ClientCredentials, opts ...IntrospectionOption) azugo.RequestHandlerFunc {
+// Introspection builds an Auth middleware for a resource server: opaque Bearer and DPoP tokens are
+// validated by POSTing them to the auth server's RFC 7662 introspection endpoint, a DPoP-bound one
+// also by its proof through a, whose base URL, clock skew and proof replay list it shares; a
+// credential failing its DPoP binding is answered with the RFC 9449 challenge.
+func Introspection(a *auth.Auth, endpoint string, creds ClientCredentials, opts ...IntrospectionOption) azugo.RequestHandlerFunc {
 	o := introspectionOptions{cacheTTL: 30 * time.Second}
 	for _, opt := range opts {
 		opt.apply(&o)
@@ -66,53 +68,77 @@ func Introspection(endpoint string, creds ClientCredentials, opts ...Introspecti
 
 	var (
 		once    sync.Once
-		results cache.Instance[auth.UserInfo]
+		results cache.Instance[auth.IntrospectionResponse]
 	)
 
 	return func(next azugo.RequestHandler) azugo.RequestHandler {
 		return func(ctx *azugo.Context) {
-			tok, ok := strings.CutPrefix(ctx.Header.Get(http.HeaderAuthorization), "Bearer ")
-			if !ok || tok == "" {
+			tok, _ := dpop.Credential(ctx.Header.Get(http.HeaderAuthorization))
+			if tok == "" {
 				next(ctx)
 
 				return
 			}
 
-			if o.cacheTTL > 0 {
-				once.Do(func() {
-					results, _ = cache.Create[auth.UserInfo](ctx.App().Cache(), "auth:introspection", cache.MemoryCache)
+			once.Do(func() {
+				if o.cacheTTL > 0 {
+					results, _ = cache.Create[auth.IntrospectionResponse](ctx.App().Cache(), "auth:introspection", cache.MemoryCache)
+				}
+			})
+
+			// Only active responses are cached, in a cache shared by every instance, so the
+			// audience is checked below on hits and misses alike.
+			var res auth.IntrospectionResponse
+			if results != nil {
+				res, _ = results.Get(ctx, tok)
+			}
+
+			if !res.Active {
+				body, err := ctx.HTTPClient().PostForm(endpoint, url.Values{
+					"token":         {tok},
+					"client_id":     {creds.ClientID},
+					"client_secret": {creds.Secret},
 				})
+				if err != nil {
+					next(ctx)
+
+					return
+				}
+
+				if err := json.Unmarshal(body, &res); err != nil || !res.Active {
+					next(ctx)
+
+					return
+				}
 
 				if results != nil {
-					if info, err := results.Get(ctx, tok); err == nil && info.ID != "" {
-						ctx.SetUser(info.ToUser())
-						next(ctx)
+					// Cache for min(remaining token lifetime, the configured cap).
+					ttl := o.cacheTTL
+					if res.ExpiresAt > 0 {
+						if until := time.Until(time.Unix(res.ExpiresAt, 0)); until < ttl {
+							ttl = until
+						}
+					}
 
-						return
+					if ttl > 0 {
+						_ = results.Set(ctx, tok, res, cache.TTL[auth.IntrospectionResponse](ttl))
 					}
 				}
 			}
 
-			body, err := ctx.HTTPClient().PostForm(endpoint, url.Values{
-				"token":         {tok},
-				"client_id":     {creds.ClientID},
-				"client_secret": {creds.Secret},
-			})
-			if err != nil {
-				next(ctx)
-
-				return
-			}
-
-			var res auth.IntrospectionResponse
-			if err := json.Unmarshal(body, &res); err != nil || !res.Active {
-				next(ctx)
-
-				return
-			}
-
 			if len(o.audiences) > 0 && !slices.Contains(o.audiences, res.Audience) && !slices.Contains(o.audiences, res.ClientID) {
 				next(ctx)
+
+				return
+			}
+
+			var jkt string
+			if res.Confirmation != nil {
+				jkt = res.Confirmation.JKT
+			}
+
+			if err := a.VerifyDPoPBinding(ctx, tok, jkt); err != nil {
+				ctx.Error(err)
 
 				return
 			}
@@ -124,20 +150,6 @@ func Introspection(endpoint string, creds ClientCredentials, opts ...Introspecti
 				ClientID: res.ClientID,
 			}
 			ctx.SetUser(info.ToUser())
-
-			if results != nil {
-				// Cache for min(remaining token lifetime, the configured cap).
-				ttl := o.cacheTTL
-				if res.ExpiresAt > 0 {
-					if until := time.Until(time.Unix(res.ExpiresAt, 0)); until < ttl {
-						ttl = until
-					}
-				}
-
-				if ttl > 0 {
-					_ = results.Set(ctx, tok, info, cache.TTL[auth.UserInfo](ttl))
-				}
-			}
 
 			next(ctx)
 		}

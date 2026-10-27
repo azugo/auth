@@ -56,8 +56,15 @@ type Configuration struct {
 	ContactVerificationTTL time.Duration `mapstructure:"contact_verification_ttl"`
 	// ClockSkew is the leeway allowed on external id_token time claims, inherited by every
 	// provider that does not set its own, and on the max_age of an authorization request.
-	// Default 1m; keep it under 2m.
+	// Default 1m when loaded from config; 0 validates strictly. Keep it under 2m.
 	ClockSkew time.Duration `mapstructure:"clock_skew"`
+	// DPoPProofWindow is how far a DPoP proof's iat may lie from the current time, past or
+	// future. Default 1m; keep it under 2m.
+	DPoPProofWindow time.Duration `mapstructure:"dpop_proof_window"`
+	// DPoPNonceWindow is how long a DPoP server nonce stays current; the previous one is accepted
+	// too. It bounds the proof age of a client with the nonce DPoP policy instead of DPoPProofWindow.
+	// Default 1m.
+	DPoPNonceWindow time.Duration `mapstructure:"dpop_nonce_window"`
 	// BaseURL pins the public base URL used to resolve the issuer and the default cookie
 	// path instead of deriving them from the incoming request (proxies, split origin).
 	BaseURL string `mapstructure:"base_url" validate:"omitempty,url"`
@@ -220,6 +227,8 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	v.SetDefault(prefix+".password_reset_ttl", time.Hour)
 	v.SetDefault(prefix+".contact_verification_ttl", 24*time.Hour)
 	v.SetDefault(prefix+".clock_skew", time.Minute)
+	v.SetDefault(prefix+".dpop_proof_window", time.Minute)
+	v.SetDefault(prefix+".dpop_nonce_window", time.Minute)
 	v.SetDefault(prefix+".throttle.enabled", true)
 	v.SetDefault(prefix+".throttle.max_attempts", 5)
 	v.SetDefault(prefix+".throttle.window", 15*time.Minute)
@@ -247,6 +256,8 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".password_reset_ttl", "AUTH_PASSWORD_RESET_TTL")
 	_ = v.BindEnv(prefix+".contact_verification_ttl", "AUTH_CONTACT_VERIFICATION_TTL")
 	_ = v.BindEnv(prefix+".clock_skew", "AUTH_CLOCK_SKEW")
+	_ = v.BindEnv(prefix+".dpop_proof_window", "AUTH_DPOP_PROOF_WINDOW")
+	_ = v.BindEnv(prefix+".dpop_nonce_window", "AUTH_DPOP_NONCE_WINDOW")
 	_ = v.BindEnv(prefix+".base_url", "AUTH_BASE_URL")
 	_ = v.BindEnv(prefix+".issuer", "AUTH_ISSUER")
 	_ = v.BindEnv(prefix+".throttle.enabled", "AUTH_THROTTLE_ENABLED")

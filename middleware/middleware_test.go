@@ -34,18 +34,26 @@ func (s stubUsers) GetUser(_ context.Context, id string) (auth.UserInfo, error) 
 func newTestAuth(t *testing.T, cl *client.Client, opts ...auth.Option) *auth.Auth {
 	t.Helper()
 
+	return newTestAuthWithConfig(t, testConfig(), cl, opts...)
+}
+
+func testConfig() *auth.Configuration {
+	return &auth.Configuration{
+		Secret:   "0123456789abcdef0123456789abcdef",
+		SameSite: "strict",
+		Issuer:   "https://issuer.example",
+	}
+}
+
+func newTestAuthWithConfig(t *testing.T, cfg *auth.Configuration, cl *client.Client, opts ...auth.Option) *auth.Auth {
+	t.Helper()
+
 	app := core.New()
 
 	conf := config.New()
 	qt.Assert(t, qt.IsNil(conf.Load(nil, conf, string(app.Env()))))
 	app.SetConfig(nil, conf)
 	t.Cleanup(app.Stop)
-
-	cfg := &auth.Configuration{
-		Secret:   "0123456789abcdef0123456789abcdef",
-		SameSite: "strict",
-		Issuer:   "https://issuer.example",
-	}
 
 	users := stubUsers{info: auth.UserInfo{ID: "u1", Name: "Alice", Scope: "openid"}}
 

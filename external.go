@@ -557,7 +557,7 @@ func (a *Auth) finalizeExternalLogin(ctx context.Context, st externalState, base
 		AMR:          info.AMR,
 	}
 
-	res, err := a.startSession(ctx, sess, cl, st.ACR, st.ReturnTo, baseURL, mountPath)
+	res, err := a.startSession(ctx, sess, cl, "", st.ACR, st.ReturnTo, baseURL, mountPath)
 	if err != nil {
 		return LoginResult{}, err
 	}

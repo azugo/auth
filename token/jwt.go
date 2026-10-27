@@ -104,6 +104,8 @@ type AccessTokenClaims struct {
 	ACR       string
 	AMR       []string
 	GrantType string
+	// JKT is the DPoP key thumbprint the token is bound to (cnf.jkt).
+	JKT string
 }
 
 // SignAccessToken mints a signed JWT access token using signingKey.
@@ -128,6 +130,10 @@ func SignAccessToken(signingKey SigningKey, claims AccessTokenClaims) (string, e
 
 	if claims.GrantType != "" {
 		m["gty"] = claims.GrantType
+	}
+
+	if claims.JKT != "" {
+		m["cnf"] = map[string]any{"jkt": claims.JKT}
 	}
 
 	return sign(signingKey, accessTokenType, m)
@@ -179,6 +185,10 @@ func VerifyAccessToken(set *KeySet, tok string) (AccessTokenClaims, error) {
 				out.AMR = append(out.AMR, s)
 			}
 		}
+	}
+
+	if cnf, ok := claims["cnf"].(map[string]any); ok {
+		out.JKT, _ = cnf["jkt"].(string)
 	}
 
 	out.TokenID, _ = claims["jti"].(string)

@@ -34,8 +34,6 @@ var (
 
 // Confirmation carries the DPoP JWK thumbprint (cnf.jkt, RFC 9449 §6.1). Present only when the
 // token was issued with a DPoP proof.
-//
-// TODO: not implemented yet.
 type Confirmation struct {
 	JKT string `json:"jkt,omitempty"` // base64url(SHA-256(DPoP public key JWK))
 }

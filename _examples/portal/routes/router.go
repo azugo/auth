@@ -24,6 +24,8 @@ func Init(a *portal.App) error {
 
 	a.Get("/healthz", healthz.Handler())
 
+	routes.Bind(a, "/auth", a.Auth())
+
 	// Pages sign in with the session cookie; API keys are accepted as bearer tokens.
 	a.Use(middleware.Auth(a.Auth(), middleware.Cookie(), middleware.APIKey()))
 
@@ -31,7 +33,7 @@ func Init(a *portal.App) error {
 	a.Get("/error", r.errorRedirected)
 	a.Get("/login", r.loginForm)
 	a.Post("/login", r.login)
-	a.Get("/mfa", routes.SecurityHeaders(r.mfaPage))
+	a.Get("/mfa", middleware.SecurityHeaders(r.mfaPage))
 	a.Post("/mfa/verify", r.mfaVerify)
 	a.Post("/mfa/begin", r.mfaBegin)
 	a.Post("/mfa/resend", r.mfaResend)
@@ -41,8 +43,6 @@ func Init(a *portal.App) error {
 	a.Post("/rules", r.acceptRules)
 	a.Post("/logout", r.logout)
 
-	routes.Bind(a, "/auth", a.Auth())
-
 	sessions := a.Group("/sessions")
 	sessions.Use(middleware.RequireAuth(middleware.RedirectTo("/login"), middleware.ReturnTo()))
 	sessions.Get("", r.sessionsPage)
@@ -50,7 +50,7 @@ func Init(a *portal.App) error {
 
 	security := a.Group("/security")
 	security.Use(middleware.RequireAuth(middleware.RedirectTo("/login"), middleware.ReturnTo()))
-	security.Use(routes.SecurityHeaders)
+	security.Use(middleware.SecurityHeaders)
 	security.Get("", r.securityPage)
 	security.Post("/mfa/{method}/enroll", r.mfaEnroll)
 	security.Post("/mfa/{method}/finish", r.mfaEnrollFinish)
@@ -58,7 +58,7 @@ func Init(a *portal.App) error {
 
 	apikeys := a.Group("/apikeys")
 	apikeys.Use(middleware.RequireAuth(middleware.RedirectTo("/login"), middleware.ReturnTo()))
-	apikeys.Use(routes.SecurityHeaders)
+	apikeys.Use(middleware.SecurityHeaders)
 	apikeys.Get("", r.apiKeysPage)
 	apikeys.Post("", r.createAPIKey)
 	apikeys.Post("/{id}/rotate", r.rotateAPIKey)

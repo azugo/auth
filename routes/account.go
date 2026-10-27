@@ -175,12 +175,20 @@ func (h *Handler) register(ctx *azugo.Context) {
 		return
 	}
 
+	proof, err := h.auth.ReadDPoPProof(ctx)
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	res, err := h.auth.Register(ctx, auth.RegisterRequest{
 		Credentials: creds,
 		Username:    in.Username,
 		Contacts:    in.Contacts,
 		Password:    in.Password,
 		Extra:       in.Extra,
+		DPoP:        proof,
 		ReturnTo:    in.ReturnTo,
 		BaseURL:     ctx.BaseURL(),
 		MountPath:   h.mountPrefix,
@@ -316,10 +324,18 @@ func (h *Handler) resetPassword(ctx *azugo.Context) {
 		return
 	}
 
+	proof, err := h.auth.ReadDPoPProof(ctx)
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	res, err := h.auth.ResetPassword(ctx, auth.PasswordResetConfirmRequest{
 		Token:       in.resetToken(ctx),
 		Response:    in.Response,
 		NewPassword: in.NewPassword,
+		DPoP:        proof,
 		ReturnTo:    in.ReturnTo,
 		BaseURL:     ctx.BaseURL(),
 		MountPath:   h.mountPrefix,

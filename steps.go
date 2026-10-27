@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"maps"
@@ -163,6 +164,8 @@ type pendingState struct {
 	Recreate bool
 	// SwitchedBy is the credential that asked for the switch, retired once it applies.
 	SwitchedBy string
+	// DPoPJKT is the proof key presented at login, binding the tokens issued once the steps resolve.
+	DPoPJKT string
 }
 
 // mfaEnrollment is the driver state of an in-progress enrollment.
@@ -419,7 +422,11 @@ func evaluateGates[S LoginStep](ctx context.Context, a *Auth, sess *session.Sess
 
 // startSession resolves the login steps for a freshly authenticated sess, persists it and
 // returns the final credentials when active or a step token when pending.
-func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *client.Client, req acrRequest, returnTo string, baseURL, mountPath string) (LoginResult, error) {
+func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *client.Client, jkt string, req acrRequest, returnTo string, baseURL, mountPath string) (LoginResult, error) {
+	if cl.DPoPRequired() {
+		sess.DPoPJKT = jkt
+	}
+
 	var info UserInfo
 
 	st, err := a.evaluateSteps(ctx, sess, &info, cl, req, nil)
@@ -447,10 +454,11 @@ func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *clie
 	}
 
 	if sess.Status == session.StatusActive {
-		return a.buildLoginResult(ctx, sess, cl, returnTo, cookie, baseURL, mountPath)
+		return a.buildLoginResult(ctx, sess, cl, cmp.Or(sess.DPoPJKT, jkt), returnTo, cookie, baseURL, mountPath)
 	}
 
 	st.TokenIDs = append(st.TokenIDs, jti)
+	st.DPoPJKT = jkt
 
 	prompt, err := a.promptPending(ctx, sess, &info, cl, &st)
 	if err != nil {
@@ -466,6 +474,7 @@ func (a *Auth) pendingLoginResult(ctx context.Context, sess *session.Session, cl
 	res.Status = sess.Status
 	res.ACR = sess.ACR
 	res.AMR = sess.AMR
+	res.DPoPNonce = a.clientDPoPNonce(cl)
 
 	if cookie != "" {
 		res.Cookie = a.cookieDirective(cookie, time.Until(sess.ExpiresAt), baseURL, mountPath)
@@ -854,6 +863,9 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
+	st.DPoPJKT = sc.state.DPoPJKT
+	jkt := cmp.Or(sess.DPoPJKT, sc.state.DPoPJKT)
+
 	now := time.Now()
 	sess.LastSeen = now
 
@@ -904,7 +916,7 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 			return LoginResult{}, err
 		}
 
-		return a.buildLoginResult(ctx, sess, sc.client, returnTo, cookie, baseURL, mountPath)
+		return a.buildLoginResult(ctx, sess, sc.client, jkt, returnTo, cookie, baseURL, mountPath)
 	}
 
 	// A step may have held the login before its level was known, so it is scored once complete.
@@ -930,7 +942,7 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 
 	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: sess.UserID, ClientID: sess.ClientID, Detail: map[string]any{"step": "completed"}})
 
-	return a.buildLoginResult(ctx, sess, sc.client, returnTo, cookie, baseURL, mountPath)
+	return a.buildLoginResult(ctx, sess, sc.client, jkt, returnTo, cookie, baseURL, mountPath)
 }
 
 // promptStep fills the pending_step prompt on login result.
@@ -1146,7 +1158,7 @@ func (a *Auth) SwitchSession(ctx context.Context, in SwitchSessionRequest) (Logi
 		return LoginResult{}, err
 	}
 
-	return a.buildLoginResult(ctx, &sess, sc.client, in.ReturnTo, cookie, in.BaseURL, in.MountPath)
+	return a.buildLoginResult(ctx, &sess, sc.client, sess.DPoPJKT, in.ReturnTo, cookie, in.BaseURL, in.MountPath)
 }
 
 // commitSession stores sess, creating it when it has no ID yet and revoking the session it

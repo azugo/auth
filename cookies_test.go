@@ -3,6 +3,8 @@ package auth
 import (
 	"testing"
 
+	"azugo.io/auth/internal/dpoptest"
+
 	"azugo.io/azugo"
 	"azugo.io/core/http"
 	"github.com/go-quicktest/qt"
@@ -98,7 +100,8 @@ func TestReadSessionTokenPrefersBearer(t *testing.T) {
 }
 
 func TestReadSessionTokenFallsBackToCookie(t *testing.T) {
-	a := &Auth{config: &Configuration{CookieName: "session"}}
+	a := newGrantsTestAuth(t, nil, nil, portalClient())
+	login := dpopLogin(t, a, dpoptest.NewKey(t))
 
 	app := azugo.NewTestApp()
 	app.Start(t)
@@ -109,13 +112,21 @@ func TestReadSessionTokenFallsBackToCookie(t *testing.T) {
 	})
 
 	tc := app.TestClient()
-	resp, err := tc.Get("/", tc.WithCookie("session", "from-cookie"))
-	defer fasthttp.ReleaseResponse(resp)
-	qt.Assert(t, qt.IsNil(err))
 
-	body, err := resp.BodyUncompressed()
-	qt.Assert(t, qt.IsNil(err))
-	qt.Check(t, qt.Equals(string(body), "from-cookie"))
+	// Only a session cookie is read from the cookie; a bound access token there is no bearer token.
+	for name, tt := range map[string]struct{ cookie, want string }{
+		"session cookie": {login.Cookie.Value, login.Cookie.Value},
+		"bound token":    {login.AccessToken, ""},
+		"garbage":        {"from-cookie", ""},
+	} {
+		resp, err := tc.Get("/", tc.WithCookie(a.config.CookieName, tt.cookie))
+		qt.Assert(t, qt.IsNil(err))
+
+		body, err := resp.BodyUncompressed()
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.Equals(string(body), tt.want), qt.Commentf(name))
+		fasthttp.ReleaseResponse(resp)
+	}
 }
 
 func TestReadSessionTokenEmpty(t *testing.T) {

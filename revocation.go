@@ -138,6 +138,8 @@ type IntrospectionResponse struct {
 	ExpiresAt int64  `json:"exp,omitempty"`
 	IssuedAt  int64  `json:"iat,omitempty"`
 	SessionID string `json:"sid,omitempty"`
+	// Confirmation is the DPoP key binding of the token (RFC 9449 §6.2).
+	Confirmation *token.Confirmation `json:"cnf,omitempty"`
 }
 
 // Introspect implements RFC 7662 for confidential clients: opaque PASETO tokens are validated
@@ -168,18 +170,24 @@ func (a *Auth) Introspect(ctx context.Context, in IntrospectRequest) (Introspect
 			return IntrospectionResponse{}, nil
 		}
 
+		var jkt string
+		if claims.Confirmation != nil {
+			jkt = claims.Confirmation.JKT
+		}
+
 		return IntrospectionResponse{
-			Active:    true,
-			Scope:     cmp.Or(claims.Scope, sess.Scope),
-			ClientID:  cmp.Or(claims.ClientID, sess.ClientID),
-			Username:  info.Name,
-			TokenType: tokenTypeBearer,
-			Subject:   sess.UserID,
-			Audience:  cmp.Or(claims.ClientID, sess.ClientID),
-			Issuer:    a.Issuer.URL(in.BaseURL, in.MountPath),
-			ExpiresAt: claims.ExpiresAt,
-			IssuedAt:  claims.IssuedAt,
-			SessionID: sess.ID,
+			Active:       true,
+			Scope:        cmp.Or(claims.Scope, sess.Scope),
+			ClientID:     cmp.Or(claims.ClientID, sess.ClientID),
+			Username:     info.Name,
+			TokenType:    tokenType(jkt),
+			Confirmation: confirmation(jkt),
+			Subject:      sess.UserID,
+			Audience:     cmp.Or(claims.ClientID, sess.ClientID),
+			Issuer:       a.Issuer.URL(in.BaseURL, in.MountPath),
+			ExpiresAt:    claims.ExpiresAt,
+			IssuedAt:     claims.IssuedAt,
+			SessionID:    sess.ID,
 		}, nil
 	}
 
@@ -208,15 +216,16 @@ func (a *Auth) Introspect(ctx context.Context, in IntrospectRequest) (Introspect
 	}
 
 	return IntrospectionResponse{
-		Active:    true,
-		Scope:     claims.Scope,
-		ClientID:  claims.ClientID,
-		TokenType: tokenTypeBearer,
-		Subject:   claims.Subject,
-		Audience:  claims.ClientID,
-		Issuer:    claims.Issuer,
-		ExpiresAt: claims.ExpiresAt,
-		IssuedAt:  claims.IssuedAt,
+		Active:       true,
+		Scope:        claims.Scope,
+		ClientID:     claims.ClientID,
+		TokenType:    tokenType(claims.JKT),
+		Subject:      claims.Subject,
+		Audience:     claims.ClientID,
+		Issuer:       claims.Issuer,
+		ExpiresAt:    claims.ExpiresAt,
+		IssuedAt:     claims.IssuedAt,
+		Confirmation: confirmation(claims.JKT),
 	}, nil
 }
 

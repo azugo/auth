@@ -3,6 +3,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"azugo.io/auth/code"
 	"azugo.io/auth/contact"
 	"azugo.io/auth/contract"
+	"azugo.io/auth/dpop"
 	"azugo.io/auth/event"
 	"azugo.io/auth/jti"
 	"azugo.io/auth/mfa"
@@ -93,7 +95,11 @@ type Auth struct {
 	denied jti.DenyList
 	// assertions deny-lists already-seen client_assertion JTIs (replay defence).
 	assertions jti.DenyList
-	throttle   throttle.Throttle
+	// proofs deny-lists already-seen DPoP proof JTIs (replay defence).
+	proofs jti.DenyList
+	// nonces issues and checks the DPoP server nonces, keyed by a derivation of the secret.
+	nonces   dpop.Nonces
+	throttle throttle.Throttle
 	// extstart bounds how often one caller may start an external IdP round-trip
 	extstart throttle.Throttle
 	// registrations bounds how many accounts one caller may register
@@ -352,6 +358,16 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 	}
 
 	a.assertions = assertions
+
+	proofs, err := jti.NewCacheDenyList(app.Cache(), "auth:dpop:seen")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DPoP proof replay list: %w", err)
+	}
+
+	a.proofs = proofs
+
+	nonceKey := sha256.Sum256([]byte("dpop-nonce:" + config.Secret))
+	a.nonces = dpop.Nonces{Key: nonceKey[:], Window: config.DPoPNonceWindow}
 
 	if a.throttle == nil {
 		t, err := throttle.New(app.Cache(), &config.Throttle)
@@ -652,6 +668,14 @@ func setDefaults(cfg *Configuration) {
 
 	if cfg.SessionTTL == 0 {
 		cfg.SessionTTL = 8 * time.Hour
+	}
+
+	if cfg.DPoPProofWindow <= 0 {
+		cfg.DPoPProofWindow = time.Minute
+	}
+
+	if cfg.DPoPNonceWindow <= 0 {
+		cfg.DPoPNonceWindow = time.Minute
 	}
 
 	if cfg.CodeTTL == 0 {

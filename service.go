@@ -37,6 +37,10 @@ type LoginResult struct {
 	Status      session.Status
 	Cookie      *CookieDirective
 	AccessToken string
+	// TokenType is the token_type of AccessToken: DPoP when bound to the session's DPoP key.
+	TokenType string
+	// DPoPNonce is the server nonce for the client's next DPoP proof, sent as the DPoP-Nonce header.
+	DPoPNonce string
 	// IDToken is set only for a client.ResponseModeJSON client whose granted scope contains
 	// "openid".
 	IDToken   string
@@ -66,7 +70,9 @@ type LoginRequest struct {
 	// ACRValues is the space-separated voluntary acr_values request.
 	ACRValues string
 	// Claims is the raw OIDC claims parameter; its id_token.acr entry may be essential.
-	Claims    string
+	Claims string
+	// DPoP is the proof binding the session's access tokens to the client's key.
+	DPoP      *DPoPProof
 	ReturnTo  string
 	BaseURL   string
 	MountPath string
@@ -76,7 +82,9 @@ type LoginRequest struct {
 
 // RefreshRequest carries the presented refresh token and the request-derived values.
 type RefreshRequest struct {
-	Token     string
+	Token string
+	// DPoP is the proof by the key the session is bound to, or binding an unbound session to it.
+	DPoP      *DPoPProof
 	ReturnTo  string
 	BaseURL   string
 	MountPath string
@@ -124,6 +132,14 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		return LoginResult{}, err
 	}
 
+	// The proof is checked under the throttle; a failing one is no guess.
+	jkt, err := a.verifyDPoP(ctx, cl, in.DPoP)
+	if err != nil {
+		a.refundThrottle(ctx, keys)
+
+		return LoginResult{}, err
+	}
+
 	info, err := passwords.Authenticate(ctx, in.Username, in.Password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
@@ -148,7 +164,7 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 		AMR:      mergeAMR([]string{amrPassword}, info.AMR),
 	}
 
-	return a.startSession(ctx, sess, cl, parseACRRequest(in.ACRValues, in.Claims), in.ReturnTo, in.BaseURL, in.MountPath)
+	return a.startSession(ctx, sess, cl, jkt, parseACRRequest(in.ACRValues, in.Claims), in.ReturnTo, in.BaseURL, in.MountPath)
 }
 
 // Refresh performs the portal's silent re-authentication.
@@ -176,6 +192,16 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
+	// A bound session refreshes only with a proof by its key.
+	jkt, err := a.verifyDPoP(ctx, cl, in.DPoP)
+	if err != nil {
+		return LoginResult{}, err
+	}
+
+	if sess.DPoPJKT != "" && jkt != sess.DPoPJKT {
+		return LoginResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidDPoPProof, "DPoP proof key does not match the session")
+	}
+
 	jti, err := newJTI()
 	if err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(err)
@@ -195,6 +221,16 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
 	}
 
+	// Only a client that requires DPoP has its unbound session bound by the first proof; for any
+	// other the proof binds just the access token, so a proof-less refresh keeps working.
+	if sess.DPoPJKT == "" && jkt != "" && cl.DPoPRequired() {
+		sess.DPoPJKT = jkt
+
+		if err := a.sessions.Update(ctx, sess); err != nil {
+			return LoginResult{}, NewOAuthErrorFrom(err)
+		}
+	}
+
 	_ = a.sessions.Touch(ctx, sess.ID)
 
 	cookie, err := a.codec.Encrypt(token.AccessClaims{
@@ -208,7 +244,7 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
-	return a.buildLoginResult(ctx, sess, cl, in.ReturnTo, cookie, in.BaseURL, in.MountPath)
+	return a.buildLoginResult(ctx, sess, cl, cmp.Or(sess.DPoPJKT, jkt), in.ReturnTo, cookie, in.BaseURL, in.MountPath)
 }
 
 // Logout is the authoritative server-side logout.
@@ -462,23 +498,31 @@ func (a *Auth) cookieDirective(value string, maxAge time.Duration, baseURL, moun
 	}
 }
 
-// buildLoginResult assembles the session-cookie directive based on client mode and configuration.
-func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, returnTo, cookie string, baseURL, mountPath string) (LoginResult, error) {
+// buildLoginResult assembles the session-cookie directive based on client mode and configuration,
+// with the access token bound to the DPoP key thumbprint jkt when set.
+func (a *Auth) buildLoginResult(ctx context.Context, sess *session.Session, cl *client.Client, jkt, returnTo, cookie string, baseURL, mountPath string) (LoginResult, error) {
 	res := LoginResult{
-		Status: sess.Status,
-		Cookie: a.cookieDirective(cookie, a.config.SessionTTL, baseURL, mountPath),
-		ACR:    sess.ACR,
-		AMR:    sess.AMR,
+		Status:    sess.Status,
+		Cookie:    a.cookieDirective(cookie, a.config.SessionTTL, baseURL, mountPath),
+		ACR:       sess.ACR,
+		AMR:       sess.AMR,
+		DPoPNonce: a.clientDPoPNonce(cl),
 	}
 
 	switch cl.ResponseMode {
 	case client.ResponseModeJSON:
-		at, _, err := a.issueAccessToken(ctx, sess, cl, sess.Scope, "", baseURL, mountPath)
+		// A session not bound yet gets its tokens from a refresh with a proof.
+		if cl.DPoPRequired() && jkt == "" {
+			break
+		}
+
+		at, _, err := a.issueAccessToken(ctx, sess, cl, sess.Scope, "", jkt, baseURL, mountPath)
 		if err != nil {
 			return LoginResult{}, err
 		}
 
 		res.AccessToken = at
+		res.TokenType = tokenType(jkt)
 		res.ExpiresIn = int(a.config.AccessTokenTTL.Seconds())
 
 		if a.keys != nil && scopeContains(sess.Scope, ScopeOpenID) {

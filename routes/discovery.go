@@ -5,6 +5,7 @@ import (
 
 	"azugo.io/auth"
 	"azugo.io/auth/client"
+	"azugo.io/auth/dpop"
 
 	"azugo.io/azugo"
 )
@@ -56,6 +57,7 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 		IDTokenSigningAlgValuesSupported          []string `json:"id_token_signing_alg_values_supported,omitempty"`
 		SubjectTypesSupported                     []string `json:"subject_types_supported"`
 		ACRValuesSupported                        []string `json:"acr_values_supported,omitempty"`
+		DPoPSigningAlgValuesSupported             []string `json:"dpop_signing_alg_values_supported"`
 	}{
 		Issuer: issuer,
 		// Endpoints
@@ -73,6 +75,7 @@ func (h *Handler) discovery(ctx *azugo.Context) {
 		TokenEndpointAuthMethodsSupported:         append([]string{string(client.TokenEndpointAuthNone)}, confidentialAuthMethods...),
 		IntrospectionEndpointAuthMethodsSupported: confidentialAuthMethods,
 		SubjectTypesSupported:                     []string{"public"},
+		DPoPSigningAlgValuesSupported:             dpop.Algorithms,
 	}
 
 	for _, lvl := range h.auth.Config().ACRLevels {
