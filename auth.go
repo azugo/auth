@@ -34,6 +34,8 @@ import (
 type (
 	// UserInfo is the user record returned by a UserProvider.
 	UserInfo = contract.UserInfo
+	// AuthorizationDetail is one RFC 9396 authorization detail.
+	AuthorizationDetail = contract.AuthorizationDetail
 	// Contact is one of a user's addresses on a channel.
 	Contact = contract.Contact
 	// ContactManager is an optional UserProvider extension for managing an account's contacts.

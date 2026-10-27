@@ -4,10 +4,13 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"azugo.io/auth/contract"
 
 	"azugo.io/core/paginator"
 )
@@ -25,7 +28,28 @@ func clone(k *Key) *Key {
 	c.RevokedAt = cloneTime(k.RevokedAt)
 	c.RotatedAt = cloneTime(k.RotatedAt)
 
+	if k.Subject != nil {
+		c.Subject = &contract.AuthorizationDetail{
+			Type:       strings.Clone(k.Subject.Type),
+			Identifier: strings.Clone(k.Subject.Identifier),
+			Actions:    cloneStrings(k.Subject.Actions),
+		}
+	}
+
 	return &c
+}
+
+func cloneStrings(ss []string) []string {
+	if ss == nil {
+		return nil
+	}
+
+	c := make([]string, len(ss))
+	for i, s := range ss {
+		c[i] = strings.Clone(s)
+	}
+
+	return c
 }
 
 func cloneTime(t *time.Time) *time.Time {
@@ -76,10 +100,32 @@ func (m *memoryStore) Create(_ context.Context, k *Key) error {
 		return errors.New("api key already exists")
 	}
 
+	if k.Subject != nil {
+		for _, cur := range m.keys {
+			if cur.ActsFor(k.Subject.Type, k.Subject.Identifier) && cur.RevokedAt == nil {
+				return fmt.Errorf("%w: subject %s:%s already has a key", ErrInvalidKey, k.Subject.Type, k.Subject.Identifier)
+			}
+		}
+	}
+
 	cp := clone(k)
 	m.keys[cp.ID] = cp
 
 	return nil
+}
+
+// GetBySubject returns the unrevoked key of the object of type named by identifier.
+func (m *memoryStore) GetBySubject(_ context.Context, typ, identifier string) (*Key, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, k := range m.keys {
+		if k.ActsFor(typ, identifier) && k.RevokedAt == nil {
+			return clone(k), nil
+		}
+	}
+
+	return nil, ErrNotFound
 }
 
 // Revoke marks the key as revoked.

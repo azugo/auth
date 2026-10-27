@@ -9,6 +9,7 @@ import (
 
 	"azugo.io/auth/apikey"
 	"azugo.io/auth/client"
+	"azugo.io/auth/contract"
 	"azugo.io/auth/event"
 	"azugo.io/auth/mfa"
 	"azugo.io/auth/mfa/totp"
@@ -680,4 +681,131 @@ func TestAPIKeyFollowsItsClient(t *testing.T) {
 
 	_, err = a.IntrospectWithAPIKey(context.Background(), res.Token)
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
+}
+
+func TestSubjectAPIKeyActsForItsObject(t *testing.T) {
+	var created []event.Event
+
+	a, tok := newAPIKeyTestAuth(t, Events(event.SinkFunc(func(_ context.Context, e event.Event) {
+		if e.Type == event.TypeAPIKeyCreated {
+			created = append(created, e)
+		}
+	})))
+
+	_, err := a.SubjectAPIKey(context.Background(), "deployment", "12345")
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	// Actions come out trimmed, named, unique and sorted; one element stays one action.
+	res, err := a.IssueSubjectAPIKey(context.Background(), SubjectAPIKeyRequest{Type: "deployment", Identifier: "12345", Actions: []string{"read", " deploy ", "", "deploy", "deploy prod"}, ClientID: "spa", IP: "192.0.2.1"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.DeepEquals(res.Key.Subject, &AuthorizationDetail{Type: "deployment", Identifier: "12345", Actions: []string{"deploy", "deploy prod", "read"}}))
+	qt.Check(t, qt.Equals(res.Key.Name, "deployment:12345"))
+	qt.Check(t, qt.Equals(res.Key.UserID, ""))
+
+	// The principal is the object itself: no user ID, no scope, just its authorization details.
+	info, key, err := a.ValidateAPIKey(context.Background(), res.Token)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(info.ID, ""))
+	qt.Check(t, qt.Equals(info.Scope, ""))
+	qt.Check(t, qt.Equals(info.ClientID, "spa"))
+	qt.Check(t, qt.Equals(key.ID, res.Key.ID))
+
+	u := info.ToUser()
+	qt.Check(t, qt.IsTrue(u.Authorized()))
+	qt.Check(t, qt.Equals(u.ID(), ""))
+
+	details := AuthorizationDetails(u)
+	qt.Check(t, qt.IsTrue(details.Allows("deployment", "12345", "deploy")))
+	qt.Check(t, qt.IsFalse(details.Allows("deployment", "12345", "delete")))
+	qt.Check(t, qt.IsTrue(details.Allows("deployment", "12345", "deploy prod")))
+	qt.Check(t, qt.IsFalse(details.Allows("deployment", "12345", "prod")))
+	qt.Check(t, qt.IsFalse(details.Allows("deployment", "1", "deploy")))
+	qt.Check(t, qt.IsFalse(details.Allows("project", "12345", "deploy")))
+	qt.Check(t, qt.IsFalse(details.Allows("deployment", "12345", "")))
+	qt.Check(t, qt.IsTrue(details.ActsFor("deployment", "12345")))
+	qt.Check(t, qt.IsFalse(details.ActsFor("deployment", "1")))
+	qt.Check(t, qt.IsFalse(details.ActsFor("project", "12345")))
+
+	// An empty action stored by another store still matches nothing.
+	qt.Check(t, qt.IsFalse(contract.AuthorizationDetails{{Type: "deployment", Identifier: "12345", Actions: []string{""}}}.Allows("deployment", "12345", "")))
+
+	qt.Assert(t, qt.HasLen(created, 1))
+	qt.Check(t, qt.Equals(created[0].UserID, ""))
+
+	found, err := a.SubjectAPIKey(context.Background(), "deployment", "12345")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(found.ID, res.Key.ID))
+
+	// One unrevoked key per object.
+	_, err = a.IssueSubjectAPIKey(context.Background(), SubjectAPIKeyRequest{Type: "deployment", Identifier: "12345", ClientID: "spa"})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest))
+
+	// Self-service neither sees nor touches it.
+	own, _, err := a.ListAPIKeys(context.Background(), tok, nil, nil)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.HasLen(own, 0))
+	qt.Check(t, qt.Equals(oauthErrorCode(t, a.RevokeAPIKey(context.Background(), APIKeyRequest{Token: tok, ID: res.Key.ID})), ErrCodeInvalidRequest))
+
+	rotated, err := a.RotateSubjectAPIKey(context.Background(), "deployment", "12345", "")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(rotated.Key.ID, res.Key.ID))
+
+	_, _, err = a.ValidateAPIKey(context.Background(), res.Token)
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
+
+	_, _, err = a.ValidateAPIKey(context.Background(), rotated.Token)
+	qt.Check(t, qt.IsNil(err))
+
+	qt.Assert(t, qt.IsNil(a.RevokeSubjectAPIKey(context.Background(), "deployment", "12345", "")))
+	qt.Assert(t, qt.IsNil(a.RevokeSubjectAPIKey(context.Background(), "deployment", "12345", "")))
+
+	_, _, err = a.ValidateAPIKey(context.Background(), rotated.Token)
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
+
+	// A revoked object can be issued a new key.
+	again, err := a.IssueSubjectAPIKey(context.Background(), SubjectAPIKeyRequest{Type: "deployment", Identifier: "12345", ClientID: "spa"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Not(qt.Equals(again.Key.ID, res.Key.ID)))
+}
+
+func TestSubjectAPIKeyNeedsItsObjectAndClient(t *testing.T) {
+	a, _ := newAPIKeyTestAuth(t)
+
+	for name, in := range map[string]SubjectAPIKeyRequest{
+		"no type":       {Identifier: "7", ClientID: "spa"},
+		"no identifier": {Type: "project", Identifier: " ", ClientID: "spa"},
+		"no client":     {Type: "project", Identifier: "7", ClientID: "ghost"},
+	} {
+		_, err := a.IssueSubjectAPIKey(context.Background(), in)
+		qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidRequest), qt.Commentf(name))
+	}
+
+	// A removed client takes the key with it.
+	res, err := a.IssueSubjectAPIKey(context.Background(), SubjectAPIKeyRequest{Type: "project", Identifier: "7", ClientID: "spa"})
+	qt.Assert(t, qt.IsNil(err))
+
+	a.clients = client.NewMemoryRegistry()
+
+	_, _, err = a.ValidateAPIKey(context.Background(), res.Token)
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
+}
+
+func TestChangePasswordKeepsSubjectAPIKeys(t *testing.T) {
+	a, _ := newAccountTestAuth(t, mfaClient(client.MFAPolicyDisabled), APIKeyStore(apikey.NewMemoryStore()))
+	tok := loginAs(t, a, alice("")).AccessToken
+
+	own, err := a.CreateAPIKey(context.Background(), CreateAPIKeyRequest{Token: tok, Name: "ci"})
+	qt.Assert(t, qt.IsNil(err))
+
+	subject, err := a.IssueSubjectAPIKey(context.Background(), SubjectAPIKeyRequest{Type: "deployment", Identifier: "1", ClientID: "spa"})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = a.ChangePassword(context.Background(), PasswordChangeRequest{Token: tok, CurrentPassword: "secret123", NewPassword: "brandnew1", RevokeAPIKeys: true})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, _, err = a.ValidateAPIKey(context.Background(), own.Token)
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
+
+	_, _, err = a.ValidateAPIKey(context.Background(), subject.Token)
+	qt.Check(t, qt.IsNil(err))
 }

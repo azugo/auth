@@ -8,6 +8,8 @@ import (
 	"errors"
 	"time"
 
+	"azugo.io/auth/contract"
+
 	"azugo.io/core/paginator"
 )
 
@@ -39,11 +41,18 @@ type Key struct {
 	RotatedAt *time.Time
 	// Hash is the SHA-256 of the secret carried in the key's token.
 	Hash []byte
+	// Subject is the object the key acts for in place of a user, with the actions allowed on it.
+	Subject *contract.AuthorizationDetail
 }
 
 // Valid returns true when the key is neither revoked nor expired.
 func (k *Key) Valid() bool {
 	return k.RevokedAt == nil && (k.ExpiresAt == nil || time.Now().Before(*k.ExpiresAt))
+}
+
+// ActsFor reports whether the key is the subject key of the object of type named by identifier.
+func (k *Key) ActsFor(typ, identifier string) bool {
+	return k.Subject != nil && k.Subject.Type == typ && k.Subject.Identifier == identifier
 }
 
 // Matches reports whether secret is the one the key was created with.
@@ -71,6 +80,9 @@ type Store interface {
 	// Create persists a new key with its ID already set, or returns an error wrapping
 	// ErrInvalidKey for a key it does not accept.
 	Create(ctx context.Context, key *Key) error
+	// GetBySubject returns the unrevoked key of the object of type named by identifier, or
+	// ErrNotFound.
+	GetBySubject(ctx context.Context, typ, identifier string) (*Key, error)
 	// Revoke marks the key as revoked, or returns ErrNotFound for a missing or already revoked key.
 	Revoke(ctx context.Context, id string) error
 	// RevokeAll revokes every valid key of userID and returns their IDs.

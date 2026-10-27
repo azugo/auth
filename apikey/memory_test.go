@@ -1,6 +1,7 @@
 package apikey
 
 import (
+	"azugo.io/auth/contract"
 	"context"
 	"testing"
 	"time"
@@ -176,4 +177,37 @@ func TestMemoryStoreRevokeAll(t *testing.T) {
 	again, err := s.RevokeAll(ctx, "u1")
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.HasLen(again, 0))
+}
+
+func TestMemoryStoreSubjectKeys(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+	deployment := &contract.AuthorizationDetail{Type: "deployment", Identifier: "1", Actions: []string{"deploy"}}
+
+	qt.Assert(t, qt.IsNil(s.Create(ctx, &Key{ID: "own", UserID: "u1"})))
+	qt.Assert(t, qt.IsNil(s.Create(ctx, &Key{ID: "d1", Subject: deployment})))
+
+	// One unrevoked key per object.
+	err := s.Create(ctx, &Key{ID: "d1-again", Subject: deployment})
+	qt.Check(t, qt.ErrorIs(err, ErrInvalidKey))
+
+	found, err := s.GetBySubject(ctx, "deployment", "1")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(found.ID, "d1"))
+	qt.Check(t, qt.DeepEquals(found.Subject, deployment))
+
+	_, err = s.GetBySubject(ctx, "deployment", "2")
+	qt.Check(t, qt.ErrorIs(err, ErrNotFound))
+
+	// Subject keys are no user's, so a user's list and RevokeAll leave them.
+	own, _, err := s.List(ctx, "", nil, nil)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.HasLen(own, 1))
+
+	qt.Assert(t, qt.IsNil(s.Revoke(ctx, "d1")))
+
+	_, err = s.GetBySubject(ctx, "deployment", "1")
+	qt.Check(t, qt.ErrorIs(err, ErrNotFound))
+
+	qt.Assert(t, qt.IsNil(s.Create(ctx, &Key{ID: "d1-new", Subject: deployment})))
 }

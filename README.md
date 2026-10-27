@@ -10,7 +10,12 @@ v4.local tokens.
 
 ## Features
 
-* PASETO v4.local access tokens, session cookies and API keys with zero-downtime secret rotation.
+* PASETO v4.local access tokens, session cookies and API keys with zero-downtime secret rotation,
+  self-service for users or issued by the system for an object such as deployment 12345 with the
+  actions allowed on it (`IssueSubjectAPIKey`; the handler then sees a `ctx.User()` with no ID
+  and the RFC 9396 `authorization_details` read by `auth.AuthorizationDetails`, which
+  `middleware.RequireAction` and, for a type with a single implicit action, `middleware.RequireSubject`
+  check against a route parameter).
 * Pluggable user provider, session store, client registry and JTI allowlist.
 * Cache-backed session and JTI stores out of the box.
 * Self-service account management: registration per client policy, forced and self-service

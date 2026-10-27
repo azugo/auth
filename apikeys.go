@@ -1,20 +1,25 @@
 package auth
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
 	"azugo.io/auth/apikey"
 	"azugo.io/auth/client"
+	"azugo.io/auth/contract"
 	"azugo.io/auth/event"
 	"azugo.io/auth/token"
 
+	"azugo.io/azugo"
 	"azugo.io/core/http"
 	"azugo.io/core/paginator"
+	"github.com/goccy/go-json"
 )
 
 // CreateAPIKeyRequest carries the caller's token and the new key's attributes.
@@ -23,6 +28,21 @@ type CreateAPIKeyRequest struct {
 	Name  string
 	// Scope is the space-separated scope to limit the key to; empty = the caller's scope.
 	Scope string
+	// ExpiresAt is nil for a key that never expires.
+	ExpiresAt *time.Time
+	IP        string
+}
+
+// SubjectAPIKeyRequest describes a key acting for an object, such as deployment 12345, through a
+// client, with the actions allowed on it.
+type SubjectAPIKeyRequest struct {
+	// Type and Identifier name the object, Actions what the key may do with it (RFC 9396).
+	Type       string
+	Identifier string
+	Actions    []string
+	ClientID   string
+	// Name is the human-readable label; empty = type:identifier.
+	Name string
 	// ExpiresAt is nil for a key that never expires.
 	ExpiresAt *time.Time
 	IP        string
@@ -58,17 +78,6 @@ func (a *Auth) CreateAPIKey(ctx context.Context, in CreateAPIKeyRequest) (APIKey
 		return APIKeyResult{}, err
 	}
 
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		return APIKeyResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "name is required")
-	}
-
-	now := time.Now()
-
-	if in.ExpiresAt != nil && !in.ExpiresAt.After(now) {
-		return APIKeyResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "expires_at must be in the future")
-	}
-
 	info, err := a.RequireStepUp(ctx, in.Token, ActionCreateAPIKey)
 	if err != nil {
 		return APIKeyResult{}, err
@@ -77,6 +86,159 @@ func (a *Auth) CreateAPIKey(ctx context.Context, in CreateAPIKeyRequest) (APIKey
 	scope, ok := grantedScope(in.Scope, info.Scope)
 	if !ok {
 		return APIKeyResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidScope, "requested scope exceeds the caller's scope")
+	}
+
+	return a.issueAPIKey(ctx, &apikey.Key{UserID: info.ID, ClientID: info.ClientID, Name: in.Name, Scope: scope, ExpiresAt: in.ExpiresAt}, in.IP)
+}
+
+// SubjectAPIKey returns the unrevoked key of the object of type named by identifier. The caller is
+// trusted code: no credential is checked.
+func (a *Auth) SubjectAPIKey(ctx context.Context, typ, identifier string) (*apikey.Key, error) {
+	if err := a.apiKeysEnabled(); err != nil {
+		return nil, err
+	}
+
+	key, err := a.apiKeys.GetBySubject(ctx, typ, identifier)
+	if err != nil {
+		return nil, NewOAuthErrorFrom(err)
+	}
+
+	return key, nil
+}
+
+// IssueSubjectAPIKey creates the key of an object acting through a client; an object with an
+// unrevoked key is refused.
+func (a *Auth) IssueSubjectAPIKey(ctx context.Context, in SubjectAPIKeyRequest) (APIKeyResult, error) {
+	if err := a.apiKeysEnabled(); err != nil {
+		return APIKeyResult{}, err
+	}
+
+	typ := strings.TrimSpace(in.Type)
+	identifier := strings.TrimSpace(in.Identifier)
+
+	if typ == "" || identifier == "" {
+		return APIKeyResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "type and identifier are required")
+	}
+
+	cl, err := a.clients.GetClient(ctx, in.ClientID)
+	if errors.Is(err, client.ErrNotFound) {
+		return APIKeyResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "unknown client")
+	}
+
+	if err != nil {
+		return APIKeyResult{}, NewOAuthErrorFrom(err)
+	}
+
+	if _, err := a.apiKeys.GetBySubject(ctx, typ, identifier); err == nil {
+		return APIKeyResult{}, NewOAuthError(http.StatusConflict, ErrCodeInvalidRequest, "subject already has an api key")
+	} else if !errors.Is(err, apikey.ErrNotFound) {
+		return APIKeyResult{}, NewOAuthErrorFrom(err)
+	}
+
+	actions := make([]string, 0, len(in.Actions))
+
+	for _, action := range in.Actions {
+		if action = strings.TrimSpace(action); action != "" {
+			actions = append(actions, action)
+		}
+	}
+
+	slices.Sort(actions)
+	actions = slices.Compact(actions)
+
+	return a.issueAPIKey(ctx, &apikey.Key{
+		Subject: &contract.AuthorizationDetail{
+			Type:       typ,
+			Identifier: identifier,
+			Actions:    actions,
+		},
+		ClientID:  cl.ID,
+		Name:      cmp.Or(in.Name, typ+":"+identifier),
+		ExpiresAt: in.ExpiresAt,
+	}, in.IP)
+}
+
+// RotateSubjectAPIKey replaces the token of the key of the object of type named by identifier; the
+// previous token stops working at once.
+func (a *Auth) RotateSubjectAPIKey(ctx context.Context, typ, identifier, ip string) (APIKeyResult, error) {
+	key, err := a.SubjectAPIKey(ctx, typ, identifier)
+	if err != nil {
+		return APIKeyResult{}, err
+	}
+
+	now := time.Now()
+
+	tok, hash, err := a.issueAPIKeyToken(key.ID)
+	if err != nil {
+		return APIKeyResult{}, err
+	}
+
+	if err := a.apiKeys.Rotate(ctx, key.ID, hash, now); err != nil {
+		return APIKeyResult{}, NewOAuthErrorFrom(err)
+	}
+
+	key.Hash = hash
+	key.RotatedAt = &now
+
+	a.emit(ctx, event.Event{Type: event.TypeAPIKeyRotated, ClientID: key.ClientID, IP: ip, Detail: map[string]any{"key_id": key.ID, "subject": key.Subject}})
+
+	return APIKeyResult{Key: key, Token: tok}, nil
+}
+
+// RevokeSubjectAPIKey revokes the key of the object of type named by identifier; an object without
+// one is left as is.
+func (a *Auth) RevokeSubjectAPIKey(ctx context.Context, typ, identifier, ip string) error {
+	key, err := a.SubjectAPIKey(ctx, typ, identifier)
+	if errors.Is(err, apikey.ErrNotFound) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	err = a.apiKeys.Revoke(ctx, key.ID)
+	if errors.Is(err, apikey.ErrNotFound) {
+		// A concurrent revoke already did it.
+		return nil
+	}
+
+	if err != nil {
+		return NewOAuthErrorFrom(err)
+	}
+
+	a.emit(ctx, event.Event{Type: event.TypeAPIKeyRevoked, ClientID: key.ClientID, IP: ip, Detail: map[string]any{"key_id": key.ID, "subject": key.Subject}})
+
+	return nil
+}
+
+// AuthorizationDetails returns the RFC 9396 authorization details of a principal, which a subject
+// API key carries for its object.
+func AuthorizationDetails(u azugo.User) contract.AuthorizationDetails {
+	var details contract.AuthorizationDetails
+
+	for _, raw := range u.Claim(contract.ClaimAuthorizationDetails) {
+		var d contract.AuthorizationDetail
+		if err := json.Unmarshal([]byte(raw), &d); err == nil {
+			details = append(details, d)
+		}
+	}
+
+	return details
+}
+
+// issueAPIKey validates key's name and expiry, mints its ID and token, stores it and returns it
+// with the token.
+func (a *Auth) issueAPIKey(ctx context.Context, key *apikey.Key, ip string) (APIKeyResult, error) {
+	key.Name = strings.TrimSpace(key.Name)
+	if key.Name == "" {
+		return APIKeyResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "name is required")
+	}
+
+	key.CreatedAt = time.Now()
+
+	if key.ExpiresAt != nil && !key.ExpiresAt.After(key.CreatedAt) {
+		return APIKeyResult{}, NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "expires_at must be in the future")
 	}
 
 	id, err := newJTI()
@@ -89,22 +251,14 @@ func (a *Auth) CreateAPIKey(ctx context.Context, in CreateAPIKeyRequest) (APIKey
 		return APIKeyResult{}, err
 	}
 
-	key := &apikey.Key{
-		ID:        id,
-		UserID:    info.ID,
-		ClientID:  info.ClientID,
-		Name:      name,
-		Scope:     scope,
-		CreatedAt: now,
-		ExpiresAt: in.ExpiresAt,
-		Hash:      hash,
-	}
+	key.ID = id
+	key.Hash = hash
 
 	if err := a.apiKeys.Create(ctx, key); err != nil {
 		return APIKeyResult{}, NewOAuthErrorFrom(err)
 	}
 
-	a.emit(ctx, event.Event{Type: event.TypeAPIKeyCreated, UserID: info.ID, ClientID: info.ClientID, IP: in.IP, Detail: map[string]any{"key_id": id, "name": name, "scope": scope}})
+	a.emit(ctx, event.Event{Type: event.TypeAPIKeyCreated, UserID: key.UserID, ClientID: key.ClientID, IP: ip, Detail: map[string]any{"key_id": id, "name": key.Name, "scope": key.Scope, "subject": key.Subject}})
 
 	return APIKeyResult{Key: key, Token: tok}, nil
 }
@@ -296,6 +450,10 @@ func (a *Auth) validateAPIKey(ctx context.Context, claims *token.APIKeyClaims) (
 
 	if err != nil {
 		return UserInfo{}, nil, NewOAuthErrorFrom(err)
+	}
+
+	if key.Subject != nil {
+		return UserInfo{AuthorizationDetails: contract.AuthorizationDetails{*key.Subject}, ClientID: key.ClientID}, key, nil
 	}
 
 	info, err := a.users.GetUser(ctx, key.UserID)

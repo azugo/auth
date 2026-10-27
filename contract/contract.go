@@ -4,9 +4,11 @@ package contract
 
 import (
 	"context"
+	"slices"
 
 	"azugo.io/azugo/token"
 	"azugo.io/azugo/user"
+	"github.com/goccy/go-json"
 )
 
 // UserProvider loads user data.
@@ -31,6 +33,48 @@ const (
 	ChannelEmail = "email"
 	ChannelPhone = "phone"
 )
+
+// ClaimAuthorizationDetails is the identity claim carrying UserInfo.AuthorizationDetails.
+const ClaimAuthorizationDetails = "authorization_details"
+
+// AuthorizationDetail is one RFC 9396 authorization detail: the actions allowed on the object
+// of a type named by its identifier.
+type AuthorizationDetail struct {
+	Type       string   `json:"type"`
+	Identifier string   `json:"identifier,omitempty"`
+	Actions    []string `json:"actions,omitempty"`
+}
+
+// AuthorizationDetails are the RFC 9396 authorization details of a principal.
+type AuthorizationDetails []AuthorizationDetail
+
+// ActsFor reports whether the principal acts for the object of type named by identifier, whatever
+// the actions.
+func (d AuthorizationDetails) ActsFor(typ, identifier string) bool {
+	for _, detail := range d {
+		if detail.Type == typ && detail.Identifier == identifier {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Allows reports whether action, which must be named, is allowed on the object of type named by
+// identifier.
+func (d AuthorizationDetails) Allows(typ, identifier, action string) bool {
+	if action == "" {
+		return false
+	}
+
+	for _, detail := range d {
+		if detail.Type == typ && detail.Identifier == identifier && slices.Contains(detail.Actions, action) {
+			return true
+		}
+	}
+
+	return false
+}
 
 // Contact is one of a user's addresses on a channel.
 type Contact struct {
@@ -62,6 +106,8 @@ type UserInfo struct {
 	ClientID string
 	// Context is the session's application-defined selections, set on introspection.
 	Context map[string]any
+	// AuthorizationDetails are the objects and actions a subject API key is authorized for.
+	AuthorizationDetails AuthorizationDetails
 }
 
 // PreferredContact returns the contact to present for channel.
@@ -111,6 +157,18 @@ func (info UserInfo) ToUser() *user.Basic {
 
 	if len(info.AMR) > 0 {
 		claims["amr"] = token.ClaimStrings(info.AMR)
+	}
+
+	if len(info.AuthorizationDetails) > 0 {
+		details := make(token.ClaimStrings, 0, len(info.AuthorizationDetails))
+
+		for _, d := range info.AuthorizationDetails {
+			if raw, err := json.Marshal(d); err == nil {
+				details = append(details, string(raw))
+			}
+		}
+
+		claims[ClaimAuthorizationDetails] = details
 	}
 
 	return user.NewIdentity(info.ID, info.Scope, claims)
