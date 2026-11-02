@@ -102,10 +102,15 @@ func (a *Auth) pendingMFAResult(ctx context.Context, sc *stepContext, in MFAStep
 	return res, nil
 }
 
-// saveStepState persists the (possibly changed) step state of sc.
+// saveStepState persists the (possibly changed) step state of sc while its flow is still pending.
 func (a *Auth) saveStepState(ctx context.Context, sc *stepContext) error {
-	if err := setSynced(ctx, a.pending, sc.sess.ID, sc.state, cache.TTL[pendingState](time.Until(sc.sess.ExpiresAt))); err != nil {
+	ok, err := replaceSynced(ctx, a.pending, sc.sess.ID, sc.state, cache.TTL[pendingState](time.Until(sc.sess.ExpiresAt)))
+	if err != nil {
 		return NewOAuthErrorFrom(err)
+	}
+
+	if !ok {
+		return NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
 	return nil

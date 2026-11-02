@@ -75,7 +75,7 @@ type cacheStore struct {
 
 // NewCacheStore creates the default cache-backed reset Store using the app's cache.
 func NewCacheStore(c *cache.Cache) (Store, error) {
-	requests, err := cache.Create[Request](c, "auth:pwreset")
+	requests, err := cache.Create[Request](c, "auth:pwreset", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,21 @@ func (s *cacheStore) Get(ctx context.Context, id string) (*Request, error) {
 
 // Update persists the request, keeping its expiry.
 func (s *cacheStore) Update(ctx context.Context, r *Request) error {
-	return s.Save(ctx, r)
+	ttl := time.Until(r.ExpiresAt)
+	if ttl <= 0 {
+		return ErrNotFound
+	}
+
+	ok, err := s.requests.Replace(ctx, r.ID, *r, cache.TTL[Request](ttl))
+	if err != nil {
+		return err
+	}
+
+	if !ok {
+		return ErrNotFound
+	}
+
+	return s.requests.Sync(ctx)
 }
 
 // Consume atomically fetches and deletes the request.

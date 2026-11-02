@@ -414,8 +414,14 @@ func (a *Auth) VerifyReauth(ctx context.Context, in ReauthVerifyRequest) error {
 				ttl = min(a.config.AccessTokenTTL, time.Until(sess.ExpiresAt))
 			}
 
-			if err := setSynced(ctx, a.reauths, sess.ID, st, cache.TTL[reauthState](ttl)); err != nil {
+			// A re-authentication finished or cancelled meanwhile is not brought back.
+			replaced, err := replaceSynced(ctx, a.reauths, sess.ID, st, cache.TTL[reauthState](ttl))
+			if err != nil {
 				return NewOAuthErrorFrom(err)
+			}
+
+			if !replaced {
+				return NewOAuthError(http.StatusBadRequest, ErrCodeInvalidRequest, "no re-authentication in progress")
 			}
 		}
 	}

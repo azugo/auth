@@ -76,17 +76,17 @@ type cacheStore struct {
 
 // NewCacheStore creates the default cache-backed code Store using the app's cache.
 func NewCacheStore(c *cache.Cache, tombstoneTTL time.Duration) (Store, error) {
-	codes, err := cache.Create[AuthorizationCode](c, "auth:code")
+	codes, err := cache.Create[AuthorizationCode](c, "auth:code", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}
 
-	used, err := cache.Create[AuthorizationCode](c, "auth:code:used")
+	used, err := cache.Create[AuthorizationCode](c, "auth:code:used", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}
 
-	issued, err := cache.Create[issuedToken](c, "auth:code:token")
+	issued, err := cache.Create[issuedToken](c, "auth:code:token", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}

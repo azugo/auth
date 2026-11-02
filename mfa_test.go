@@ -169,6 +169,31 @@ func TestMFARejectsMissingPendingState(t *testing.T) {
 	qt.Check(t, qt.ErrorIs(err, token.ErrInvalidToken))
 }
 
+func TestSaveStepStateKeepsEndedFlowEnded(t *testing.T) {
+	a := newMFATestAuth(t, mfaClient(client.MFAPolicyOptional), mfa.NewMemoryStore())
+
+	first := loginAs(t, a, alice(""))
+	enrollTOTP(t, a, first.AccessToken)
+
+	pending := loginAs(t, a, alice(""))
+	qt.Assert(t, qt.Equals(pending.Status, session.StatusPendingMFA))
+
+	claims, err := a.codec.DecodeSession(pending.StepToken)
+	qt.Assert(t, qt.IsNil(err))
+
+	sc, err := a.stepSession(context.Background(), pending.StepToken, session.StatusPendingMFA)
+	qt.Assert(t, qt.IsNil(err))
+
+	// The flow ends while a resend still holds its loaded state.
+	qt.Assert(t, qt.IsNil(deleteSynced(context.Background(), a.pending, claims.SessionID)))
+
+	qt.Check(t, qt.ErrorIs(a.saveStepState(context.Background(), sc), token.ErrInvalidToken))
+
+	st, err := a.pending.Get(context.Background(), claims.SessionID)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsFalse(st.Initialized))
+}
+
 func TestOnboardingFactorCountsForTheLogin(t *testing.T) {
 	a := newMFATestAuth(t, mfaClient(client.MFAPolicyRequired), mfa.NewMemoryStore())
 	a.Config().ACRLevels = acrLadder()

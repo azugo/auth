@@ -15,6 +15,16 @@ func setSynced[T any](ctx context.Context, c cache.Instance[T], key string, valu
 	return c.Sync(ctx)
 }
 
+// replaceSynced writes value only while key is present and waits for it to be visible.
+func replaceSynced[T any](ctx context.Context, c cache.Instance[T], key string, value T, opts ...cache.ItemOption[T]) (bool, error) {
+	ok, err := c.Replace(ctx, key, value, opts...)
+	if err != nil || !ok {
+		return false, err
+	}
+
+	return true, c.Sync(ctx)
+}
+
 // deleteSynced removes key and waits for the removal to be visible.
 func deleteSynced[T any](ctx context.Context, c cache.Instance[T], key string) error {
 	if err := c.Delete(ctx, key); err != nil {

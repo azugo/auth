@@ -46,12 +46,12 @@ type cacheStore struct {
 
 // NewCacheStore creates the default cache-backed Store using the app's cache.
 func NewCacheStore(c *cache.Cache) (Store, error) {
-	requests, err := cache.Create[entry](c, "auth:contactverify")
+	requests, err := cache.Create[entry](c, "auth:contactverify", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}
 
-	open, err := cache.Create[string](c, "auth:contactverify:open")
+	open, err := cache.Create[string](c, "auth:contactverify:open", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}

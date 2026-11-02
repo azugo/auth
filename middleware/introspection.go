@@ -82,7 +82,7 @@ func Introspection(a *auth.Auth, endpoint string, creds ClientCredentials, opts 
 
 			once.Do(func() {
 				if o.cacheTTL > 0 {
-					results, _ = cache.Create[auth.IntrospectionResponse](ctx.App().Cache(), "auth:introspection", cache.MemoryCache)
+					results, _ = cache.Create[auth.IntrospectionResponse](ctx.App().Cache(), "auth:introspection", cache.MemoryCache, cache.SensitiveKeys())
 				}
 			})
 

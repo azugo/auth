@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,4 +107,33 @@ func TestCacheStoreRevoke(t *testing.T) {
 func TestCacheStoreOmitsLister(t *testing.T) {
 	_, ok := newCacheStore(t).(Lister)
 	qt.Check(t, qt.IsFalse(ok))
+}
+
+func TestCacheStoreRevokeIsNotUndone(t *testing.T) {
+	store := newCacheStore(t)
+	ctx := context.Background()
+
+	for n := range 500 {
+		sess := &Session{ID: "sid-" + strconv.Itoa(n), UserID: "user-1", Status: StatusActive, ExpiresAt: time.Now().Add(time.Hour)}
+		qt.Assert(t, qt.IsNil(store.Create(ctx, sess)))
+
+		var wg sync.WaitGroup
+
+		wg.Go(func() {
+			_ = store.Revoke(ctx, sess.ID)
+		})
+		wg.Go(func() {
+			_ = store.Touch(ctx, sess.ID)
+		})
+		wg.Go(func() {
+			_ = store.Update(ctx, sess)
+		})
+		wg.Wait()
+
+		_, err := store.Get(ctx, sess.ID)
+		qt.Assert(t, qt.ErrorIs(err, ErrNotFound))
+	}
+
+	err := store.Update(ctx, &Session{ID: "missing", ExpiresAt: time.Now().Add(time.Hour)})
+	qt.Check(t, qt.ErrorIs(err, ErrNotFound))
 }

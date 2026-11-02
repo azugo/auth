@@ -54,6 +54,23 @@ func TestCacheStoreRoundTrip(t *testing.T) {
 	qt.Check(t, qt.IsTrue(errors.Is(err, ErrNotFound)))
 }
 
+func TestCacheStoreUpdateKeepsConsumedRequestConsumed(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	req := &Request{ID: "r1", UserID: "u1", Method: "email", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute)}
+	qt.Assert(t, qt.IsNil(s.Save(ctx, req)))
+
+	_, err := s.Consume(ctx, "r1")
+	qt.Assert(t, qt.IsNil(err))
+
+	// A method switch that loaded the request before it was consumed must not restore it.
+	qt.Check(t, qt.ErrorIs(s.Update(ctx, req), ErrNotFound))
+
+	_, err = s.Get(ctx, "r1")
+	qt.Check(t, qt.ErrorIs(err, ErrNotFound))
+}
+
 func TestCacheStoreExpired(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

@@ -417,21 +417,21 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 		}
 	}
 
-	extstate, err := cache.Create[externalState](app.Cache(), "auth:extstate")
+	extstate, err := cache.Create[externalState](app.Cache(), "auth:extstate", cache.SensitiveKeys())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create external state store: %w", err)
 	}
 
 	a.extstate = extstate
 
-	fedIDTokens, err := cache.Create[string](app.Cache(), "auth:fedidt")
+	fedIDTokens, err := cache.Create[string](app.Cache(), "auth:fedidt", cache.SensitiveKeys())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create federated id_token store: %w", err)
 	}
 
 	a.fedIDTokens = fedIDTokens
 
-	pending, err := cache.Create[pendingState](app.Cache(), "auth:pending")
+	pending, err := cache.Create[pendingState](app.Cache(), "auth:pending", cache.SensitiveKeys())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pending step store: %w", err)
 	}
@@ -514,7 +514,7 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 	}
 
 	if a.StepUpEnabled() {
-		reauths, err := cache.Create[reauthState](app.Cache(), "auth:reauth")
+		reauths, err := cache.Create[reauthState](app.Cache(), "auth:reauth", cache.SensitiveKeys())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create re-authentication store: %w", err)
 		}
@@ -538,7 +538,7 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 		seen[name] = struct{}{}
 	}
 
-	challenges, err := cache.CreateCounter(app.Cache(), "auth:challenge")
+	challenges, err := cache.CreateCounter(app.Cache(), "auth:challenge", cache.SensitiveKeys())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create challenge counter: %w", err)
 	}
@@ -628,6 +628,11 @@ func (a *Auth) PasswordPolicy() contract.PasswordPolicy {
 // MFAMethods returns the configured MFA method registry, or nil when MFA is disabled.
 func (a *Auth) MFAMethods() mfa.Registry {
 	return a.mfaMethods
+}
+
+// Events returns the configured audit event sink.
+func (a *Auth) Events() event.Sink {
+	return a.events
 }
 
 // emit sends e to the configured event sink, stamping At.

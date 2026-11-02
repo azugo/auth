@@ -16,7 +16,7 @@ type cacheStore struct {
 
 // NewCacheStore creates a cache-backed session Store over the app's cache.
 func NewCacheStore(c *cache.Cache) (Store, error) {
-	inst, err := cache.Create[Session](c, "auth.session")
+	inst, err := cache.Create[Session](c, "auth.session", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}
@@ -65,17 +65,9 @@ func (s *cacheStore) Get(ctx context.Context, id string) (*Session, error) {
 	return &sess, nil
 }
 
-// Update replaces the stored session with sess.
+// Update replaces the stored session.
 func (s *cacheStore) Update(ctx context.Context, sess *Session) error {
-	if _, err := s.Get(ctx, sess.ID); err != nil {
-		return err
-	}
-
-	if err := s.c.Set(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt))); err != nil {
-		return err
-	}
-
-	return s.c.Sync(ctx)
+	return s.replace(ctx, sess)
 }
 
 // Touch updates session activity by updating LastSeen.
@@ -91,8 +83,18 @@ func (s *cacheStore) Touch(ctx context.Context, id string) error {
 
 	sess.LastSeen = time.Now()
 
-	if err := s.c.Set(ctx, id, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt))); err != nil {
+	return s.replace(ctx, sess)
+}
+
+// replace stores session only while it is still stored, so a concurrent Revoke is never undone.
+func (s *cacheStore) replace(ctx context.Context, sess *Session) error {
+	ok, err := s.c.Replace(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt)))
+	if err != nil {
 		return err
+	}
+
+	if !ok {
+		return ErrNotFound
 	}
 
 	return s.c.Sync(ctx)

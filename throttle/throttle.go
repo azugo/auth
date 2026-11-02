@@ -28,12 +28,12 @@ type Throttle interface {
 
 // New creates the default Throttle over cfg, read live on every call.
 func New(c *cache.Cache, cfg *contract.ThrottleConfig) (Throttle, error) {
-	attempts, err := cache.CreateCounter(c, "auth:throttle")
+	attempts, err := cache.CreateCounter(c, "auth:throttle", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}
 
-	locks, err := cache.Create[bool](c, "auth:lockout")
+	locks, err := cache.Create[bool](c, "auth:lockout", cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +53,7 @@ func NewLimit(c *cache.Cache, name string, limit int, window time.Duration) (Thr
 		return Noop(), nil
 	}
 
-	attempts, err := cache.CreateCounter(c, name)
+	attempts, err := cache.CreateCounter(c, name, cache.SensitiveKeys())
 	if err != nil {
 		return nil, err
 	}

@@ -21,7 +21,11 @@ const (
 	TypeMFAEnrolled      = "mfa.enrolled"
 	TypeMFARevoked       = "mfa.revoked"
 	TypeUserRegistered   = "user.registered"
-	TypePasswordChanged  = "password.changed"
+	TypeUserDisabled     = "user.disabled"
+	TypeUserEnabled      = "user.enabled"
+	// TypePasswordChangeRequired is emitted when an administrator forces a password change.
+	TypePasswordChangeRequired = "password.change_required"
+	TypePasswordChanged        = "password.changed"
 	// TypePasswordResetRequested is emitted for every reset request, found or not.
 	TypePasswordResetRequested = "password.reset_requested"
 	TypePasswordResetFailure   = "password.reset_failure"
