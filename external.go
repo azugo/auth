@@ -736,7 +736,7 @@ func (a *Auth) externalLogoutCallbackURL(baseURL, mountPath, providerName string
 // ListIdentities returns userID's linked external identities.
 func (a *Auth) ListIdentities(ctx context.Context, userID, providerName string, page *paginator.Paginator) ([]*provider.IdentityLink, *paginator.Paginator, error) {
 	if a.identities == nil {
-		return nil, nil, errors.New("identity store is not configured")
+		return nil, nil, ErrNotSupported
 	}
 
 	return a.identities.List(ctx, userID, providerName, page)
@@ -746,7 +746,7 @@ func (a *Auth) ListIdentities(ctx context.Context, userID, providerName string, 
 // consult the step-up policy, see RequireStepUp with ActionUnlinkIdentity.
 func (a *Auth) UnlinkIdentity(ctx context.Context, userID, linkID string) error {
 	if a.identities == nil {
-		return errors.New("identity store is not configured")
+		return ErrNotSupported
 	}
 
 	if err := a.identities.Unlink(ctx, userID, linkID); err != nil {

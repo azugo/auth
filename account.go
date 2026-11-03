@@ -404,10 +404,9 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 		return LoginResult{}, err
 	}
 
-	var (
-		sessions []string
-		revoked  []string
-	)
+	var sessions []*session.Session
+
+	var revoked []string
 
 	// The new password and the revocations it asks for are stored together.
 	err = a.Transaction.Run(ctx, func(ctx context.Context) error {
@@ -421,7 +420,7 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 
 		// Any other session may be the reason the password is being changed.
 		if !in.KeepOtherSessions {
-			if sessions, err = a.revokeOtherSessions(ctx, sc.sess.UserID, sc.sess.ID); err != nil {
+			if sessions, err = a.RevokeUserSessions(ctx, sc.sess.UserID, sc.sess.ID); err != nil && !errors.Is(err, ErrNotSupported) {
 				return err
 			}
 		}
@@ -449,10 +448,7 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 	}
 
 	a.passThrottle(ctx, keys, identity)
-
-	for _, id := range sessions {
-		_ = deleteSynced(ctx, a.fedIDTokens, id)
-	}
+	a.DropFederatedHints(ctx, sessions)
 
 	a.emit(ctx, event.Event{Type: event.TypePasswordChanged, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP})
 
@@ -467,35 +463,6 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 	}
 
 	return res, nil
-}
-
-// revokeOtherSessions revokes every valid session of userID but current and returns their IDs.
-func (a *Auth) revokeOtherSessions(ctx context.Context, userID, sessionID string) ([]string, error) {
-	lister, ok := a.sessions.(session.Lister)
-	if !ok {
-		return nil, nil
-	}
-
-	sessions, _, err := lister.List(ctx, userID, nil, nil)
-	if err != nil {
-		return nil, NewOAuthErrorFrom(err)
-	}
-
-	revoked := make([]string, 0, len(sessions))
-
-	for _, s := range sessions {
-		if s.ID == sessionID || !s.Valid() {
-			continue
-		}
-
-		if err := a.sessions.Revoke(ctx, s.ID); err != nil && !errors.Is(err, session.ErrNotFound) {
-			return nil, NewOAuthErrorFrom(err)
-		}
-
-		revoked = append(revoked, s.ID)
-	}
-
-	return revoked, nil
 }
 
 // Profile returns the caller's profile data from the ProfileManager.

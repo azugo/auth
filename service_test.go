@@ -18,6 +18,8 @@ import (
 	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
+	"azugo.io/core/cache"
+
 	"github.com/go-quicktest/qt"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -233,6 +235,29 @@ func TestRefreshReplayOfRotatedCookieFailsClosed(t *testing.T) {
 	qt.Check(t, qt.IsNil(err))
 }
 
+func TestRefreshRefusesUserThatCanNoLongerBeLoaded(t *testing.T) {
+	users := fakeUsers{
+		users:     map[string]UserInfo{"alice": {ID: "u1", Name: "Alice", Scope: "openid profile"}},
+		passwords: map[string]string{"alice": "secret123"},
+	}
+
+	a, err := New(newApp(t), validConfig(), users, session.NewMemoryStore(), client.NewMemoryRegistry(&client.Client{
+		ID: "ssr", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeCookie,
+	}))
+	qt.Assert(t, qt.IsNil(err))
+
+	login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	// The account is disabled or deleted while the session store cannot list its sessions.
+	delete(users.users, "alice")
+
+	_, err = a.Refresh(context.Background(), RefreshRequest{Token: login.Cookie.Value})
+	qt.Assert(t, qt.IsNotNil(err))
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeLoginRequired))
+}
+
 func TestRefreshMissingOrInvalidToken(t *testing.T) {
 	a := newServiceTestAuth(t, &client.Client{ID: "ssr"})
 
@@ -312,14 +337,59 @@ func TestListAndRevokeSession(t *testing.T) {
 	qt.Check(t, qt.HasLen(sessions, 1))
 
 	// Another user cannot revoke it.
-	err = a.RevokeSession(context.Background(), "someone-else", sess.ID)
+	_, err = a.RevokeSession(context.Background(), "someone-else", sess.ID)
 	qt.Check(t, qt.IsNotNil(err))
 
-	err = a.RevokeSession(context.Background(), info.ID, sess.ID)
+	revoked, err := a.RevokeSession(context.Background(), info.ID, sess.ID)
 	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(revoked.ID, sess.ID))
 
 	_, _, err = a.IntrospectToken(context.Background(), login.AccessToken)
 	qt.Check(t, qt.IsNotNil(err))
+}
+
+func TestRevokeUserSessionsClearsFederatedIDTokens(t *testing.T) {
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	})
+
+	var ids []string
+
+	for range 2 {
+		login, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "secret123"})
+		qt.Assert(t, qt.IsNil(err))
+
+		_, sess, err := a.IntrospectToken(context.Background(), login.AccessToken)
+		qt.Assert(t, qt.IsNil(err))
+		qt.Assert(t, qt.IsNil(setSynced(context.Background(), a.fedIDTokens, sess.ID, "idt-"+sess.ID, cache.TTL[string](time.Hour))))
+
+		ids = append(ids, sess.ID)
+	}
+
+	// Revocation alone keeps both hints, for a unit that may still roll back.
+	revoked, err := a.RevokeUserSessions(context.Background(), "u1", ids[0])
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.HasLen(revoked, 1))
+	qt.Check(t, qt.Equals(revoked[0].ID, ids[1]))
+
+	idt, _ := a.fedIDTokens.Get(context.Background(), ids[1])
+	qt.Check(t, qt.Equals(idt, "idt-"+ids[1]))
+
+	// Dropping the hints of the revoked sessions leaves the kept session's alone.
+	a.DropFederatedHints(context.Background(), revoked)
+
+	idt, _ = a.fedIDTokens.Get(context.Background(), ids[1])
+	qt.Check(t, qt.Equals(idt, ""))
+
+	idt, err = a.fedIDTokens.Get(context.Background(), ids[0])
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(idt, "idt-"+ids[0]))
+
+	// Nothing is left to revoke, so the kept session is still untouched.
+	revoked, err = a.RevokeUserSessions(context.Background(), "u1", ids[0])
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.HasLen(revoked, 0))
 }
 
 func TestLoginIssuesIDTokenForOpenIDScopeWithKeyProvider(t *testing.T) {

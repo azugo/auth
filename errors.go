@@ -40,7 +40,8 @@ var (
 	// support.
 	ErrUnsupportedGrantType = errors.New("unsupported grant type")
 	// ErrLoginRequired is returned by Refresh when the presented session cookie is missing,
-	// expired, or otherwise cannot be silently re-authenticated.
+	// expired, its user can no longer be loaded, or it otherwise cannot be silently
+	// re-authenticated.
 	ErrLoginRequired = errors.New("login required")
 	// ErrUnmetAuthenticationRequirements is returned when an essential acr request or the
 	// client's MinACR floor cannot be satisfied.
@@ -51,6 +52,8 @@ var (
 	// ErrPasswordChangeRequired is returned when the account must change its password but the
 	// user provider is no PasswordChanger.
 	ErrPasswordChangeRequired = errors.New("password change required")
+	// ErrNotSupported is returned when the configured stores or user provider lack the capability.
+	ErrNotSupported = errors.New("not supported by the configured backend")
 )
 
 // ErrorCode is an RFC 6749 / RFC 6750 / RFC 9470 OAuth 2.0 error code.

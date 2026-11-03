@@ -58,7 +58,7 @@ func (h *Handler) revokeSession(ctx *azugo.Context) {
 		return
 	}
 
-	if err := h.auth.RevokeSession(ctx, info.ID, ctx.Params.String("id")); err != nil {
+	if _, err := h.auth.RevokeSession(ctx, info.ID, ctx.Params.String("id")); err != nil {
 		ctx.Error(err)
 
 		return

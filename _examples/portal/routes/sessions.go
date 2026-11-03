@@ -55,7 +55,7 @@ func (r *router) revokeSession(ctx *azugo.Context) {
 		return
 	}
 
-	if err := r.Auth().RevokeSession(ctx, info.ID, ctx.Params.String("id")); err != nil {
+	if _, err := r.Auth().RevokeSession(ctx, info.ID, ctx.Params.String("id")); err != nil {
 		ctx.Error(err)
 
 		return

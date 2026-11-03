@@ -187,6 +187,11 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
 	}
 
+	// A disabled or deleted account cannot refresh, whether or not the store lists its sessions.
+	if _, err := a.users.GetUser(ctx, sess.UserID); err != nil {
+		return LoginResult{}, NewOAuthErrorFrom(ErrLoginRequired)
+	}
+
 	cl, err := a.clients.GetClient(ctx, sess.ClientID)
 	if err != nil {
 		return LoginResult{}, NewOAuthErrorFrom(err)
@@ -435,30 +440,71 @@ func (a *Auth) UserInfoClaims(ctx context.Context, tok string) (UserInfo, error)
 func (a *Auth) ListSessions(ctx context.Context, userID string, filter *session.Filter, page *paginator.Paginator) ([]*session.Session, *paginator.Paginator, error) {
 	lister, ok := a.sessions.(session.Lister)
 	if !ok {
-		return nil, nil, errors.New("session store does not support listing")
+		return nil, nil, ErrNotSupported
 	}
 
 	return lister.List(ctx, userID, filter, page)
 }
 
-// RevokeSession revokes sessionID after verifying it belongs to user.
-func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) error {
+// RevokeSession revokes sessionID after verifying it belongs to userID and returns the session as
+// it was loaded; an already invalid session is left as is.
+func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) (*session.Session, error) {
 	sess, err := a.sessions.Get(ctx, sessionID)
 	if err != nil {
-		return NewOAuthErrorFrom(err)
+		return nil, NewOAuthErrorFrom(err)
 	}
 
 	if sess.UserID != userID {
-		return NewOAuthErrorFrom(session.ErrNotFound)
+		return nil, NewOAuthErrorFrom(session.ErrNotFound)
 	}
 
-	if err := a.sessions.Revoke(ctx, sessionID); err != nil {
-		return NewOAuthErrorFrom(err)
+	if sess.Valid() {
+		if err := a.sessions.Revoke(ctx, sessionID); err != nil {
+			return nil, NewOAuthErrorFrom(err)
+		}
 	}
 
 	_ = deleteSynced(ctx, a.fedIDTokens, sessionID)
 
-	return nil
+	return sess, nil
+}
+
+// RevokeUserSessions revokes every valid session of userID but keepSessionID inside the caller's
+// transaction unit and returns them; the caller passes them to DropFederatedHints once the unit
+// has succeeded. ErrNotSupported when the session store cannot list.
+func (a *Auth) RevokeUserSessions(ctx context.Context, userID, keepSessionID string) ([]*session.Session, error) {
+	lister, ok := a.sessions.(session.Lister)
+	if !ok {
+		return nil, ErrNotSupported
+	}
+
+	sessions, _, err := lister.List(ctx, userID, nil, nil)
+	if err != nil {
+		return nil, NewOAuthErrorFrom(err)
+	}
+
+	revoked := make([]*session.Session, 0, len(sessions))
+
+	for _, s := range sessions {
+		if s.ID == keepSessionID || !s.Valid() {
+			continue
+		}
+
+		if err := a.sessions.Revoke(ctx, s.ID); err != nil && !errors.Is(err, session.ErrNotFound) {
+			return nil, NewOAuthErrorFrom(err)
+		}
+
+		revoked = append(revoked, s)
+	}
+
+	return revoked, nil
+}
+
+// DropFederatedHints forgets the IdP id_tokens kept for the federated logout of revoked sessions.
+func (a *Auth) DropFederatedHints(ctx context.Context, sessions []*session.Session) {
+	for _, s := range sessions {
+		_ = deleteSynced(ctx, a.fedIDTokens, s.ID)
+	}
 }
 
 // issueSessionCookie mints and registers a fresh session-cookie JTI for sess and returns the
