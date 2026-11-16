@@ -46,19 +46,27 @@ func (h *Handler) token(ctx *azugo.Context) {
 func (h *Handler) clientCredentials(ctx *azugo.Context) (auth.ClientCredentials, error) {
 	var creds auth.ClientCredentials
 
-	if v := ctx.Form.StringOptional("client_id"); v != nil {
+	if v, err := ctx.Form.StringOptional("client_id"); err != nil {
+		return creds, err
+	} else if v != nil {
 		creds.ClientID = *v
 	}
 
-	if v := ctx.Form.StringOptional("client_secret"); v != nil {
+	if v, err := ctx.Form.StringOptional("client_secret"); err != nil {
+		return creds, err
+	} else if v != nil {
 		creds.Secret = *v
 	}
 
-	if v := ctx.Form.StringOptional("client_assertion_type"); v != nil {
+	if v, err := ctx.Form.StringOptional("client_assertion_type"); err != nil {
+		return creds, err
+	} else if v != nil {
 		creds.AssertionType = *v
 	}
 
-	if v := ctx.Form.StringOptional("client_assertion"); v != nil {
+	if v, err := ctx.Form.StringOptional("client_assertion"); err != nil {
+		return creds, err
+	} else if v != nil {
 		creds.Assertion = *v
 	}
 
@@ -133,15 +141,27 @@ func (h *Handler) passwordGrant(ctx *azugo.Context, proof *auth.DPoPProof) {
 		IP:          ctx.IP().String(),
 	}
 
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.ReturnTo = *v
 	}
 
-	if v := ctx.Form.StringOptional("acr_values"); v != nil {
+	if v, err := ctx.Form.StringOptional("acr_values"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.ACRValues = *v
 	}
 
-	if v := ctx.Form.StringOptional("claims"); v != nil {
+	if v, err := ctx.Form.StringOptional("claims"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Claims = *v
 	}
 
@@ -180,11 +200,19 @@ func (h *Handler) authorizationCodeGrant(ctx *azugo.Context, proof *auth.DPoPPro
 		IP:          ctx.IP().String(),
 	}
 
-	if v := ctx.Form.StringOptional("redirect_uri"); v != nil {
+	if v, err := ctx.Form.StringOptional("redirect_uri"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.RedirectURI = *v
 	}
 
-	if v := ctx.Form.StringOptional("code_verifier"); v != nil {
+	if v, err := ctx.Form.StringOptional("code_verifier"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.CodeVerifier = *v
 	}
 
@@ -208,7 +236,11 @@ func (h *Handler) clientCredentialsGrant(ctx *azugo.Context, proof *auth.DPoPPro
 	}
 
 	scope := ""
-	if v := ctx.Form.StringOptional("scope"); v != nil {
+	if v, err := ctx.Form.StringOptional("scope"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		scope = *v
 	}
 

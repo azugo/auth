@@ -23,7 +23,11 @@ func (h *Handler) revoke(ctx *azugo.Context) {
 		IP:          ctx.IP().String(),
 	}
 
-	if v := ctx.Form.StringOptional("token"); v != nil {
+	if v, err := ctx.Form.StringOptional("token"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Token = *v
 	}
 
@@ -51,7 +55,11 @@ func (h *Handler) introspect(ctx *azugo.Context) {
 		MountPath:   h.mountPrefix,
 	}
 
-	if v := ctx.Form.StringOptional("token"); v != nil {
+	if v, err := ctx.Form.StringOptional("token"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Token = *v
 	}
 

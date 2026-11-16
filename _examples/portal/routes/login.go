@@ -37,15 +37,27 @@ func (r *router) login(ctx *azugo.Context) {
 		IP:          ctx.IP().String(),
 	}
 
-	if v := ctx.Form.StringOptional("username"); v != nil {
+	if v, err := ctx.Form.StringOptional("username"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Username = *v
 	}
 
-	if v := ctx.Form.StringOptional("password"); v != nil {
+	if v, err := ctx.Form.StringOptional("password"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Password = *v
 	}
 
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.ReturnTo = *v
 	}
 

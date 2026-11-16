@@ -2,7 +2,9 @@ package routes
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"azugo.io/auth"
@@ -14,6 +16,127 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/valyala/fasthttp"
 )
+
+type failedBodyReader struct{}
+
+func (failedBodyReader) Read([]byte) (int, error) {
+	return 0, errors.New("body read failed")
+}
+
+func TestRouteBodyReadErrors(t *testing.T) {
+	app := newTestApp(t)
+	h := &Handler{}
+	handlers := map[string]azugo.RequestHandler{
+		"/account-input": func(ctx *azugo.Context) {
+			_, _, err := h.readAccountInput(ctx)
+			if err != nil {
+				ctx.Error(err)
+			}
+		},
+		"/step-input": func(ctx *azugo.Context) {
+			_, err := readStepInput(ctx)
+			if err != nil {
+				ctx.Error(err)
+			}
+		},
+		"/return-to": func(ctx *azugo.Context) {
+			_, err := returnTo(ctx)
+			if err != nil {
+				ctx.Error(err)
+			}
+		},
+		"/resolve": h.resolveStep,
+		"/switch":  h.switchSession,
+	}
+
+	for path, handler := range handlers {
+		app.Post(path, func(ctx *azugo.Context) {
+			ctx.SetMaxBodySize(5)
+			handler(ctx)
+		})
+	}
+
+	for _, path := range []string{"/account-input", "/step-input", "/return-to", "/resolve", "/switch"} {
+		for _, contentType := range []string{"application/json", "application/x-www-form-urlencoded"} {
+			if path == "/return-to" && contentType == "application/json" {
+				continue
+			}
+			t.Run(path+"/"+contentType, func(t *testing.T) {
+				var raw fasthttp.RequestCtx
+				raw.Request.Header.SetMethod("POST")
+				raw.Request.SetRequestURI(path + "?return_to=/fallback")
+				raw.Request.Header.SetContentType(contentType)
+				raw.Request.SetBodyStream(strings.NewReader("123456"), -1)
+				defer raw.Request.Reset()
+				app.Handler(&raw)
+				qt.Check(t, qt.Equals(raw.Response.StatusCode(), 413))
+			})
+		}
+	}
+
+	for _, path := range []string{"/account-input", "/step-input", "/return-to", "/resolve", "/switch"} {
+		for _, contentType := range []string{"application/json", "application/x-www-form-urlencoded"} {
+			if path == "/return-to" && contentType == "application/json" {
+				continue
+			}
+			t.Run(path+"/read-error/"+contentType, func(t *testing.T) {
+				var raw fasthttp.RequestCtx
+				raw.Request.Header.SetMethod("POST")
+				raw.Request.SetRequestURI(path + "?return_to=/fallback")
+				raw.Request.Header.SetContentType(contentType)
+				raw.Request.SetBodyStream(failedBodyReader{}, -1)
+				defer raw.Request.Reset()
+				app.Handler(&raw)
+				qt.Check(t, qt.Equals(raw.Response.StatusCode(), 400))
+			})
+		}
+	}
+
+	for _, path := range []string{"/account-input", "/step-input"} {
+		t.Run(path+"/empty-json", func(t *testing.T) {
+			var raw fasthttp.RequestCtx
+			raw.Request.Header.SetMethod("POST")
+			raw.Request.SetRequestURI(path)
+			raw.Request.Header.SetContentType("application/json")
+			app.Handler(&raw)
+			qt.Check(t, qt.Equals(raw.Response.StatusCode(), 200))
+		})
+	}
+}
+
+func TestReturnToFormPrecedence(t *testing.T) {
+	app := newTestApp(t)
+	app.Post("/return-to", func(ctx *azugo.Context) {
+		value, err := returnTo(ctx)
+		if err != nil {
+			ctx.Error(err)
+			return
+		}
+		ctx.Raw([]byte(value))
+	})
+
+	for _, tt := range []struct {
+		name        string
+		contentType string
+		body        string
+		want        string
+	}{
+		{"form", "application/x-www-form-urlencoded", "return_to=%2Fform", "/form"},
+		{"query fallback", "application/x-www-form-urlencoded", "", "/query"},
+		{"json query", "application/json", `{"return_to":"/body"}`, "/query"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw fasthttp.RequestCtx
+			raw.Request.Header.SetMethod("POST")
+			raw.Request.SetRequestURI("/return-to?return_to=/query")
+			raw.Request.Header.SetContentType(tt.contentType)
+			raw.Request.SetBodyString(tt.body)
+			app.Handler(&raw)
+			qt.Check(t, qt.Equals(raw.Response.StatusCode(), 200))
+			qt.Check(t, qt.Equals(string(raw.Response.Body()), tt.want))
+		})
+	}
+}
 
 // tenantStep asks for a tenant once per login and switches between tenants.
 type tenantStep struct{}

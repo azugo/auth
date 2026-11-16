@@ -70,7 +70,11 @@ func (r *router) mfaPage(ctx *azugo.Context) {
 // mfaResend sends a fresh challenge for the selected method, under the resend limits.
 func (r *router) mfaResend(ctx *azugo.Context) {
 	returnTo := ""
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		returnTo = *v
 	}
 
@@ -106,12 +110,20 @@ func (r *router) finishStep(ctx *azugo.Context, res auth.LoginResult, returnTo s
 // mfaVerify submits the code for the selected method.
 func (r *router) mfaVerify(ctx *azugo.Context) {
 	returnTo := ""
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		returnTo = *v
 	}
 
 	req := r.stepRequest(ctx, returnTo)
-	if v := ctx.Form.StringOptional("code"); v != nil {
+	if v, err := ctx.Form.StringOptional("code"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Response = map[string]any{"code": *v}
 	}
 
@@ -133,12 +145,20 @@ func (r *router) mfaVerify(ctx *azugo.Context) {
 // mfaBegin switches the pending login to another enrolled method.
 func (r *router) mfaBegin(ctx *azugo.Context) {
 	returnTo := ""
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		returnTo = *v
 	}
 
 	req := r.stepRequest(ctx, returnTo)
-	if v := ctx.Form.StringOptional("method"); v != nil {
+	if v, err := ctx.Form.StringOptional("method"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Method = *v
 	}
 

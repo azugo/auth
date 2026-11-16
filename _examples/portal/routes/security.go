@@ -103,16 +103,28 @@ func (r *router) mfaEnrollFinish(ctx *azugo.Context) {
 	method := ctx.Params.String("method")
 
 	response := map[string]any{}
-	if v := ctx.Form.StringOptional("code"); v != nil {
+	if v, err := ctx.Form.StringOptional("code"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		response["code"] = *v
 	}
 
-	if v := ctx.Form.StringOptional("device"); v != nil {
+	if v, err := ctx.Form.StringOptional("device"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		response["device"] = *v
 	}
 
 	label := ""
-	if v := ctx.Form.StringOptional("label"); v != nil {
+	if v, err := ctx.Form.StringOptional("label"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		label = *v
 	}
 
@@ -136,8 +148,19 @@ func (r *router) mfaEnrollFinish(ctx *azugo.Context) {
 	ctx.Flash.FieldError("code", errorMessage(err, "Invalid code. Check your authenticator app and try again."))
 
 	// The hidden fields are client-supplied: only an otpauth URI is ever rendered back.
-	secret := ctx.Form.StringOptional("secret")
-	uri := ctx.Form.StringOptional("uri")
+	secret, err := ctx.Form.StringOptional("secret")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
+	uri, err := ctx.Form.StringOptional("uri")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
 
 	if secret != nil && uri != nil && strings.HasPrefix(*uri, "otpauth://") {
 		_ = ctx.Flash.Set("enrollment", views.Enrollment{Method: method, Secret: *secret, URI: *uri})

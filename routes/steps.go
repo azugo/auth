@@ -11,18 +11,20 @@ import (
 )
 
 // returnTo reads return_to from the query string, or from the body of a plain HTML form.
-func returnTo(ctx *azugo.Context) string {
+func returnTo(ctx *azugo.Context) (string, error) {
 	if !bytes.HasPrefix(ctx.Request().Header.ContentType(), []byte(http.ContentTypeJSON)) {
-		if v := ctx.Form.StringOptional("return_to"); v != nil {
-			return *v
+		if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+			return "", err
+		} else if v != nil {
+			return *v, nil
 		}
 	}
 
 	if v := ctx.Query.StringOptional("return_to"); v != nil {
-		return *v
+		return *v, nil
 	}
 
-	return ""
+	return "", nil
 }
 
 // sameOriginCookie refuses a request authenticated by the session cookie that a page of another
@@ -41,11 +43,25 @@ func sameOriginCookie(next azugo.RequestHandler) azugo.RequestHandler {
 
 // resolveStep implements POST /steps/{name}: submit the body to the pending login step.
 func (h *Handler) resolveStep(ctx *azugo.Context) {
+	payload, err := ctx.Body.Bytes()
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
+	returnTo, err := returnTo(ctx)
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	res, err := h.auth.ResolveStep(ctx, auth.StepRequest{
 		Token:     h.auth.ReadSessionToken(ctx),
 		Name:      ctx.Params.String("name"),
-		Payload:   ctx.Body.Bytes(),
-		ReturnTo:  returnTo(ctx),
+		Payload:   payload,
+		ReturnTo:  returnTo,
 		BaseURL:   ctx.BaseURL(),
 		MountPath: h.mountPrefix,
 		IP:        ctx.IP().String(),
@@ -64,8 +80,15 @@ func (h *Handler) resolveStep(ctx *azugo.Context) {
 func (h *Handler) switchSession(ctx *azugo.Context) {
 	var selection map[string]any
 
+	body, err := ctx.Body.Bytes()
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	if bytes.HasPrefix(ctx.Request().Header.ContentType(), []byte(http.ContentTypeJSON)) {
-		if len(ctx.Body.Bytes()) > 0 {
+		if len(body) > 0 {
 			if err := ctx.Body.JSON(&selection); err != nil {
 				ctx.Error(err)
 
@@ -82,10 +105,17 @@ func (h *Handler) switchSession(ctx *azugo.Context) {
 		}
 	}
 
+	returnTo, err := returnTo(ctx)
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	res, err := h.auth.SwitchSession(ctx, auth.SwitchSessionRequest{
 		Token:     h.auth.ReadSessionToken(ctx),
 		Selection: selection,
-		ReturnTo:  returnTo(ctx),
+		ReturnTo:  returnTo,
 		BaseURL:   ctx.BaseURL(),
 		MountPath: h.mountPrefix,
 		IP:        ctx.IP().String(),

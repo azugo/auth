@@ -871,14 +871,34 @@ func TestConcurrentContactSendsStayUnderTheResendCap(t *testing.T) {
 
 	// Each send is counted before it goes out, so racing sends cannot all pass the cap.
 	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make(chan error, 8)
 
 	for range 8 {
 		wg.Go(func() {
-			_, _ = a.AddContact(context.Background(), ContactRequest{Token: tok, Channel: ChannelEmail, Address: "a1@example.com"})
+			<-start
+			_, err := a.AddContact(context.Background(), ContactRequest{Token: tok, Channel: ChannelEmail, Address: "a1@example.com"})
+			results <- err
 		})
 	}
 
+	close(start)
 	wg.Wait()
+	close(results)
+
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else {
+			qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeSlowDown))
+		}
+	}
+
+	qt.Assert(t, qt.Equals(successes, 2))
+	for range successes {
+		users.awaitDelivery(t)
+	}
 
 	users.mu.Lock()
 	defer users.mu.Unlock()

@@ -52,7 +52,12 @@ func (h *Handler) readAccountInput(ctx *azugo.Context) (accountInput, auth.Clien
 	var in accountInput
 
 	if bytes.HasPrefix(ctx.Request().Header.ContentType(), []byte(http.ContentTypeJSON)) {
-		if len(ctx.Body.Bytes()) > 0 {
+		body, err := ctx.Body.Bytes()
+		if err != nil {
+			return in, auth.ClientCredentials{}, err
+		}
+
+		if len(body) > 0 {
 			if err := ctx.Body.JSON(&in); err != nil {
 				return in, auth.ClientCredentials{}, err
 			}
@@ -66,11 +71,17 @@ func (h *Handler) readAccountInput(ctx *azugo.Context) (accountInput, auth.Clien
 		return in, auth.ClientCredentials{}, err
 	}
 
-	if v := ctx.Form.StringOptional("username"); v != nil {
+	if v, err := ctx.Form.StringOptional("username"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Username = *v
 	}
 
 	// A plain form carries each contact address as contact_<channel>.
+	if _, err := ctx.Body.Bytes(); err != nil {
+		return in, auth.ClientCredentials{}, err
+	}
+
 	for k, v := range ctx.Request().PostArgs().All() {
 		if channel, ok := strings.CutPrefix(string(k), "contact_"); ok && channel != "" {
 			if in.Contacts == nil {
@@ -81,15 +92,21 @@ func (h *Handler) readAccountInput(ctx *azugo.Context) (accountInput, auth.Clien
 		}
 	}
 
-	if v := ctx.Form.StringOptional("password"); v != nil {
+	if v, err := ctx.Form.StringOptional("password"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Password = *v
 	}
 
-	if v := ctx.Form.StringOptional("current_password"); v != nil {
+	if v, err := ctx.Form.StringOptional("current_password"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.CurrentPassword = *v
 	}
 
-	if v := ctx.Form.StringOptional("new_password"); v != nil {
+	if v, err := ctx.Form.StringOptional("new_password"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.NewPassword = *v
 	}
 
@@ -107,40 +124,58 @@ func (h *Handler) readAccountInput(ctx *azugo.Context) (accountInput, auth.Clien
 
 	in.RevokeAPIKeys = revoke != nil && *revoke
 
-	if v := ctx.Form.StringOptional("identifier"); v != nil {
+	if v, err := ctx.Form.StringOptional("identifier"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Identifier = *v
 	}
 
-	if v := ctx.Form.StringOptional("method"); v != nil {
+	if v, err := ctx.Form.StringOptional("method"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Method = *v
 	}
 
-	if v := ctx.Form.StringOptional("reset_token"); v != nil {
+	if v, err := ctx.Form.StringOptional("reset_token"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.ResetToken = *v
 	}
 
-	if v := ctx.Form.StringOptional("request"); v != nil {
+	if v, err := ctx.Form.StringOptional("request"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Request = *v
 	}
 
-	if v := ctx.Form.StringOptional("channel"); v != nil {
+	if v, err := ctx.Form.StringOptional("channel"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Channel = *v
 	}
 
-	if v := ctx.Form.StringOptional("address"); v != nil {
+	if v, err := ctx.Form.StringOptional("address"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Address = *v
 	}
 
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.ReturnTo = *v
 	}
 
 	// A plain form carries the proof as code or token.
-	if v := ctx.Form.StringOptional("code"); v != nil {
+	if v, err := ctx.Form.StringOptional("code"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		in.Response = map[string]any{"code": *v}
 	}
 
-	if v := ctx.Form.StringOptional("token"); v != nil {
+	if v, err := ctx.Form.StringOptional("token"); err != nil {
+		return in, auth.ClientCredentials{}, err
+	} else if v != nil {
 		if in.Response == nil {
 			in.Response = make(map[string]any, 1)
 		}

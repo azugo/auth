@@ -49,17 +49,32 @@ func (r *router) apiKeysPage(ctx *azugo.Context) {
 
 // createAPIKey submits the new key form and shows the token once.
 func (r *router) createAPIKey(ctx *azugo.Context) {
+	scope, err := ctx.Form.Values("scope")
+	if err != nil {
+		ctx.Error(err)
+
+		return
+	}
+
 	req := auth.CreateAPIKeyRequest{
 		Token: r.Auth().ReadSessionToken(ctx),
-		Scope: strings.Join(ctx.Form.Values("scope"), " "),
+		Scope: strings.Join(scope, " "),
 		IP:    ctx.IP().String(),
 	}
 
-	if v := ctx.Form.StringOptional("name"); v != nil {
+	if v, err := ctx.Form.StringOptional("name"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.Name = *v
 	}
 
-	if v := ctx.Form.StringOptional("expires"); v != nil && *v != "" {
+	if v, err := ctx.Form.StringOptional("expires"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil && *v != "" {
 		days, err := strconv.Atoi(*v)
 		if err != nil || days <= 0 {
 			ctx.Flash.Error("Choose a valid expiry.")

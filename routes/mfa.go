@@ -26,38 +26,57 @@ func readStepInput(ctx *azugo.Context) (stepInput, error) {
 	var in stepInput
 
 	if bytes.HasPrefix(ctx.Request().Header.ContentType(), []byte(http.ContentTypeJSON)) {
-		if len(ctx.Body.Bytes()) == 0 {
+		body, err := ctx.Body.Bytes()
+		if err != nil {
+			return in, err
+		}
+
+		if len(body) == 0 {
 			return in, nil
 		}
 
 		return in, ctx.Body.JSON(&in)
 	}
 
-	if v := ctx.Form.StringOptional("action"); v != nil {
+	if v, err := ctx.Form.StringOptional("action"); err != nil {
+		return in, err
+	} else if v != nil {
 		in.Action = *v
 	}
 
-	if v := ctx.Form.StringOptional("method"); v != nil {
+	if v, err := ctx.Form.StringOptional("method"); err != nil {
+		return in, err
+	} else if v != nil {
 		in.Method = *v
 	}
 
-	if v := ctx.Form.StringOptional("password"); v != nil {
+	if v, err := ctx.Form.StringOptional("password"); err != nil {
+		return in, err
+	} else if v != nil {
 		in.Password = *v
 	}
 
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		return in, err
+	} else if v != nil {
 		in.ReturnTo = *v
 	}
 
-	if v := ctx.Form.StringOptional("label"); v != nil {
+	if v, err := ctx.Form.StringOptional("label"); err != nil {
+		return in, err
+	} else if v != nil {
 		in.Label = *v
 	}
 
-	if v := ctx.Form.StringOptional("code"); v != nil {
+	if v, err := ctx.Form.StringOptional("code"); err != nil {
+		return in, err
+	} else if v != nil {
 		in.Response = map[string]any{"code": *v}
 	}
 
-	if v := ctx.Form.StringOptional("device"); v != nil {
+	if v, err := ctx.Form.StringOptional("device"); err != nil {
+		return in, err
+	} else if v != nil {
 		if in.Response == nil {
 			in.Response = make(map[string]any, 1)
 		}

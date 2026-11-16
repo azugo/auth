@@ -31,7 +31,11 @@ func (r *router) acceptRules(ctx *azugo.Context) {
 		IP:      ctx.IP().String(),
 	}
 
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.ReturnTo = *v
 	}
 
@@ -40,8 +44,16 @@ func (r *router) acceptRules(ctx *azugo.Context) {
 		Version string `json:"version"`
 	}
 
-	if v := ctx.Form.StringOptional("accept"); v != nil && *v != "" {
-		if version := ctx.Form.StringOptional("version"); version != nil {
+	if v, err := ctx.Form.StringOptional("accept"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil && *v != "" {
+		if version, err := ctx.Form.StringOptional("version"); err != nil {
+			ctx.Error(err)
+
+			return
+		} else if version != nil {
 			in.Version = *version
 		}
 	}

@@ -34,27 +34,51 @@ func (r *router) changePassword(ctx *azugo.Context) {
 		IP:      ctx.IP().String(),
 	}
 
-	if v := ctx.Form.StringOptional("return_to"); v != nil {
+	if v, err := ctx.Form.StringOptional("return_to"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.ReturnTo = *v
 	}
 
-	if v := ctx.Form.StringOptional("current_password"); v != nil {
+	if v, err := ctx.Form.StringOptional("current_password"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.CurrentPassword = *v
 	}
 
-	if v := ctx.Form.StringOptional("new_password"); v != nil {
+	if v, err := ctx.Form.StringOptional("new_password"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.NewPassword = *v
 	}
 
-	if v, err := ctx.Form.BoolOptional("keep_other_sessions"); err == nil && v != nil {
+	if v, err := ctx.Form.BoolOptional("keep_other_sessions"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.KeepOtherSessions = *v
 	}
 
-	if v, err := ctx.Form.BoolOptional("revoke_api_keys"); err == nil && v != nil {
+	if v, err := ctx.Form.BoolOptional("revoke_api_keys"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v != nil {
 		req.RevokeAPIKeys = *v
 	}
 
-	if v := ctx.Form.StringOptional("confirm_password"); v == nil || *v != req.NewPassword {
+	if v, err := ctx.Form.StringOptional("confirm_password"); err != nil {
+		ctx.Error(err)
+
+		return
+	} else if v == nil || *v != req.NewPassword {
 		ctx.Flash.FieldError("confirm_password", "The passwords do not match.")
 		ctx.Redirect(pageURL("/password", req.ReturnTo))
 
