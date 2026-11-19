@@ -691,6 +691,15 @@ func (a *Auth) pendingUntil(sess *session.Session) time.Time {
 	return until
 }
 
+// idleExpiresAt is the idle deadline of a session active at now, zero without an idle timeout.
+func (a *Auth) idleExpiresAt(now time.Time) time.Time {
+	if a.config.SessionIdleTTL <= 0 {
+		return time.Time{}
+	}
+
+	return now.Add(a.config.SessionIdleTTL)
+}
+
 // issueStepToken mints a step token bound to the pending sess, returning it with its jti.
 func (a *Auth) issueStepToken(ctx context.Context, sess *session.Session, cl *client.Client) (string, string, error) {
 	jti, err := newJTI()
@@ -791,6 +800,8 @@ func (a *Auth) stepSession(ctx context.Context, tok string, statuses ...session.
 	if err != nil {
 		return nil, NewOAuthErrorFrom(err)
 	}
+
+	a.RecordActivity(ctx, sess)
 
 	sc := &stepContext{sess: sess, claims: claims, client: cl}
 
@@ -1149,6 +1160,11 @@ func (a *Auth) SwitchSession(ctx context.Context, in SwitchSessionRequest) (Logi
 			return LoginResult{}, err
 		}
 
+		// The session does not idle out while the switch waits on its step, e.g. a mailed code.
+		if until := a.pendingUntil(old); a.config.SessionIdleTTL > 0 && until.After(old.IdleExpiresAt) {
+			_ = a.sessions.Touch(ctx, old.ID, until)
+		}
+
 		for _, id := range replaced {
 			_ = a.jti.Revoke(ctx, id)
 		}
@@ -1168,6 +1184,10 @@ func (a *Auth) SwitchSession(ctx context.Context, in SwitchSessionRequest) (Logi
 // replaces, retires the credentials in retired and issues its new session cookie, all at once.
 func (a *Auth) commitSession(ctx context.Context, sess *session.Session, replaces string, retired []string, now time.Time) (string, string, error) {
 	var cookie, jti string
+
+	if sess.Status == session.StatusActive {
+		sess.IdleExpiresAt = a.idleExpiresAt(now)
+	}
 
 	if err := a.Transaction.Run(ctx, func(ctx context.Context) error {
 		if sess.ID == "" {

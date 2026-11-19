@@ -144,15 +144,19 @@ func TestIntrospectWithAPIKeyDecodesEitherKind(t *testing.T) {
 	res, err := a.CreateAPIKey(context.Background(), CreateAPIKeyRequest{Token: tok, Name: "ci", Scope: "profile"})
 	qt.Assert(t, qt.IsNil(err))
 
-	info, err := a.IntrospectWithAPIKey(context.Background(), res.Token)
+	// An API key has no session; an access token resolves its own.
+	info, sess, err := a.IntrospectWithAPIKey(context.Background(), res.Token)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.Scope, "profile"))
+	qt.Check(t, qt.IsNil(sess))
 
-	info, err = a.IntrospectWithAPIKey(context.Background(), tok)
+	info, sess, err = a.IntrospectWithAPIKey(context.Background(), tok)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "u1"))
+	qt.Assert(t, qt.IsNotNil(sess))
+	qt.Check(t, qt.Equals(sess.UserID, "u1"))
 
-	_, err = a.IntrospectWithAPIKey(context.Background(), "")
+	_, _, err = a.IntrospectWithAPIKey(context.Background(), "")
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
 }
 
@@ -679,7 +683,7 @@ func TestAPIKeyFollowsItsClient(t *testing.T) {
 	_, _, err = a.ValidateAPIKey(context.Background(), res.Token)
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
 
-	_, err = a.IntrospectWithAPIKey(context.Background(), res.Token)
+	_, _, err = a.IntrospectWithAPIKey(context.Background(), res.Token)
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken))
 }
 

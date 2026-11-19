@@ -138,6 +138,14 @@ See `_examples/portal` for a complete server-side-rendered app wiring all of the
 * `AUTH_PENDING_TTL` - How long a login, or a session switch, may wait on its steps (MFA,
   contact verification, app steps), and the lifetime of its step token. Default `30m`.
 * `AUTH_SESSION_TTL` - Session lifetime. Default `8h`.
+* `AUTH_SESSION_IDLE_TTL` - Ends an active session after this long without activity; must
+  exceed `AUTH_ACCESS_TOKEN_TTL`. Default unset (no idle limit). Activity is a login, refresh,
+  session switch or re-authentication, every request `middleware.Auth` accepts (opaque or JWT
+  access token, session cookie), every `/introspect` of a session token, and
+  `POST /session/activity`, which an SPA calls on user input that needs no backend call
+  (throttled to about once a minute). The idle deadline is written at most once per tenth of
+  the TTL, so a session may end up to that much early. A client that refreshes or polls on a
+  timer keeps its session alive.
 * `AUTH_CODE_TTL` - Authorization-code lifetime. Default `60s`.
 * `AUTH_EXTERNAL_STATE_TTL` - Time a user has to complete an external IdP round-trip, from redirect
   to callback. Default `15m`.

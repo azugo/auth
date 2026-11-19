@@ -40,10 +40,11 @@ type ExternalRoutes struct {
 
 // SessionRoutes holds the suppressible self-service session adapters.
 type SessionRoutes struct {
-	Get    azugo.RequestHandler // GET /session
-	Delete azugo.RequestHandler // DELETE /session
-	List   azugo.RequestHandler // GET /sessions
-	Revoke azugo.RequestHandler // DELETE /sessions/{id}
+	Get      azugo.RequestHandler // GET /session
+	Delete   azugo.RequestHandler // DELETE /session
+	Activity azugo.RequestHandler // POST /session/activity
+	List     azugo.RequestHandler // GET /sessions
+	Revoke   azugo.RequestHandler // DELETE /sessions/{id}
 	// ResolveStep is set only when login steps are registered.
 	ResolveStep azugo.RequestHandler // POST /steps/{name}
 	// Switch is set only when a login step implements auth.Switcher.
@@ -353,6 +354,7 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 
 	h.Session.Get = h.getSession
 	h.Session.Delete = h.deleteSession
+	h.Session.Activity = sameOriginCookie(h.sessionActivity)
 
 	if _, ok := a.Users().(auth.Registerer); ok {
 		h.Account.Register = h.register
@@ -449,6 +451,7 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 		case SessionGroup:
 			g.Get("/session", h.Session.Get)
 			g.Delete("/session", h.Session.Delete)
+			g.Post("/session/activity", h.Session.Activity)
 
 			if h.Session.List != nil {
 				g.Get("/sessions", h.Session.List)

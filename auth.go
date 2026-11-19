@@ -123,6 +123,8 @@ type Auth struct {
 	mfaMethods mfa.Registry
 	// pending holds the step state of pending sessions, keyed by session ID
 	pending cache.Instance[pendingState]
+	// activity marks, per instance, sessions whose JWT activity was recorded within a step
+	activity cache.Instance[bool]
 	// enrollments holds in-progress MFA enrollment state, keyed by user ID and method
 	enrollments cache.Instance[mfaEnrollment]
 	// challenges counts issued MFA and reset challenges per pending flow and method
@@ -437,6 +439,13 @@ func New(app *core.App, config *Configuration, users UserProvider, sessions sess
 	}
 
 	a.pending = pending
+
+	activity, err := cache.Create[bool](app.Cache(), "auth:activity", cache.MemoryCache, cache.SensitiveKeys())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session activity cache: %w", err)
+	}
+
+	a.activity = activity
 
 	if _, ok := users.(PasswordResetter); ok {
 		if a.resets == nil {

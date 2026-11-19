@@ -135,8 +135,8 @@ func (m *memoryStore) Update(_ context.Context, s *Session) error {
 	return nil
 }
 
-// Touch updates session activity by updating LastSeen time.
-func (m *memoryStore) Touch(_ context.Context, id string) error {
+// Touch records activity on an active session.
+func (m *memoryStore) Touch(_ context.Context, id string, idleExpiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -150,6 +150,7 @@ func (m *memoryStore) Touch(_ context.Context, id string) error {
 	}
 
 	s.LastSeen = time.Now()
+	s.IdleExpiresAt = idleExpiresAt
 
 	return nil
 }

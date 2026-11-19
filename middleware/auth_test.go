@@ -1,11 +1,14 @@
 package middleware
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"azugo.io/auth"
 	"azugo.io/auth/apikey"
 	"azugo.io/auth/client"
+	"azugo.io/auth/session"
 
 	"azugo.io/azugo"
 	"github.com/go-quicktest/qt"
@@ -256,5 +259,55 @@ func TestAuthMiddlewareRefusesAPIKeyCookie(t *testing.T) {
 
 		qt.Check(t, qt.Equals(string(body), want), qt.Commentf(name))
 		fasthttp.ReleaseResponse(resp)
+	}
+}
+
+func TestAuthMiddlewareRecordsSessionActivity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		typ  client.AccessTokenType
+		opts []auth.Option
+		mw   []AuthOption
+	}{
+		"opaque":         {client.AccessTokenTypeIntrospect, nil, nil},
+		"opaque api key": {client.AccessTokenTypeIntrospect, nil, []AuthOption{APIKey()}},
+		"jwt":            {client.AccessTokenTypeJWT, []auth.Option{auth.KeyProvider(jwtKeys(t))}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.SessionIdleTTL = 30 * time.Minute
+
+			a := newTestAuthWithConfig(t, cfg, &client.Client{
+				ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+				AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+				AccessTokenType: tc.typ,
+			}, tc.opts...)
+			login := loginFor(t, a, "spa")
+
+			ctx := context.Background()
+			sessions, _, err := a.Sessions().(session.Lister).List(ctx, "u1", nil, nil)
+			qt.Assert(t, qt.IsNil(err))
+			qt.Assert(t, qt.HasLen(sessions, 1))
+
+			sess := sessions[0]
+			sess.IdleExpiresAt = time.Now().Add(time.Minute)
+			qt.Assert(t, qt.IsNil(a.Sessions().Update(ctx, sess)))
+
+			app := newTestApp(t)
+			app.Use(Auth(a, tc.mw...))
+			app.Get("/", func(ctx *azugo.Context) {
+				ctx.Text(ctx.User().ID())
+			})
+
+			hc := app.TestClient()
+
+			resp, err := hc.Get("/", hc.WithHeader("Authorization", "Bearer "+login.AccessToken))
+			defer fasthttp.ReleaseResponse(resp)
+			qt.Assert(t, qt.IsNil(err))
+			qt.Check(t, qt.Equals(string(resp.Body()), "u1"))
+
+			sess, err = a.Sessions().Get(ctx, sess.ID)
+			qt.Assert(t, qt.IsNil(err))
+			qt.Check(t, qt.IsTrue(time.Until(sess.IdleExpiresAt) > 29*time.Minute))
+		})
 	}
 }

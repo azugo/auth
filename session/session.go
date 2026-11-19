@@ -63,12 +63,23 @@ type Session struct {
 	CreatedAt time.Time
 	LastSeen  time.Time
 	ExpiresAt time.Time
-	RevokedAt *time.Time
+	// IdleExpiresAt ends the session early unless activity moves it on (zero = no idle limit).
+	IdleExpiresAt time.Time
+	RevokedAt     *time.Time
+}
+
+// Deadline returns when the session expires: ExpiresAt, or IdleExpiresAt when that comes first.
+func (s *Session) Deadline() time.Time {
+	if !s.IdleExpiresAt.IsZero() && s.IdleExpiresAt.Before(s.ExpiresAt) {
+		return s.IdleExpiresAt
+	}
+
+	return s.ExpiresAt
 }
 
 // Valid returns true when the session is still alive, not revoked and not expired.
 func (s *Session) Valid() bool {
-	return s.RevokedAt == nil && time.Now().Before(s.ExpiresAt)
+	return s.RevokedAt == nil && time.Now().Before(s.Deadline())
 }
 
 // AuthenticatedAt returns when the user last authenticated.
@@ -129,8 +140,9 @@ type Store interface {
 	Get(ctx context.Context, id string) (*Session, error)
 	// Update persists the current state of an existing session (status, MFA/ACR fields, expiry).
 	Update(ctx context.Context, s *Session) error
-	// Touch updates session as active (usually by updating LastSeen time).
-	Touch(ctx context.Context, id string) error
+	// Touch records activity on an active session: LastSeen becomes now and IdleExpiresAt
+	// idleExpiresAt.
+	Touch(ctx context.Context, id string, idleExpiresAt time.Time) error
 	// Revoke session and invalidate it.
 	Revoke(ctx context.Context, id string) error
 }

@@ -388,6 +388,7 @@ func (a *Auth) issueAccessToken(ctx context.Context, sess *session.Session, cl *
 				AMR:       sess.AuthenticatedMethods(),
 				GrantType: grantType,
 				JKT:       jkt,
+				SessionID: sess.ID,
 			},
 			baseURL, mountPath)
 	}

@@ -44,7 +44,10 @@ type Configuration struct {
 	LogoutPolicy   LogoutPolicy  `mapstructure:"logout_policy"     validate:"omitempty,oneof=confirm id_token_hint"`
 	AccessTokenTTL time.Duration `mapstructure:"access_token_ttl" validate:"required"` // default: 20m
 	SessionTTL     time.Duration `mapstructure:"session_ttl"      validate:"required"` // default: 8h
-	CodeTTL        time.Duration `mapstructure:"code_ttl"`                             // authorization-code lifetime; default: 60s
+	// SessionIdleTTL ends an active session that goes this long without a refresh, login,
+	// switch or re-authentication.
+	SessionIdleTTL time.Duration `mapstructure:"session_idle_ttl" validate:"omitempty,gtfield=AccessTokenTTL"`
+	CodeTTL        time.Duration `mapstructure:"code_ttl"` // authorization-code lifetime; default: 60s
 	// PendingTTL bounds a login, or a session switch, waiting on its steps, and its step token.
 	// Default 30m, so a mailed verification code can arrive meanwhile.
 	PendingTTL time.Duration `mapstructure:"pending_ttl"`
@@ -251,6 +254,7 @@ func (c *Configuration) Bind(prefix string, v *viper.Viper) {
 	_ = v.BindEnv(prefix+".access_token_ttl", "AUTH_ACCESS_TOKEN_TTL")
 	_ = v.BindEnv(prefix+".pending_ttl", "AUTH_PENDING_TTL")
 	_ = v.BindEnv(prefix+".session_ttl", "AUTH_SESSION_TTL")
+	_ = v.BindEnv(prefix+".session_idle_ttl", "AUTH_SESSION_IDLE_TTL")
 	_ = v.BindEnv(prefix+".code_ttl", "AUTH_CODE_TTL")
 	_ = v.BindEnv(prefix+".external_state_ttl", "AUTH_EXTERNAL_STATE_TTL")
 	_ = v.BindEnv(prefix+".password_reset_ttl", "AUTH_PASSWORD_RESET_TTL")

@@ -146,7 +146,7 @@ func (r *router) revokeAPIKey(ctx *azugo.Context) {
 // me implements GET /api/me, a JSON endpoint an API key can call: who the caller is and the
 // scope the credential carries.
 func (r *router) me(ctx *azugo.Context) {
-	info, err := r.Auth().IntrospectWithAPIKey(ctx, r.Auth().ReadSessionToken(ctx))
+	info, _, err := r.Auth().IntrospectWithAPIKey(ctx, r.Auth().ReadSessionToken(ctx))
 	if err != nil {
 		ctx.Error(err)
 

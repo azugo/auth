@@ -66,7 +66,7 @@ func TestMemoryStoreTouchAndRevoke(t *testing.T) {
 
 	qt.Assert(t, qt.IsNil(store.Create(ctx, &Session{ID: "sid-1", UserID: "user-1", Status: StatusActive, ExpiresAt: time.Now().Add(time.Hour)})))
 
-	qt.Assert(t, qt.IsNil(store.Touch(ctx, "sid-1")))
+	qt.Assert(t, qt.IsNil(store.Touch(ctx, "sid-1", time.Time{})))
 	got, err := store.Get(ctx, "sid-1")
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.IsFalse(got.LastSeen.IsZero()))
@@ -78,9 +78,9 @@ func TestMemoryStoreTouchAndRevoke(t *testing.T) {
 	qt.Check(t, qt.IsFalse(got.Active()))
 
 	// A revoked session is retained (still Get-able for Lister) but no longer touchable.
-	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "sid-1"), ErrNotFound))
+	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "sid-1", time.Time{}), ErrNotFound))
 
-	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "missing"), ErrNotFound))
+	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "missing", time.Time{}), ErrNotFound))
 }
 
 func TestMemoryStoreCreateRejectsDead(t *testing.T) {
@@ -104,7 +104,7 @@ func TestMemoryStoreTouchRejectsExpired(t *testing.T) {
 	qt.Assert(t, qt.IsNil(store.Create(ctx, &Session{ID: "sid-1", UserID: "user-1", Status: StatusActive, ExpiresAt: time.Now().Add(20 * time.Millisecond)})))
 	time.Sleep(30 * time.Millisecond)
 
-	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "sid-1"), ErrNotFound))
+	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "sid-1", time.Time{}), ErrNotFound))
 }
 
 func TestMemoryStoreListOrdersByLastSeenDesc(t *testing.T) {
@@ -219,4 +219,29 @@ func TestMemoryStoreOwnsItsStrings(t *testing.T) {
 	qt.Check(t, qt.Equals(got.Step, "tenant-step"))
 	qt.Check(t, qt.Equals(got.Context["tenant"], any("tenant-step")))
 	qt.Check(t, qt.DeepEquals(got.AMR, []string{"tenant-step"}))
+}
+
+func TestIdleDeadline(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now()
+
+	qt.Assert(t, qt.IsNil(store.Create(ctx, &Session{ID: "sid-1", Status: StatusActive, ExpiresAt: now.Add(time.Hour), IdleExpiresAt: now.Add(time.Minute)})))
+
+	got, err := store.Get(ctx, "sid-1")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(got.Deadline(), got.IdleExpiresAt))
+
+	// Touch moves the idle deadline; past it the session is no longer valid.
+	qt.Assert(t, qt.IsNil(store.Touch(ctx, "sid-1", now.Add(-time.Second))))
+
+	got, err = store.Get(ctx, "sid-1")
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsFalse(got.Valid()))
+	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "sid-1", now.Add(time.Minute)), ErrNotFound))
+
+	// Without an idle deadline ExpiresAt alone ends the session.
+	got.IdleExpiresAt = time.Time{}
+	qt.Check(t, qt.Equals(got.Deadline(), got.ExpiresAt))
+	qt.Check(t, qt.IsTrue(got.Valid()))
 }

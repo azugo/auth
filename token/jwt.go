@@ -106,6 +106,8 @@ type AccessTokenClaims struct {
 	GrantType string
 	// JKT is the DPoP key thumbprint the token is bound to (cnf.jkt).
 	JKT string
+	// SessionID is the session the token was issued from (sid), empty for client credentials.
+	SessionID string
 }
 
 // SignAccessToken mints a signed JWT access token using signingKey.
@@ -134,6 +136,10 @@ func SignAccessToken(signingKey SigningKey, claims AccessTokenClaims) (string, e
 
 	if claims.JKT != "" {
 		m["cnf"] = map[string]any{"jkt": claims.JKT}
+	}
+
+	if claims.SessionID != "" {
+		m["sid"] = claims.SessionID
 	}
 
 	return sign(signingKey, accessTokenType, m)
@@ -178,6 +184,7 @@ func VerifyAccessToken(set *KeySet, tok string) (AccessTokenClaims, error) {
 	out.Scope, _ = claims["scope"].(string)
 	out.ACR, _ = claims["acr"].(string)
 	out.GrantType, _ = claims["gty"].(string)
+	out.SessionID, _ = claims["sid"].(string)
 
 	if amr, ok := claims["amr"].([]any); ok {
 		for _, v := range amr {

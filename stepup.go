@@ -502,6 +502,8 @@ func (a *Auth) VerifyReauth(ctx context.Context, in ReauthVerifyRequest) error {
 	}
 
 	sess.AuthTime = time.Now()
+	sess.LastSeen = sess.AuthTime
+	sess.IdleExpiresAt = a.idleExpiresAt(sess.AuthTime)
 	sess.AuthMethods = amr
 	sess.AuthMFA = st.Method != reauthPassword
 	// A re-authentication proves only itself, never the session's original primary method.

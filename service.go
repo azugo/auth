@@ -244,7 +244,7 @@ func (a *Auth) Refresh(ctx context.Context, in RefreshRequest) (LoginResult, err
 		}
 	}
 
-	_ = a.sessions.Touch(ctx, sess.ID)
+	_ = a.sessions.Touch(ctx, sess.ID, a.idleExpiresAt(time.Now()))
 
 	cookie, err := a.codec.Encrypt(token.AccessClaims{
 		Type:      token.TypeSessionCookie,
@@ -350,26 +350,9 @@ func (a *Auth) introspect(ctx context.Context, tok string) (UserInfo, *session.S
 
 // introspectClaims resolves the active session and user behind decoded access claims.
 func (a *Auth) introspectClaims(ctx context.Context, claims *token.AccessClaims) (UserInfo, *session.Session, *token.AccessClaims, error) {
-	if time.Now().Unix() >= claims.ExpiresAt {
-		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
-	}
-
-	valid, err := a.jti.Validate(ctx, claims.TokenID, claims.SessionID)
+	sess, err := a.liveSession(ctx, claims)
 	if err != nil {
-		return UserInfo{}, nil, nil, NewOAuthErrorFrom(err)
-	}
-
-	if !valid {
-		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
-	}
-
-	sess, err := a.sessions.Get(ctx, claims.SessionID)
-	if err != nil {
-		return UserInfo{}, nil, nil, NewOAuthErrorFrom(err)
-	}
-
-	if !sess.Active() {
-		return UserInfo{}, nil, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+		return UserInfo{}, nil, nil, err
 	}
 
 	info, err := a.users.GetUser(ctx, sess.UserID)
@@ -397,6 +380,34 @@ func (a *Auth) live(ctx context.Context, claims *token.AccessClaims) (bool, erro
 	}
 
 	return a.jti.Validate(ctx, claims.TokenID, claims.SessionID)
+}
+
+// liveSession resolves the active session behind decoded access claims that are still live.
+func (a *Auth) liveSession(ctx context.Context, claims *token.AccessClaims) (*session.Session, error) {
+	live, err := a.live(ctx, claims)
+	if err != nil {
+		return nil, NewOAuthErrorFrom(err)
+	}
+
+	if !live {
+		return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	return a.activeSession(ctx, claims.SessionID)
+}
+
+// activeSession loads sessionID, refusing a session that is not active.
+func (a *Auth) activeSession(ctx context.Context, sessionID string) (*session.Session, error) {
+	sess, err := a.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return nil, NewOAuthErrorFrom(err)
+	}
+
+	if !sess.Active() {
+		return nil, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	return sess, nil
 }
 
 // firstParty reports whether claims are session's own credential.
@@ -454,20 +465,24 @@ func (a *Auth) ListSessions(ctx context.Context, userID string, filter *session.
 	return lister.List(ctx, userID, filter, page)
 }
 
-// RevokeSession revokes sessionID after verifying it belongs to userID and returns the session as
-// it was loaded; an already invalid session is left as is.
+// RevokeSession revokes sessionID after verifying it belongs to userID and returns it, or nil when
+// it was already revoked, expired or gone.
 func (a *Auth) RevokeSession(ctx context.Context, userID, sessionID string) (*session.Session, error) {
 	sess, err := a.sessions.Get(ctx, sessionID)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, session.ErrNotFound):
+		sess = nil
+	case err != nil:
 		return nil, NewOAuthErrorFrom(err)
-	}
-
-	if sess.UserID != userID {
+	case sess.UserID != userID:
 		return nil, NewOAuthErrorFrom(session.ErrNotFound)
-	}
-
-	if sess.Valid() {
-		if err := a.sessions.Revoke(ctx, sessionID); err != nil {
+	case !sess.Valid():
+		sess = nil
+	default:
+		if err := a.sessions.Revoke(ctx, sessionID); errors.Is(err, session.ErrNotFound) {
+			sess = nil
+		} else if err != nil {
 			return nil, NewOAuthErrorFrom(err)
 		}
 	}

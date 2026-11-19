@@ -355,6 +355,13 @@ func TestListAndRevokeSession(t *testing.T) {
 
 	_, _, err = a.IntrospectToken(context.Background(), login.AccessToken)
 	qt.Check(t, qt.IsNotNil(err))
+
+	// A revoked or unknown session is already gone.
+	for _, id := range []string{sess.ID, "missing"} {
+		revoked, err = a.RevokeSession(context.Background(), info.ID, id)
+		qt.Check(t, qt.IsNil(err))
+		qt.Check(t, qt.IsNil(revoked))
+	}
 }
 
 func TestRevokeUserSessionsClearsFederatedIDTokens(t *testing.T) {
@@ -703,4 +710,55 @@ func TestUserInfoClaimsReleaseContactsByScope(t *testing.T) {
 	info, err := a.UserInfoClaims(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.DeepEquals(info.Contacts, map[string][]Contact{ChannelPhone: {{Address: "+37120000000", Verified: true}}}))
+}
+
+func TestSessionIdleTTL(t *testing.T) {
+	a := newServiceTestAuth(t, &client.Client{
+		ID: "ssr", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeCookie,
+	})
+	a.Config().SessionIdleTTL = 30 * time.Minute
+	ctx := context.Background()
+
+	login, err := a.Login(ctx, LoginRequest{Credentials: ClientCredentials{ClientID: "ssr"}, Username: "alice", Password: "secret123"})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, sess, err := a.IntrospectToken(ctx, login.Cookie.Value)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(time.Until(sess.IdleExpiresAt) > 29*time.Minute))
+
+	// A refresh moves the idle deadline on.
+	sess.IdleExpiresAt = time.Now().Add(time.Minute)
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(ctx, sess)))
+
+	refresh, err := a.Refresh(ctx, RefreshRequest{Token: login.Cookie.Value})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, sess, err = a.IntrospectToken(ctx, refresh.Cookie.Value)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(time.Until(sess.IdleExpiresAt) > 29*time.Minute))
+
+	// An idle session is over for introspection and refresh alike.
+	sess.IdleExpiresAt = time.Now().Add(-time.Second)
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(ctx, sess)))
+
+	_, _, err = a.IntrospectToken(ctx, refresh.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
+
+	_, err = a.Refresh(ctx, RefreshRequest{Token: refresh.Cookie.Value})
+	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeLoginRequired))
+}
+
+func TestSessionIdleTTLMustExceedAccessTokenTTL(t *testing.T) {
+	cfg := validConfig()
+	cfg.SessionIdleTTL = 20 * time.Minute
+
+	_, err := New(newApp(t), cfg, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
+	qt.Check(t, qt.IsNotNil(err))
+
+	cfg = validConfig()
+	cfg.SessionIdleTTL = 21 * time.Minute
+
+	_, err = New(newApp(t), cfg, stubUsers{}, session.NewMemoryStore(), client.NewMemoryRegistry())
+	qt.Check(t, qt.IsNil(err))
 }

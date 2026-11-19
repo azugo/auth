@@ -532,7 +532,7 @@ func TestAuthorizationCodeReplayDenyListsIssuedJWT(t *testing.T) {
 	res, err := redeem()
 	qt.Assert(t, qt.IsNil(err))
 
-	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	info, _, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "u1"))
 
@@ -540,7 +540,7 @@ func TestAuthorizationCodeReplayDenyListsIssuedJWT(t *testing.T) {
 	qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
 
 	// The JWT issued at the first redemption is deny-listed by the replay.
-	_, err = a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	_, _, err = a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Check(t, qt.IsNotNil(err))
 }
 
@@ -565,7 +565,7 @@ func TestJWTAccessTokenIdentityCarriesGrantedScope(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	// Alice's maximal scope is "openid profile"; the token was granted only "profile".
-	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	info, _, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.Scope, "profile"))
 }
@@ -773,7 +773,7 @@ func TestClientCredentialsTokenIsRecognisedByGrantClaim(t *testing.T) {
 	qt.Check(t, qt.Equals(claims.GrantType, client.GrantTypeClientCredentials))
 
 	// The client token is the client, not the user that happens to share the ID.
-	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	info, _, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "u1"))
 	qt.Check(t, qt.Equals(info.Name, ""))
@@ -792,7 +792,7 @@ func TestClientCredentialsTokenIsRecognisedByGrantClaim(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(claims.GrantType, client.GrantTypeAuthorizationCode))
 
-	info, err = a.ValidateJWTAccessToken(context.Background(), tokens.AccessToken)
+	info, _, err = a.ValidateJWTAccessToken(context.Background(), tokens.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "u1"))
 	qt.Check(t, qt.Equals(info.Name, "Alice"))
@@ -1298,7 +1298,7 @@ func TestJWTAccessTokenValidatedByMiddlewarePath(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.IsTrue(strings.Count(res.AccessToken, ".") == 2))
 
-	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	info, _, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "u1"))
 }
@@ -1433,7 +1433,7 @@ func TestClientCredentialsTokenIsNotResolvedToAUser(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 
 	// No user "svc" exists; the client itself is the subject.
-	info, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
+	info, _, err := a.ValidateJWTAccessToken(context.Background(), res.AccessToken)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(info.ID, "svc"))
 	qt.Check(t, qt.Equals(info.ClientID, "svc"))

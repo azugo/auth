@@ -680,3 +680,36 @@ func TestFailedPromptKeepsTheStepTokenUsable(t *testing.T) {
 	next := resolveStep(t, a, pending, "agreement", `{"accept":"v1"}`)
 	qt.Check(t, qt.Equals(next.Step, "flaky"))
 }
+
+func TestSwitchWaitingOnAStepKeepsTheSessionFromIdling(t *testing.T) {
+	agreement := newAgreementStep("v1")
+	agreement.tenant = "globex"
+
+	a := newServiceTestAuth(t, mfaClient(client.MFAPolicyDisabled), LoginSteps(&tenantStep{tenants: []string{"acme", "globex"}}, agreement))
+	a.Config().SessionIdleTTL = 10 * time.Minute
+	ctx := context.Background()
+
+	active := activeTenantSession(t, a)
+	_, sess, err := a.IntrospectToken(ctx, active.AccessToken)
+	qt.Assert(t, qt.IsNil(err))
+
+	pending, err := a.SwitchSession(ctx, SwitchSessionRequest{Token: active.Cookie.Value, Selection: map[string]any{"tenant": "globex"}})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.Equals(pending.Step, "agreement"))
+
+	// While the switch waits, the session lives as long as the pending switch, past its idle TTL.
+	stored, err := a.Sessions().Get(ctx, sess.ID)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(time.Until(stored.IdleExpiresAt) > 29*time.Minute))
+
+	// A step request on the waiting switch is activity too.
+	stored.IdleExpiresAt = time.Now().Add(time.Minute)
+	qt.Assert(t, qt.IsNil(a.Sessions().Update(ctx, stored)))
+
+	res := resolveStep(t, a, pending, "agreement", `{"accept":"v0"}`)
+	qt.Check(t, qt.Equals(res.Data["error"], any("version_mismatch")))
+
+	stored, err = a.Sessions().Get(ctx, sess.ID)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.IsTrue(time.Until(stored.IdleExpiresAt) > 9*time.Minute))
+}

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"azugo.io/auth"
+	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
 	"azugo.io/azugo"
@@ -74,7 +75,11 @@ func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 
 			// Opaque PASETO tokens validate through the session-store introspection, JWT
 			// bearer tokens by signature + revocation deny-list.
-			var info auth.UserInfo
+			var (
+				info   auth.UserInfo
+				sess   *session.Session
+				claims token.AccessTokenClaims
+			)
 
 			switch {
 			case err != nil:
@@ -84,17 +89,25 @@ func Auth(a *auth.Auth, opts ...AuthOption) azugo.RequestHandlerFunc {
 				return
 			// API keys are Authorization header credentials only.
 			case o.useAPIKey && header && strings.HasPrefix(tok, "v4.local."):
-				info, err = a.IntrospectWithAPIKey(ctx, tok)
+				info, sess, err = a.IntrospectWithAPIKey(ctx, tok)
 			case strings.HasPrefix(tok, "v4.local."):
-				info, _, err = a.IntrospectToken(ctx, tok)
+				info, sess, err = a.IntrospectToken(ctx, tok)
 			case tok != "":
-				info, err = a.ValidateJWTAccessToken(ctx, tok)
+				info, claims, err = a.ValidateJWTAccessToken(ctx, tok)
 			default:
 				err = token.ErrInvalidToken
 			}
 
 			if err == nil && (len(o.audiences) == 0 || slices.Contains(o.audiences, info.ClientID)) {
 				ctx.SetUser(info.ToUser())
+
+				// Every accepted request is session activity.
+				switch {
+				case sess != nil:
+					a.RecordActivity(ctx, sess)
+				default:
+					a.RecordSessionActivity(ctx, claims.SessionID)
+				}
 			}
 
 			next(ctx)

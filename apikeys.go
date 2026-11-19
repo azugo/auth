@@ -14,6 +14,7 @@ import (
 	"azugo.io/auth/client"
 	"azugo.io/auth/contract"
 	"azugo.io/auth/event"
+	"azugo.io/auth/session"
 	"azugo.io/auth/token"
 
 	"azugo.io/azugo"
@@ -401,26 +402,26 @@ func (a *Auth) ValidateAPIKey(ctx context.Context, tok string) (UserInfo, *apike
 }
 
 // IntrospectWithAPIKey validates an access token, session-cookie token or API key token,
-// decrypting it once, and returns the resolved user.
-func (a *Auth) IntrospectWithAPIKey(ctx context.Context, tok string) (UserInfo, error) {
+// decrypting it once, and returns the resolved user and the session, nil for an API key.
+func (a *Auth) IntrospectWithAPIKey(ctx context.Context, tok string) (UserInfo, *session.Session, error) {
 	if tok == "" {
-		return UserInfo{}, NewOAuthErrorFrom(token.ErrInvalidToken)
+		return UserInfo{}, nil, NewOAuthErrorFrom(token.ErrInvalidToken)
 	}
 
 	access, key, err := a.codec.Decode(tok)
 	if err != nil {
-		return UserInfo{}, NewOAuthErrorFrom(err)
+		return UserInfo{}, nil, NewOAuthErrorFrom(err)
 	}
 
 	if key != nil {
 		info, _, err := a.validateAPIKey(ctx, key)
 
-		return info, err
+		return info, nil, err
 	}
 
-	info, _, _, err := a.introspectClaims(ctx, access)
+	info, sess, _, err := a.introspectClaims(ctx, access)
 
-	return info, err
+	return info, sess, err
 }
 
 // validateAPIKey resolves the valid key and its owner behind decoded API key claims.

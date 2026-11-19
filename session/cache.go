@@ -40,7 +40,7 @@ func (s *cacheStore) Create(ctx context.Context, sess *Session) error {
 		return errors.New("session already expired")
 	}
 
-	if err := s.c.Set(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt))); err != nil {
+	if err := s.c.Set(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.Deadline()))); err != nil {
 		return err
 	}
 
@@ -70,8 +70,8 @@ func (s *cacheStore) Update(ctx context.Context, sess *Session) error {
 	return s.replace(ctx, sess)
 }
 
-// Touch updates session activity by updating LastSeen.
-func (s *cacheStore) Touch(ctx context.Context, id string) error {
+// Touch records activity on an active session.
+func (s *cacheStore) Touch(ctx context.Context, id string, idleExpiresAt time.Time) error {
 	sess, err := s.Get(ctx, id)
 	if err != nil {
 		return err
@@ -82,13 +82,14 @@ func (s *cacheStore) Touch(ctx context.Context, id string) error {
 	}
 
 	sess.LastSeen = time.Now()
+	sess.IdleExpiresAt = idleExpiresAt
 
 	return s.replace(ctx, sess)
 }
 
 // replace stores session only while it is still stored, so a concurrent Revoke is never undone.
 func (s *cacheStore) replace(ctx context.Context, sess *Session) error {
-	ok, err := s.c.Replace(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.ExpiresAt)))
+	ok, err := s.c.Replace(ctx, sess.ID, *sess, cache.TTL[Session](time.Until(sess.Deadline())))
 	if err != nil {
 		return err
 	}

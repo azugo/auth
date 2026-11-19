@@ -77,13 +77,13 @@ func TestCacheStoreTouch(t *testing.T) {
 
 	qt.Assert(t, qt.IsNil(store.Create(ctx, &Session{ID: "sid-1", UserID: "user-1", Status: StatusActive, ExpiresAt: time.Now().Add(time.Hour)})))
 
-	qt.Assert(t, qt.IsNil(store.Touch(ctx, "sid-1")))
+	qt.Assert(t, qt.IsNil(store.Touch(ctx, "sid-1", time.Time{})))
 
 	got, err := store.Get(ctx, "sid-1")
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.IsFalse(got.LastSeen.IsZero()))
 
-	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "missing"), ErrNotFound))
+	qt.Check(t, qt.ErrorIs(store.Touch(ctx, "missing", time.Time{}), ErrNotFound))
 }
 
 func TestCacheStoreRevoke(t *testing.T) {
@@ -123,7 +123,7 @@ func TestCacheStoreRevokeIsNotUndone(t *testing.T) {
 			_ = store.Revoke(ctx, sess.ID)
 		})
 		wg.Go(func() {
-			_ = store.Touch(ctx, sess.ID)
+			_ = store.Touch(ctx, sess.ID, time.Time{})
 		})
 		wg.Go(func() {
 			_ = store.Update(ctx, sess)

@@ -170,6 +170,9 @@ func (a *Auth) Introspect(ctx context.Context, in IntrospectRequest) (Introspect
 			return IntrospectionResponse{}, nil
 		}
 
+		// A resource server introspects on behalf of a request, so it is session activity.
+		a.RecordActivity(ctx, sess)
+
 		var jkt string
 		if claims.Confirmation != nil {
 			jkt = claims.Confirmation.JKT
@@ -230,32 +233,20 @@ func (a *Auth) Introspect(ctx context.Context, in IntrospectRequest) (Introspect
 }
 
 // ValidateJWTAccessToken verifies a signed JWT bearer token (signature, expiry, deny-list)
-// and resolves its subject through the UserProvider. A client_credentials token, whose subject
-// is the client itself (RFC 9068 §2.2), is not resolved to a user.
-func (a *Auth) ValidateJWTAccessToken(ctx context.Context, tok string) (UserInfo, error) {
-	if a.keys == nil {
-		return UserInfo{}, NewOAuthErrorFrom(token.ErrInvalidToken)
-	}
-
-	set, err := a.keys.KeySet(ctx)
+// and resolves its subject through the UserProvider, returning the user and the token's claims.
+// A client_credentials token, whose subject is the client itself (RFC 9068 section 2.2), is not
+// resolved to a user.
+func (a *Auth) ValidateJWTAccessToken(ctx context.Context, tok string) (UserInfo, token.AccessTokenClaims, error) {
+	claims, err := a.verifyJWTAccessToken(ctx, tok)
 	if err != nil {
-		return UserInfo{}, NewOAuthErrorFrom(err)
-	}
-
-	claims, err := token.VerifyAccessToken(set, tok)
-	if err != nil {
-		return UserInfo{}, NewOAuthErrorFrom(token.ErrInvalidToken)
-	}
-
-	if denied, err := a.denied.Denied(ctx, claims.TokenID); err != nil || denied {
-		return UserInfo{}, NewOAuthErrorFrom(token.ErrInvalidToken)
+		return UserInfo{}, token.AccessTokenClaims{}, err
 	}
 
 	info := UserInfo{ID: claims.Subject}
 
 	if claims.GrantType != client.GrantTypeClientCredentials {
 		if info, err = a.users.GetUser(ctx, claims.Subject); err != nil {
-			return UserInfo{}, NewOAuthErrorFrom(err)
+			return UserInfo{}, token.AccessTokenClaims{}, NewOAuthErrorFrom(err)
 		}
 	}
 
@@ -264,5 +255,28 @@ func (a *Auth) ValidateJWTAccessToken(ctx context.Context, tok string) (UserInfo
 	info.AMR = claims.AMR
 	info.ClientID = claims.ClientID
 
-	return info, nil
+	return info, claims, nil
+}
+
+// verifyJWTAccessToken checks a JWT access token's signature, expiry and deny-list entry.
+func (a *Auth) verifyJWTAccessToken(ctx context.Context, tok string) (token.AccessTokenClaims, error) {
+	if a.keys == nil {
+		return token.AccessTokenClaims{}, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	set, err := a.keys.KeySet(ctx)
+	if err != nil {
+		return token.AccessTokenClaims{}, NewOAuthErrorFrom(err)
+	}
+
+	claims, err := token.VerifyAccessToken(set, tok)
+	if err != nil {
+		return token.AccessTokenClaims{}, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	if denied, err := a.denied.Denied(ctx, claims.TokenID); err != nil || denied {
+		return token.AccessTokenClaims{}, NewOAuthErrorFrom(token.ErrInvalidToken)
+	}
+
+	return claims, nil
 }
