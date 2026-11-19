@@ -4,9 +4,9 @@ go 1.26.0
 
 require (
 	azugo.io/auth v0.0.0
-	azugo.io/azugo v0.50.2
-	azugo.io/core v0.50.1
-	azugo.io/templ v0.50.0
+	azugo.io/azugo v0.51.0
+	azugo.io/core v0.51.0
+	azugo.io/templ v0.51.0
 	github.com/a-h/templ v0.3.1118
 	github.com/boombuler/barcode v1.1.0
 	github.com/go-quicktest/qt v1.102.0
@@ -61,7 +61,7 @@ require (
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.1.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/valkey-io/valkey-go v1.0.79 // indirect
+	github.com/valkey-io/valkey-go v1.0.80 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.79.0 // indirect
 	github.com/valyala/fastrand v1.1.0 // indirect

@@ -1,29 +1,11 @@
 package routes
 
 import (
-	"strings"
-
 	"azugo.io/auth"
 
 	"azugo.io/azugo"
 	"azugo.io/core/http"
 )
-
-// sameOrigin reports whether a POST was sent by a page of this origin, from the browser's own
-// Fetch Metadata or, failing that, its Origin header.
-func sameOrigin(ctx *azugo.Context) bool {
-	switch ctx.Header.Get("Sec-Fetch-Site") {
-	case "same-origin", "none":
-		return true
-	case "":
-		origin := ctx.Header.Get(http.HeaderOrigin)
-		base := ctx.BaseURL()
-
-		return origin != "" && (base == origin || strings.HasPrefix(base, origin+"/"))
-	default:
-		return false
-	}
-}
 
 // logout implements GET /logout: RP-initiated browser logout, chaining the IdP end-session hop
 // when the client enables FederatedLogout.
@@ -33,7 +15,7 @@ func (h *Handler) logout(ctx *azugo.Context) {
 		BaseURL:   ctx.BaseURL(),
 		MountPath: h.mountPrefix,
 		IP:        ctx.IP().String(),
-		Confirmed: ctx.Method() == http.MethodPost && sameOrigin(ctx),
+		Confirmed: ctx.Method() == http.MethodPost && ctx.IsSameOrigin(),
 	}
 
 	if v := ctx.Query.StringOptional("post_logout_redirect_uri"); v != nil {

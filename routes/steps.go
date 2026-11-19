@@ -31,7 +31,7 @@ func returnTo(ctx *azugo.Context) (string, error) {
 // origin sent; a Bearer or DPoP token is sent deliberately and passes.
 func sameOriginCookie(next azugo.RequestHandler) azugo.RequestHandler {
 	return func(ctx *azugo.Context) {
-		if tok, _ := dpop.Credential(ctx.Header.Get(http.HeaderAuthorization)); tok == "" && !sameOrigin(ctx) {
+		if tok, _ := dpop.Credential(ctx.Header.Get(http.HeaderAuthorization)); tok == "" && !ctx.IsSameOrigin() {
 			ctx.Error(auth.NewOAuthError(http.StatusForbidden, auth.ErrCodeAccessDenied, "cross-site request"))
 
 			return
