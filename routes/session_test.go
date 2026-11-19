@@ -114,3 +114,29 @@ func TestSessionActivity(t *testing.T) {
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp4.StatusCode(), 403))
 }
+
+func TestSessionCookieIsReadOnlyUnderItsOwnName(t *testing.T) {
+	a := newTestAuth(t, session.NewMemoryStore(), &client.Client{
+		ID: "spa", GrantTypes: []string{client.GrantTypePassword},
+		AllowedAuthMethods: []string{client.AuthMethodPassword}, ResponseMode: client.ResponseModeJSON,
+	})
+	login := loginFor(t, a, "spa")
+
+	app := newTestApp(t)
+	Bind(app, "/auth", a)
+
+	tc := app.TestClient()
+
+	// Scoped to the /auth mount, the cookie is written as __Secure-session; a bare or __Host-
+	// variant another site planted is not read in its place.
+	for name, want := range map[string]int{
+		"session":          401,
+		"__Host-session":   401,
+		"__Secure-session": 200,
+	} {
+		resp, err := tc.Get("/auth/session", tc.WithCookie(name, login.Cookie.Value))
+		qt.Assert(t, qt.IsNil(err))
+		qt.Check(t, qt.Equals(resp.StatusCode(), want), qt.Commentf("%s", name))
+		fasthttp.ReleaseResponse(resp)
+	}
+}

@@ -16,6 +16,13 @@ type CookieCtx struct {
 	config          *Configuration
 	app             *core.App
 	scopeToBasePath bool
+	// mountPath is the prefix the auth routes are mounted under, for reading cookies.
+	mountPath string
+}
+
+// SetMountPath records the prefix the auth routes are mounted under.
+func (c *CookieCtx) SetMountPath(path string) {
+	c.mountPath = path
 }
 
 // SameSite returns the effective cookie SameSite mode based on configuration.

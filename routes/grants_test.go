@@ -51,7 +51,7 @@ func TestAuthorizeEndpointRedirectsWithCode(t *testing.T) {
 	resp, err := tc.Get("/auth/authorize?response_type=code&client_id=web"+
 		"&redirect_uri="+url.QueryEscape("https://web.example/callback")+
 		"&scope=openid&state=xyz&code_challenge="+pkceChallenge+"&code_challenge_method=S256",
-		tc.WithHeader("Cookie", "session="+login.Cookie.Value))
+		tc.WithHeader("Cookie", "__Secure-session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -192,7 +192,7 @@ func TestTokenEndpointResponseIsNotCacheable(t *testing.T) {
 	resp, err := tc.Get("/auth/authorize?response_type=code&client_id=web"+
 		"&redirect_uri="+url.QueryEscape("https://web.example/callback")+
 		"&code_challenge="+pkceChallenge+"&code_challenge_method=S256",
-		tc.WithHeader("Cookie", "session="+login.Cookie.Value))
+		tc.WithHeader("Cookie", "__Secure-session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 

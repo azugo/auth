@@ -185,7 +185,7 @@ func TestExternalCallbackRouteCreatesSession(t *testing.T) {
 	qt.Assert(t, qt.Equals(resp2.StatusCode(), 302))
 
 	qt.Check(t, qt.Equals(string(resp2.Header.Peek("Location")), "/home"))
-	qt.Check(t, qt.StringContains(string(resp2.Header.Peek("Set-Cookie")), "session="))
+	qt.Check(t, qt.StringContains(string(resp2.Header.Peek("Set-Cookie")), "__Secure-session="))
 }
 
 func TestLogoutRouteClearsCookieAndRedirects(t *testing.T) {
@@ -198,13 +198,13 @@ func TestLogoutRouteClearsCookieAndRedirects(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.Get("/auth/logout", tc.WithHeader("Cookie", "session="+login.Cookie.Value))
+	resp, err := tc.Get("/auth/logout", tc.WithHeader("Cookie", "__Secure-session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp.StatusCode(), 302))
 
 	qt.Check(t, qt.Equals(string(resp.Header.Peek("Location")), "/"))
-	qt.Check(t, qt.StringContains(string(resp.Header.Peek("Set-Cookie")), "session=;"))
+	qt.Check(t, qt.StringContains(string(resp.Header.Peek("Set-Cookie")), "__Secure-session=;"))
 
 	_, _, err = a.IntrospectToken(context.Background(), login.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
@@ -235,13 +235,13 @@ func TestLinkingRoutesRequireIdentityStore(t *testing.T) {
 
 	tc2 := app2.TestClient()
 
-	resp2, err := tc2.Get("/auth/external/identities", tc2.WithHeader("Cookie", "session="+login.Cookie.Value))
+	resp2, err := tc2.Get("/auth/external/identities", tc2.WithHeader("Cookie", "__Secure-session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp2)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp2.StatusCode(), 200))
 
 	// The linking ceremony starts an IdP redirect for the authenticated caller.
-	resp3, err := tc2.Get("/auth/external/corp/link", tc2.WithHeader("Cookie", "session="+login.Cookie.Value))
+	resp3, err := tc2.Get("/auth/external/corp/link", tc2.WithHeader("Cookie", "__Secure-session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp3)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp3.StatusCode(), 302))
@@ -260,7 +260,7 @@ func TestExternalLinkCallbackReturnToPrefixesBasePath(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.Get("/app/auth/external/corp/link?return_to=/profile", tc.WithHeader("Cookie", "session="+login.Cookie.Value))
+	resp, err := tc.Get("/app/auth/external/corp/link?return_to=/profile", tc.WithHeader("Cookie", "__Secure-session="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp.StatusCode(), 302))

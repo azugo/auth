@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	azugo.io/auth v0.0.0
-	azugo.io/azugo v0.51.0
+	azugo.io/azugo v0.51.1
 	azugo.io/core v0.51.0
 	azugo.io/templ v0.51.0
 	github.com/a-h/templ v0.3.1118

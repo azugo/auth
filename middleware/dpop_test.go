@@ -98,8 +98,8 @@ func TestAuthMiddlewareRefusesBoundTokenCookie(t *testing.T) {
 				want string
 			}{
 				"dpop":           {[]azugo.TestClientOption{tc.WithHeader("Authorization", "DPoP "+login.AccessToken), tc.WithHeader("DPoP", key.AccessProof(t, "GET", testURL, login.AccessToken))}, "u1"},
-				"session cookie": {[]azugo.TestClientOption{tc.WithCookie(a.Config().CookieName, login.Cookie.Value)}, "u1"},
-				"bound cookie":   {[]azugo.TestClientOption{tc.WithCookie(a.Config().CookieName, login.AccessToken)}, "anonymous"},
+				"session cookie": {[]azugo.TestClientOption{tc.WithCookie("__Host-"+a.Config().CookieName, login.Cookie.Value)}, "u1"},
+				"bound cookie":   {[]azugo.TestClientOption{tc.WithCookie("__Host-"+a.Config().CookieName, login.AccessToken)}, "anonymous"},
 			} {
 				resp, err := tc.Get("/", tt.opts...)
 				qt.Assert(t, qt.IsNil(err))

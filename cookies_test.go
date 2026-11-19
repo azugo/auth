@@ -119,7 +119,7 @@ func TestReadSessionTokenFallsBackToCookie(t *testing.T) {
 		"bound token":    {login.AccessToken, ""},
 		"garbage":        {"from-cookie", ""},
 	} {
-		resp, err := tc.Get("/", tc.WithCookie(a.config.CookieName, tt.cookie))
+		resp, err := tc.Get("/", tc.WithCookie("__Host-"+a.config.CookieName, tt.cookie))
 		qt.Assert(t, qt.IsNil(err))
 
 		body, err := resp.BodyUncompressed()

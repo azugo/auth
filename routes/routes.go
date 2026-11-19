@@ -301,6 +301,7 @@ func New(a *auth.Auth, opts ...Option) *Handler {
 
 	if o.mountPrefix != nil {
 		h.mountPrefix = *o.mountPrefix
+		a.Cookie.SetMountPath(h.mountPrefix)
 	}
 
 	h.logoutConfirmation = o.logoutConfirmation
@@ -422,6 +423,7 @@ func Bind(r azugo.Router, prefix string, a *auth.Auth, opts ...Option) *Handler 
 
 	h := New(a, opts...)
 	h.mountPrefix = prefix
+	a.Cookie.SetMountPath(prefix)
 	g := r.Group(prefix)
 
 	g.Get("/.well-known/openid-configuration", h.OIDC.Discovery)

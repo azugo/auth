@@ -142,7 +142,7 @@ func TestAPIKeysCreateRefusesCrossSiteCookie(t *testing.T) {
 	tc := app.TestClient()
 
 	resp, err := tc.PostJSON("/auth/apikeys", map[string]any{"name": "ci"},
-		tc.WithCookie(a.Config().CookieName, login.Cookie.Value), tc.WithHeader("Sec-Fetch-Site", "cross-site"))
+		tc.WithCookie("__Secure-"+a.Config().CookieName, login.Cookie.Value), tc.WithHeader("Sec-Fetch-Site", "cross-site"))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 403))

@@ -15,9 +15,8 @@ func (a *Auth) WriteCookie(ctx *azugo.Context, d *CookieDirective) {
 		return
 	}
 
-	opts := make([]azugo.CookieOption, 0, 4)
+	opts := make([]azugo.CookieOption, 0, 3)
 	opts = append(opts,
-		azugo.CookieDefaultSecurity(),
 		azugo.CookiePath(d.Path),
 		d.SameSite,
 	)
@@ -30,6 +29,12 @@ func (a *Auth) WriteCookie(ctx *azugo.Context, d *CookieDirective) {
 
 	opts = append(opts, azugo.CookieMaxAge(time.Duration(d.MaxAge)*time.Second))
 	ctx.Cookie.Set(d.Name, d.Value, opts...)
+}
+
+// ReadCookie returns the named cookie as WriteCookie writes it for this request, under the path
+// of the mount recorded by CookieCtx.SetMountPath.
+func (a *Auth) ReadCookie(ctx *azugo.Context, name string) string {
+	return ctx.Cookie.Get(name, azugo.CookiePath(a.Cookie.Path(ctx.BaseURL(), a.Cookie.mountPath)))
 }
 
 // ReadSessionToken extracts the presented credential: the access token of a Bearer or DPoP
@@ -46,7 +51,7 @@ func (a *Auth) ReadSessionToken(ctx *azugo.Context) string {
 // ReadSessionCookie returns the session cookie's token, "" when the cookie is missing or holds
 // anything but a session cookie.
 func (a *Auth) ReadSessionCookie(ctx *azugo.Context) string {
-	tok := ctx.Cookie.Get(a.config.CookieName)
+	tok := a.ReadCookie(ctx, a.config.CookieName)
 	if tok == "" {
 		return ""
 	}

@@ -22,7 +22,7 @@ func TestAuthorizeSilentRefreshRotatesCookie(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.Post("/auth/authorize", nil, tc.WithCookie(a.Config().CookieName, login.Cookie.Value))
+	resp, err := tc.Post("/auth/authorize", nil, tc.WithCookie("__Secure-"+a.Config().CookieName, login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 204))

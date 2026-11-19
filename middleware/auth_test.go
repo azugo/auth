@@ -100,7 +100,7 @@ func TestAuthMiddlewareCookieOptIn(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.Get("/", tc.WithCookie(a.Config().CookieName, login.Cookie.Value))
+	resp, err := tc.Get("/", tc.WithCookie("__Host-"+a.Config().CookieName, login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -130,7 +130,7 @@ func TestAuthMiddlewareIgnoresCookieWithoutOption(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.Get("/", tc.WithCookie(a.Config().CookieName, login.Cookie.Value))
+	resp, err := tc.Get("/", tc.WithCookie("__Host-"+a.Config().CookieName, login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 
@@ -242,9 +242,9 @@ func TestAuthMiddlewareRefusesAPIKeyCookie(t *testing.T) {
 	tc := app.TestClient()
 
 	for name, opt := range map[string]azugo.TestClientOption{
-		"cookie":  tc.WithCookie(a.Config().CookieName, res.Token),
+		"cookie":  tc.WithCookie("__Host-"+a.Config().CookieName, res.Token),
 		"bearer":  tc.WithHeader("Authorization", "Bearer "+res.Token),
-		"session": tc.WithCookie(a.Config().CookieName, login.Cookie.Value),
+		"session": tc.WithCookie("__Host-"+a.Config().CookieName, login.Cookie.Value),
 	} {
 		resp, err := tc.Get("/", opt)
 		qt.Assert(t, qt.IsNil(err))

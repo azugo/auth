@@ -278,7 +278,7 @@ func TestSwitchRouteRefusesCrossSiteCookie(t *testing.T) {
 	Bind(app, "/auth", a)
 
 	tc := app.TestClient()
-	cookie := tc.WithCookie(a.Config().CookieName, active.Cookie.Value)
+	cookie := tc.WithCookie("__Secure-"+a.Config().CookieName, active.Cookie.Value)
 
 	crossSite, err := tc.PostForm("/auth/session/switch", map[string]any{"tenant": "globex"}, cookie, tc.WithHeader("Sec-Fetch-Site", "cross-site"))
 	defer fasthttp.ReleaseResponse(crossSite)
@@ -310,7 +310,7 @@ func TestStepRouteRefusesCrossSiteCookie(t *testing.T) {
 	Bind(app, "/auth", a)
 
 	tc := app.TestClient()
-	cookie := tc.WithCookie(a.Config().CookieName, pending.Cookie.Value)
+	cookie := tc.WithCookie("__Secure-"+a.Config().CookieName, pending.Cookie.Value)
 
 	crossSite, err := tc.PostJSON("/auth/steps/tenant", map[string]any{"tenant": "acme"}, cookie, tc.WithHeader("Sec-Fetch-Site", "cross-site"))
 	defer fasthttp.ReleaseResponse(crossSite)

@@ -56,7 +56,7 @@ func TestLogoutConfirmationRendersPageAndPostConfirms(t *testing.T) {
 	}))
 
 	tc := app.TestClient()
-	cookie := tc.WithHeader("Cookie", a.Config().CookieName+"="+login.Cookie.Value)
+	cookie := tc.WithHeader("Cookie", "__Secure-"+a.Config().CookieName+"="+login.Cookie.Value)
 
 	// A bare navigation renders the page instead of ending the session.
 	resp, err := tc.Get("/auth/logout", cookie)
@@ -101,7 +101,7 @@ func TestLogoutConfirmationAcceptsMatchingOrigin(t *testing.T) {
 
 	tc := app.TestClient()
 	login := loginFor(t, a, "spa")
-	cookie := tc.WithCookie(a.Config().CookieName, login.Cookie.Value)
+	cookie := tc.WithCookie("__Secure-"+a.Config().CookieName, login.Cookie.Value)
 
 	// An older browser without Fetch Metadata is judged by its Origin header.
 	resp, err := tc.Post("/auth/logout", nil, cookie, tc.WithHeader("Origin", "http://test"))
@@ -124,7 +124,7 @@ func TestLogoutConfirmationWithoutPageIsAnError(t *testing.T) {
 
 	tc := app.TestClient()
 
-	resp, err := tc.Get("/auth/logout", tc.WithHeader("Cookie", a.Config().CookieName+"="+login.Cookie.Value))
+	resp, err := tc.Get("/auth/logout", tc.WithHeader("Cookie", "__Secure-"+a.Config().CookieName+"="+login.Cookie.Value))
 	defer fasthttp.ReleaseResponse(resp)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 400))

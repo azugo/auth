@@ -182,7 +182,7 @@ func TestContactRoutes(t *testing.T) {
 	qt.Check(t, qt.Equals(len(list()[auth.ChannelEmail]), 1))
 
 	// A cookie-authenticated change must come from a page of this origin.
-	cookie := tc.WithCookie(a.Config().CookieName, login.Cookie.Value)
+	cookie := tc.WithCookie("__Secure-"+a.Config().CookieName, login.Cookie.Value)
 
 	for _, path := range []string{"/auth/account/contacts", "/auth/account/contacts/primary", "/auth/account/contacts/remove"} {
 		resp, err = tc.PostJSON(path, map[string]any{"channel": "email", "address": "second@example.com"}, cookie, tc.WithHeader("Sec-Fetch-Site", "cross-site"))
@@ -241,7 +241,7 @@ func TestStepUpRoutes(t *testing.T) {
 	qt.Check(t, qt.Equals(resp.StatusCode(), 202))
 	fasthttp.ReleaseResponse(resp)
 
-	resp, err = tc.PostJSON("/auth/session/reauth", map[string]any{"action": auth.ActionAddContact}, tc.WithCookie(a.Config().CookieName, login.Cookie.Value), tc.WithHeader("Sec-Fetch-Site", "cross-site"))
+	resp, err = tc.PostJSON("/auth/session/reauth", map[string]any{"action": auth.ActionAddContact}, tc.WithCookie("__Secure-"+a.Config().CookieName, login.Cookie.Value), tc.WithHeader("Sec-Fetch-Site", "cross-site"))
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 403))
 	fasthttp.ReleaseResponse(resp)

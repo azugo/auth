@@ -56,7 +56,7 @@ func (h *Handler) externalLogin(ctx *azugo.Context) {
 func (h *Handler) externalCallback(ctx *azugo.Context) {
 	req := auth.ExternalCallbackRequest{
 		Provider:  ctx.Params.String("provider"),
-		Binding:   ctx.Cookie.Get(h.auth.ExternalBindingCookieName()),
+		Binding:   h.auth.ReadCookie(ctx, h.auth.ExternalBindingCookieName()),
 		BaseURL:   ctx.BaseURL(),
 		MountPath: h.mountPrefix,
 		IP:        ctx.IP().String(),
@@ -107,7 +107,7 @@ func (h *Handler) externalCallback(ctx *azugo.Context) {
 func (h *Handler) externalLogoutCallback(ctx *azugo.Context) {
 	req := auth.ExternalLogoutCallbackRequest{
 		Provider:  ctx.Params.String("provider"),
-		Binding:   ctx.Cookie.Get(h.auth.ExternalBindingCookieName()),
+		Binding:   h.auth.ReadCookie(ctx, h.auth.ExternalBindingCookieName()),
 		BaseURL:   ctx.BaseURL(),
 		MountPath: h.mountPrefix,
 		IP:        ctx.IP().String(),

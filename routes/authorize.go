@@ -9,7 +9,7 @@ import (
 // authorizeCode implements GET /authorize: the OIDC authorization-code flow endpoint.
 func (h *Handler) authorizeCode(ctx *azugo.Context) {
 	req := auth.AuthorizeRequest{
-		SessionToken: ctx.Cookie.Get(h.auth.Config().CookieName),
+		SessionToken: h.auth.ReadCookie(ctx, h.auth.Config().CookieName),
 	}
 
 	if v := ctx.Query.StringOptional("response_type"); v != nil {
@@ -86,7 +86,7 @@ func (h *Handler) authorize(ctx *azugo.Context) {
 	}
 
 	res, err := h.auth.Refresh(ctx, auth.RefreshRequest{
-		Token:     ctx.Cookie.Get(h.auth.Config().CookieName),
+		Token:     h.auth.ReadCookie(ctx, h.auth.Config().CookieName),
 		DPoP:      proof,
 		ReturnTo:  returnTo,
 		BaseURL:   ctx.BaseURL(),

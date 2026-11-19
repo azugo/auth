@@ -107,7 +107,7 @@ func TestUserInfoRefusesAccessTokenCookie(t *testing.T) {
 		"bound token":    {bound.AccessToken, 401},
 		"bearer token":   {bearer.AccessToken, 401},
 	} {
-		resp, err := tc.Get("/auth/userinfo", tc.WithCookie(a.Config().CookieName, tt.cookie))
+		resp, err := tc.Get("/auth/userinfo", tc.WithCookie("__Secure-"+a.Config().CookieName, tt.cookie))
 		qt.Assert(t, qt.IsNil(err))
 		qt.Check(t, qt.Equals(resp.StatusCode(), tt.want), qt.Commentf(name))
 		fasthttp.ReleaseResponse(resp)

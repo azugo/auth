@@ -197,7 +197,7 @@ func TestMFARoutesRedirectModeWithFormsAndCookie(t *testing.T) {
 	qt.Assert(t, qt.IsTrue(resp.Header.Cookie(&cookie)))
 	fasthttp.ReleaseResponse(resp)
 
-	withCookie := tc.WithHeader("Cookie", a.Config().CookieName+"="+string(cookie.Value()))
+	withCookie := tc.WithHeader("Cookie", "__Secure-"+a.Config().CookieName+"="+string(cookie.Value()))
 
 	// While pending, a redirect-mode client is always sent back to its step page.
 	resp, err = tc.Get("/auth/mfa/status", withCookie)
