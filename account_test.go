@@ -1221,3 +1221,37 @@ func TestPasswordChangeClearsLoginLockout(t *testing.T) {
 	_, err = a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "brandnew1"})
 	qt.Check(t, qt.IsNil(err))
 }
+
+func TestPendingSessionReportsAForcedPasswordChange(t *testing.T) {
+	a, _ := newAccountTestAuth(t, mfaClient(client.MFAPolicyDisabled))
+	ctx := context.Background()
+
+	res := loginAs(t, a, LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "fresh", Password: "changeme"})
+	qt.Assert(t, qt.Equals(res.Status, session.StatusPendingPasswordChange))
+	qt.Assert(t, qt.IsNotNil(res.Cookie))
+
+	// Introspection refuses the pending session, PendingSession reports it.
+	_, _, err := a.IntrospectToken(ctx, res.Cookie.Value)
+	qt.Check(t, qt.IsNotNil(err))
+
+	sess, err := a.PendingSession(ctx, res.Cookie.Value)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(sess.Status, session.StatusPendingPasswordChange))
+	qt.Check(t, qt.Equals(sess.UserID, "u3"))
+
+	done, err := a.ChangePassword(ctx, PasswordChangeRequest{Token: res.Cookie.Value, NewPassword: "brandnew1"})
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.Equals(done.Status, session.StatusActive))
+
+	sess, err = a.PendingSession(ctx, done.Cookie.Value)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Check(t, qt.Equals(sess.Status, session.StatusActive))
+
+	// Revoked, unknown and empty credentials are refused.
+	qt.Assert(t, qt.IsNil(a.Sessions().Revoke(ctx, sess.ID)))
+
+	for _, tok := range []string{done.Cookie.Value, "v4.local.garbage", ""} {
+		_, err = a.PendingSession(ctx, tok)
+		qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidToken), qt.Commentf("%q", tok))
+	}
+}

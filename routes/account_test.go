@@ -278,6 +278,18 @@ func TestAccountRoutesEndToEndJSON(t *testing.T) {
 
 	step := tc.WithHeader("Authorization", "Bearer "+pending.StepToken)
 
+	// After a reload only the session cookie is left; GET /session still reports the state.
+	cookie := tc.Cookies()["__Secure-"+a.Config().CookieName]
+	qt.Assert(t, qt.IsTrue(cookie != ""))
+
+	resp, err = tc.Get("/auth/session", tc.WithCookie("__Secure-"+a.Config().CookieName, cookie))
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.Equals(resp.StatusCode(), 200))
+
+	state := decodeJSON[map[string]any](t, resp)
+	fasthttp.ReleaseResponse(resp)
+	qt.Check(t, qt.Equals(state["status"], any(string(session.StatusPendingPasswordChange))))
+
 	resp, err = tc.PostJSON("/auth/account/password", map[string]any{"new_password": "fresh123"}, step)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Assert(t, qt.Equals(resp.StatusCode(), 200))

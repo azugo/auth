@@ -21,6 +21,10 @@ v4.local tokens.
 * Self-service account management: registration per client policy, forced and self-service
   password change, a password policy, and password reset over pluggable methods (mailed link,
   texted code, out-of-band approval, or your own), each offered only when the account can use it.
+  `GET /session` answers `status` (and `step`) for a pending session too, e.g.
+  `pending_password_change`, so a reloaded SPA can resume the flow; check `status`, as a 200 no
+  longer means signed in. `a.PendingSession(ctx, tok)` is the same lookup for your own endpoint; it
+  grants no access, so accept a non-active session only to report its state or finish its step.
 * Login steps: application gates (`auth.LoginSteps(...)`) that hold a session at `pending_step`
   until resolved through `POST /steps/{name}` - tenant/role selection, first-party consent, a
   versioned usage agreement - with `POST /session/switch` to change the selection later; a switch

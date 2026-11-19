@@ -796,12 +796,18 @@ func (a *Auth) stepSession(ctx context.Context, tok string, statuses ...session.
 		return nil, err
 	}
 
+	a.RecordActivity(ctx, sess)
+
+	return a.resolveStepSession(ctx, claims, sess, statuses...)
+}
+
+// resolveStepSession resolves the session behind claims in one of the given statuses, with its
+// client and cached step state.
+func (a *Auth) resolveStepSession(ctx context.Context, claims *token.AccessClaims, sess *session.Session, statuses ...session.Status) (*stepContext, error) {
 	cl, err := a.clients.GetClient(ctx, sess.ClientID)
 	if err != nil {
 		return nil, NewOAuthErrorFrom(err)
 	}
-
-	a.RecordActivity(ctx, sess)
 
 	sc := &stepContext{sess: sess, claims: claims, client: cl}
 
@@ -844,6 +850,29 @@ func (a *Auth) stepSession(ctx context.Context, tok string, statuses ...session.
 	sc.state = st
 
 	return sc, nil
+}
+
+// PendingSession returns the session behind token, the session cookie, a step token or the
+// session's own access token, whether active or still pending.
+func (a *Auth) PendingSession(ctx context.Context, tok string) (*session.Session, error) {
+	claims, sess, err := a.sessionClaims(ctx, tok)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reading the state is no activity.
+	sc, err := a.resolveStepSession(ctx, claims, sess,
+		session.StatusActive,
+		session.StatusPendingPasswordChange,
+		session.StatusPendingMFASetup,
+		session.StatusPendingMFA,
+		session.StatusPendingStep,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return sc.sess, nil
 }
 
 // advanceSession re-evaluates the login steps after one was satisfied and, once active,

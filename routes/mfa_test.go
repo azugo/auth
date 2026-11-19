@@ -135,11 +135,19 @@ func TestMFARoutesEndToEndJSON(t *testing.T) {
 
 	step := tc.WithHeader("Authorization", "Bearer "+pending.StepToken)
 
-	// The step token is not an access token.
-	resp, err = tc.Get("/auth/session", step)
+	// The step token is not an access token, but it does report the pending state.
+	resp, err = tc.Get("/auth/userinfo", step)
 	qt.Assert(t, qt.IsNil(err))
 	qt.Check(t, qt.Equals(resp.StatusCode(), 401))
 	fasthttp.ReleaseResponse(resp)
+
+	resp, err = tc.Get("/auth/session", step)
+	qt.Assert(t, qt.IsNil(err))
+	qt.Assert(t, qt.Equals(resp.StatusCode(), 200))
+
+	state := decodeJSON[map[string]any](t, resp)
+	fasthttp.ReleaseResponse(resp)
+	qt.Check(t, qt.Equals(state["status"], any(string(session.StatusPendingMFA))))
 
 	resp, err = tc.PostJSON("/auth/mfa/verify", map[string]any{"response": map[string]any{"code": "000000"}}, step)
 	qt.Assert(t, qt.IsNil(err))
