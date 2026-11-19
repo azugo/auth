@@ -900,3 +900,24 @@ func TestBrowserLogoutRequiresIDTokenHint(t *testing.T) {
 	_, _, err = a.IntrospectToken(context.Background(), first.Cookie.Value)
 	qt.Check(t, qt.IsNotNil(err))
 }
+
+func TestExternalLoginClearsLoginLockout(t *testing.T) {
+	a := newExternalTestAuth(t, []contract.ExternalProviderConfig{extProviderEntry("corp", "fake")}, nil, extPortalClient())
+	a.Config().Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
+
+	ctx := context.Background()
+	keys := []string{loginLockoutKey("local-ext-1")}
+
+	for range 2 {
+		qt.Assert(t, qt.IsNil(a.checkThrottle(ctx, keys, "", "")))
+		a.failThrottle(ctx, keys)
+	}
+
+	qt.Assert(t, qt.Equals(oauthErrorCode(t, a.checkThrottle(ctx, keys, "", "")), ErrCodeSlowDown))
+
+	state, binding := beginAndExtractState(t, a, "corp", "portal", "/")
+	_, err := a.ExternalCallback(ctx, ExternalCallbackRequest{Provider: "corp", State: state, Binding: binding, Code: "c"})
+	qt.Assert(t, qt.IsNil(err))
+
+	qt.Check(t, qt.IsNil(a.checkThrottle(ctx, keys, "", "")))
+}

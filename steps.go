@@ -454,6 +454,8 @@ func (a *Auth) startSession(ctx context.Context, sess *session.Session, cl *clie
 	}
 
 	if sess.Status == session.StatusActive {
+		_ = a.UnlockLogin(ctx, sess.UserID)
+
 		return a.buildLoginResult(ctx, sess, cl, cmp.Or(sess.DPoPJKT, jkt), returnTo, cookie, baseURL, mountPath)
 	}
 
@@ -939,6 +941,7 @@ func (a *Auth) advanceSession(ctx context.Context, sc *stepContext, returnTo str
 	}
 
 	_ = deleteSynced(ctx, a.pending, sess.ID)
+	_ = a.UnlockLogin(ctx, sess.UserID)
 
 	a.emit(ctx, event.Event{Type: event.TypeLoginSuccess, UserID: sess.UserID, ClientID: sess.ClientID, Detail: map[string]any{"step": "completed"}})
 

@@ -124,6 +124,14 @@ func (a *Auth) Login(ctx context.Context, in LoginRequest) (LoginResult, error) 
 	var identity string
 	if in.Username != "" {
 		identity = throttleIdentity("pwd:", in.Username)
+
+		userID, err := passwords.LookupLogin(ctx, in.Username)
+		switch {
+		case err == nil:
+			identity = loginLockoutKey(userID)
+		case !errors.Is(err, ErrUserNotFound):
+			return LoginResult{}, NewOAuthErrorFrom(err)
+		}
 	}
 
 	keys := throttleKeys(identity, in.IP)

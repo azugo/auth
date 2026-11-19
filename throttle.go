@@ -2,10 +2,20 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"azugo.io/auth/event"
 )
+
+// UnlockLogin clears the password-login attempt counter and lockout of userID's account.
+func (a *Auth) UnlockLogin(ctx context.Context, userID string) error {
+	if userID == "" {
+		return errors.New("user ID is required")
+	}
+
+	return a.throttle.Reset(ctx, loginLockoutKey(userID))
+}
 
 // checkThrottle claims an attempt on every key, refusing (and refunding the claims made so
 // far) when any key is exhausted or locked out.
@@ -60,6 +70,11 @@ func (a *Auth) resetThrottle(ctx context.Context, keys []string) {
 	for _, key := range keys {
 		_ = a.throttle.Reset(ctx, key)
 	}
+}
+
+// loginLockoutKey is the password-login throttle key of a known account.
+func loginLockoutKey(userID string) string {
+	return "pwd-user:" + userID
 }
 
 func throttleIdentity(prefix, identifier string) string {

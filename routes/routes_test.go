@@ -17,6 +17,10 @@ import (
 
 type stubUsers struct{ info auth.UserInfo }
 
+func (s stubUsers) LookupLogin(context.Context, string) (string, error) {
+	return s.info.ID, nil
+}
+
 func (s stubUsers) Authenticate(_ context.Context, _, password string) (auth.UserInfo, error) {
 	if password == "wrong" {
 		return auth.UserInfo{}, auth.ErrInvalidCredentials

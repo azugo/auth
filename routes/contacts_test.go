@@ -29,6 +29,10 @@ func (s *contactStubUsers) info() auth.UserInfo {
 	return auth.UserInfo{ID: "u1", Name: "Alice", Scope: "openid profile email", Contacts: map[string][]auth.Contact{auth.ChannelEmail: slices.Clone(s.emails)}}
 }
 
+func (s *contactStubUsers) LookupLogin(context.Context, string) (string, error) {
+	return "u1", nil
+}
+
 func (s *contactStubUsers) Authenticate(context.Context, string, string) (auth.UserInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

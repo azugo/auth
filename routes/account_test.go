@@ -29,6 +29,13 @@ type accountStubUsers struct {
 	registered *auth.UserInfo
 }
 
+func (s *accountStubUsers) LookupLogin(context.Context, string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.info.ID, nil
+}
+
 func (s *accountStubUsers) Authenticate(_ context.Context, _, password string) (auth.UserInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

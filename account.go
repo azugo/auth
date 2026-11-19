@@ -375,6 +375,7 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 			return LoginResult{}, NewOAuthErrorFrom(err)
 		}
 
+		_ = a.UnlockLogin(ctx, sc.sess.UserID)
 		a.emit(ctx, event.Event{Type: event.TypePasswordChanged, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP, Detail: map[string]any{"forced": true}})
 
 		for _, id := range revoked {
@@ -448,6 +449,7 @@ func (a *Auth) ChangePassword(ctx context.Context, in PasswordChangeRequest) (Lo
 	}
 
 	a.passThrottle(ctx, keys, identity)
+	_ = a.UnlockLogin(ctx, sc.sess.UserID)
 	a.DropFederatedHints(ctx, sessions)
 
 	a.emit(ctx, event.Event{Type: event.TypePasswordChanged, UserID: sc.sess.UserID, ClientID: sc.client.ID, IP: in.IP})

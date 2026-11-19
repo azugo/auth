@@ -11,6 +11,7 @@ const (
 	TypeLoginSuccess     = "login.success"
 	TypeLoginFailure     = "login.failure"
 	TypeLockout          = "lockout"
+	TypeLoginUnlocked    = "login.unlocked"
 	TypeTokenIssued      = "token.issued"
 	TypeTokenRevoked     = "token.revoked"
 	TypeSessionRevoked   = "session.revoked"

@@ -18,6 +18,10 @@ import (
 
 type stubUsers struct{}
 
+func (stubUsers) LookupLogin(context.Context, string) (string, error) {
+	return "", ErrUserNotFound
+}
+
 func (stubUsers) Authenticate(_ context.Context, _, _ string) (UserInfo, error) {
 	return UserInfo{}, nil
 }

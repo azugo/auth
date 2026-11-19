@@ -20,6 +20,9 @@ type UserProvider interface {
 // PasswordAuthenticator is an optional UserProvider extension for local passwords; without it
 // there is no password login, re-authentication, change, reset or registration.
 type PasswordAuthenticator interface {
+	// LookupLogin returns the ID of the account username signs in as, matching as Authenticate
+	// does, or ErrUserNotFound.
+	LookupLogin(ctx context.Context, username string) (string, error)
 	// Authenticate returns the user behind username and password, or ErrInvalidCredentials. A
 	// username that is a contact address matches only an account holding it verified, as on a
 	// channel with contact verification several accounts may hold it unverified.

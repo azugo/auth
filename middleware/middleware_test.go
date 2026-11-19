@@ -15,6 +15,10 @@ import (
 
 type stubUsers struct{ info auth.UserInfo }
 
+func (s stubUsers) LookupLogin(context.Context, string) (string, error) {
+	return s.info.ID, nil
+}
+
 func (s stubUsers) Authenticate(context.Context, string, string) (auth.UserInfo, error) {
 	return s.info, nil
 }

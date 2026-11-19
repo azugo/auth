@@ -128,6 +128,18 @@ func (f *accountUsers) username(userID string) (string, bool) {
 	return "", false
 }
 
+func (f *accountUsers) LookupLogin(_ context.Context, username string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	u, ok := f.users[username]
+	if !ok {
+		return "", ErrUserNotFound
+	}
+
+	return u.ID, nil
+}
+
 func (f *accountUsers) Authenticate(_ context.Context, username, password string) (UserInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1165,4 +1177,47 @@ func TestPasswordResetStoresInOneTransaction(t *testing.T) {
 
 	// Nothing is announced for a reset the transactor rolled back.
 	qt.Check(t, qt.Equals(resets, 0))
+}
+
+// lockOutAlice spends alice's password-login budget so the correct password is refused.
+func lockOutAlice(t *testing.T, a *Auth) {
+	t.Helper()
+
+	for range 2 {
+		_, err := a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "wrong"})
+		qt.Check(t, qt.Equals(oauthErrorCode(t, err), ErrCodeInvalidGrant))
+	}
+
+	_, err := a.Login(context.Background(), alice(""))
+	qt.Assert(t, qt.Equals(oauthErrorCode(t, err), ErrCodeSlowDown))
+}
+
+func TestPasswordResetClearsLoginLockout(t *testing.T) {
+	cfg := validConfig()
+	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
+
+	a, users := newAccountTestAuthWithConfig(t, cfg, mfaClient(client.MFAPolicyDisabled))
+	lockOutAlice(t, a)
+
+	res := requestReset(t, a, "alice", "email")
+	_, err := confirmReset(a, res.Token, map[string]any{"token": users.awaitDelivery(t)}, "brandnew1")
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "brandnew1"})
+	qt.Check(t, qt.IsNil(err))
+}
+
+func TestPasswordChangeClearsLoginLockout(t *testing.T) {
+	cfg := validConfig()
+	cfg.Throttle = contract.ThrottleConfig{Enabled: true, MaxAttempts: 2, Window: time.Minute, LockoutTTL: time.Minute}
+
+	a, _ := newAccountTestAuthWithConfig(t, cfg, mfaClient(client.MFAPolicyDisabled))
+	res := loginAs(t, a, alice(""))
+	lockOutAlice(t, a)
+
+	_, err := a.ChangePassword(context.Background(), PasswordChangeRequest{Token: res.AccessToken, CurrentPassword: "secret123", NewPassword: "brandnew1"})
+	qt.Assert(t, qt.IsNil(err))
+
+	_, err = a.Login(context.Background(), LoginRequest{Credentials: ClientCredentials{ClientID: "spa"}, Username: "alice", Password: "brandnew1"})
+	qt.Check(t, qt.IsNil(err))
 }

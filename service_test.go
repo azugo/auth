@@ -47,6 +47,15 @@ type fakeUsers struct {
 	passwords map[string]string
 }
 
+func (f fakeUsers) LookupLogin(_ context.Context, username string) (string, error) {
+	u, ok := f.users[username]
+	if !ok {
+		return "", ErrUserNotFound
+	}
+
+	return u.ID, nil
+}
+
 func (f fakeUsers) Authenticate(_ context.Context, username, password string) (UserInfo, error) {
 	pw, ok := f.passwords[username]
 	if !ok || pw != password {

@@ -51,6 +51,10 @@ func init() {
 // extUsers resolves any user ID so externally-created sessions introspect.
 type extUsers struct{}
 
+func (extUsers) LookupLogin(context.Context, string) (string, error) {
+	return "u1", nil
+}
+
 func (extUsers) Authenticate(_ context.Context, _, password string) (auth.UserInfo, error) {
 	if password == "wrong" {
 		return auth.UserInfo{}, auth.ErrInvalidCredentials

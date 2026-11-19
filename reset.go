@@ -469,6 +469,7 @@ func (a *Auth) ResetPassword(ctx context.Context, in PasswordResetConfirmRequest
 		return LoginResult{}, NewOAuthErrorFrom(err)
 	}
 
+	_ = a.UnlockLogin(ctx, info.ID)
 	a.emit(ctx, event.Event{Type: event.TypePasswordReset, UserID: info.ID, ClientID: cl.ID, IP: in.IP, Detail: map[string]any{"method": req.Method}})
 	a.DropFederatedHints(ctx, sessions)
 

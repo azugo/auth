@@ -57,6 +57,19 @@ func NewDemoUsers() *DemoUsers {
 	}
 }
 
+// LookupLogin implements auth.PasswordAuthenticator.
+func (p *DemoUsers) LookupLogin(_ context.Context, username string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	u, ok := p.users[username]
+	if !ok {
+		return "", auth.ErrUserNotFound
+	}
+
+	return u.info.ID, nil
+}
+
 // Authenticate implements auth.PasswordAuthenticator.
 func (p *DemoUsers) Authenticate(_ context.Context, username, password string) (auth.UserInfo, error) {
 	p.mu.Lock()
